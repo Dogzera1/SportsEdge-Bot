@@ -3814,20 +3814,31 @@ async function runAutoAnalysis() {
           const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
           const _matchTimeLolLive = match.time ? fmtMatchTime(match.time) : '';
           const _timeLineLolLive = _matchTimeLolLive ? `🕐 Início: *${_matchTimeLolLive}* (BRT)\n` : '';
-          const tipMsg = `${tipHeader}\n` +
-            `${serieScore}${formatLabel}\n` +
-            (mapaLabel ? `${mapaLabel}\n` : '') +
-            _timeLineLolLive +
-            whyLine +
-            `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
-            bookLineLol +
-            minTakeLine +
-            `📈 EV: *${tipEV}*\n💵 Stake: *${formatStakeWithReais('lol', tipStakeAdj)}* _(${kellyLabel})_\n` +
-            `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
-            `📋 ${match.league}\n` +
-            `_${analysisLabel}_` +
-            `${oddsLabel}${baixaNote}\n\n` +
-            `⚠️ _Aposte com responsabilidade._`;
+          const _liveHeaderLabel = (result.hasLiveStats && liveMapa)
+            ? `ML AUTOMÁTICA — MAPA ${liveMapa}` : `ML AUTOMÁTICA`;
+          const _lolLiveExtras = [];
+          if (mapaLabel) _lolLiveExtras.push(mapaLabel);
+          if (analysisLabel) _lolLiveExtras.push(`_${analysisLabel}_`);
+          if (mlEdgeLabel) _lolLiveExtras.push(String(mlEdgeLabel).replace(/^\s*[—\-:|]\s*/, '').trim());
+          const _lolLiveImminent = [oddsLabel, baixaNote].filter(Boolean)
+            .map(s => String(s).trim()).join('\n');
+          const tipMsg = buildTipMessage({
+            sport: 'lol', marketType: 'ML',
+            sportIconOverride: gameIcon, sportLabelOverride: _liveHeaderLabel,
+            match: { team1: match.team1, team2: match.team2, league: match.league },
+            pick: tipTeam, odd: tipOdd, ev: tipEV,
+            stake: formatStakeWithReais('lol', tipStakeAdj),
+            conf: tipConf, isLive: !!(result.hasLiveStats && liveMapa),
+            matchTime: _matchTimeLolLive || undefined,
+            liveScoreLine: `${serieScore}${formatLabel}\n`,
+            reason: result.tipReason,
+            minTake: minTakeOdds || undefined,
+            lineShopText: bookLineLol || undefined,
+            kellyLabel,
+            extraNotes: _lolLiveExtras.length ? _lolLiveExtras : undefined,
+            imminentNote: _lolLiveImminent || undefined,
+            seed: String(match.id || `${match.team1}|${match.team2}|live`),
+          });
 
           // Semi-auto deeplink — book com odd maior entre preferred.
           const _betBtn = _buildTipBetButton('lol', result.o, _pickSideLs, match, tipStakeAdj, tipOdd);
@@ -3929,13 +3940,16 @@ async function runAutoAnalysis() {
                 const _hStakeRaw = calcKellyWithP(modelP, hOdd, 1/10, { sport: 'lol', confKey: 'BAIXA' });
                 const hStake = String(_hStakeRaw).replace('u', '');
                 if (hStake === '0' || parseFloat(hStake) <= 0) continue; // Kelly negativo / fail-safe
-                const hMsg = `🎮 ♟️ *TIP HANDICAP*\n` +
-                  `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
-                  `🎯 Aposta: *${favTeam}* ${mktName}\n` +
-                  `📈 EV estimado: *+${hEV.toFixed(1)}%*\n` +
-                  `💵 Stake: *${formatStakeWithReais('lol', hStake + 'u')}*\n` +
-                  `🔵 Confiança: BAIXA\n\n` +
-                  `⚠️ _Mercado de handicap — menor liquidez. Aposte com cautela._`;
+                const hMsg = buildTipMessage({
+                  sport: 'lol', marketType: 'HANDICAP',
+                  sportIconOverride: '🎮 ♟️', sportLabelOverride: 'HANDICAP',
+                  match: { team1: match.team1, team2: match.team2, league: match.league },
+                  pick: `${favTeam} ${mktName}`, odd: hOdd.toFixed(2), ev: hEV.toFixed(1),
+                  stake: formatStakeWithReais('lol', hStake + 'u'),
+                  conf: 'BAIXA', isLive: false,
+                  extraNotes: ['_Mercado de handicap — menor liquidez. Aposte com cautela._'],
+                  seed: String(match.id || `${match.team1}|${match.team2}|handicap`),
+                });
 
                 if (isLeagueBlocked('lol', match.league, 'ML')) {
                   log('INFO', 'AUTO', `[BLOCK] lol HANDICAP ${match.league} — suprimido`);
@@ -4307,17 +4321,27 @@ async function runAutoAnalysis() {
             const minTakeOdds = calcMinTakeOdds(tipOdd);
             const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
             const bookLineLolUp = formatLineShopDM(result.o, _pickSideUp, { sport: 'lol', db });
-            const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS (Bo1)*\n` +
-              `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
-              (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
-              `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
-              minTakeLine +
-              bookLineLolUp +
-              `📈 EV: *${tipEV}*\n💵 Stake: *${formatStakeWithReais('lol', tipStakeAdj)}* _(${kellyLabel})_\n` +
-              `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
-              `${imminentNote}${baixaNote}` +
-              `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
-              `⚠️ _Aposte com responsabilidade._`;
+            const _imminentNotes = [];
+            if (imminentNote) _imminentNotes.push(String(imminentNote).trim());
+            if (baixaNote) _imminentNotes.push(String(baixaNote).trim());
+            const tipMsg = buildTipMessage({
+              sport: 'lol', marketType: 'ML',
+              sportIconOverride: gameIcon, sportLabelOverride: 'PRÉ-JOGO ESPORTS (Bo1)',
+              match: { team1: match.team1, team2: match.team2, league: match.league },
+              pick: tipTeam, odd: tipOdd, ev: tipEV,
+              stake: formatStakeWithReais('lol', tipStakeAdj),
+              conf: tipConf, isLive: false,
+              matchTime: match.time ? matchTime : undefined,
+              minTake: minTakeOdds || undefined,
+              lineShopText: bookLineLolUp || undefined,
+              kellyLabel,
+              extraNotes: [
+                mlEdgeLabel ? String(mlEdgeLabel).replace(/^\s*[—\-:|]\s*/, '').trim() : null,
+                '📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_',
+              ].filter(Boolean),
+              imminentNote: _imminentNotes.length ? _imminentNotes.join('\n') : undefined,
+              seed: String(match.id || `${match.team1}|${match.team2}`),
+            });
 
             const _betBtnUp = _buildTipBetButton('lol', result.o, _pickSideUp, match, tipStakeAdj, tipOdd);
             if (_isShadowDispatch(recUp, 'lol')) {
@@ -17474,7 +17498,17 @@ Máximo 200 palavras.`;
       const minTakeOdds = calcMinTakeOdds(tipOdd);
       const minTakeLine = minTakeOdds ? `\n📉 Odd mínima: *${minTakeOdds}*` : '';
       const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2', { sport: 'dota2', db }).trim();
-      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${formatStakeWithReais('dota2', tipStakeAdj)} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
+      const msg = buildTipMessage({
+        sport: 'dota2', marketType: 'ML',
+        match: { team1: match.team1, team2: match.team2, league: `${match.league}${match.format ? ` (${match.format})` : ''}` },
+        pick: tipTeam, odd: tipOdd, ev: tipEV,
+        stake: formatStakeWithReais('dota2', tipStakeAdj),
+        conf: tipConf, isLive,
+        matchTime,
+        minTake: minTakeOdds || undefined,
+        lineShopText: _bookDota ? _bookDota + '\n' : (o.bookmaker ? `🏦 ${o.bookmaker}\n` : undefined),
+        seed: String(match.id || `${match.team1}|${match.team2}|${_dotaMapTag}`),
+      });
 
       const _blockedDota = isLeagueBlocked('dota2', match.league, 'ML');
       if (_blockedDota) {
@@ -17746,14 +17780,19 @@ async function analyzeDotaMapTip(match, token) {
   const _bookDotaMap = formatLineShopDM(match.mapOdds, pickDir, { sport: 'dota2', db });
   const _matchTimeDota = match.time ? fmtMatchTime(match.time) : '';
   const _timeLineDota = _matchTimeDota ? `🕐 Início: *${_matchTimeDota}* (BRT)\n` : '';
-  const msg = `🟥 💰 *TIP DOTA2 MAPA ${mapN} (AO VIVO 🔴)*\n` +
-    `${match.team1} vs ${match.team2} — série ${match.score1||0}-${match.score2||0}\n` +
-    `📋 ${match.league || 'Dota 2'}\n` +
-    _timeLineDota +
-    `Pick: *${pickTeam}* (mapa ${mapN})\n` +
-    `Odd: ${pickOdd.toFixed(2)} | EV: ${pickEv.toFixed(1)}% | Stake: ${stakeAdj}\n` +
-    _bookDotaMap +
-    `Modelo: gold/kill diff + momentum (conf ${(pred.confidence*100).toFixed(0)}%)`;
+  const msg = buildTipMessage({
+    sport: 'dota2', marketType: 'MAP_WINNER',
+    sportIconOverride: '🟥', sportLabelOverride: `DOTA2 MAPA ${mapN}`,
+    match: { team1: match.team1, team2: match.team2, league: match.league || 'Dota 2' },
+    pick: `${pickTeam} (mapa ${mapN})`, odd: pickOdd.toFixed(2),
+    ev: pickEv.toFixed(1), stake: String(stakeAdj),
+    conf: tipConf, isLive: true,
+    matchTime: _matchTimeDota || undefined,
+    liveScoreLine: `📊 Série: *${match.score1||0}-${match.score2||0}*\n`,
+    lineShopText: _bookDotaMap || undefined,
+    extraNotes: [`Modelo: gold/kill diff + momentum (conf ${(pred.confidence*100).toFixed(0)}%)`],
+    seed: String(match.id || `${match.team1}|${match.team2}|map${mapN}`),
+  });
 
   if (isLeagueBlocked('dota2', match.league, 'ML')) {
     log('INFO', 'AUTO-DOTA-MAP', `[BLOCK] dota2/${match.league} mapa ${mapN} — suprimido`);
@@ -18501,17 +18540,27 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           ? `${fight._org ? fight._org + ' — ' : ''}${fight._eventName}`
           : fight.league;
         const _bookMma = formatLineShopDM(fight.odds, norm(tipTeam) === norm(fight.team1) ? 't1' : 't2', { sport: 'mma', db });
-        const tipMsg = `${orgLabel}\n` +
-          `*${fight.team1}* vs *${fight.team2}*\n📋 ${leagueLine}\n` +
-          `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
-          whyLineMma +
-          `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
-          minTakeLine +
-          _bookMma +
-          `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${formatStakeWithReais('mma', tipStakeAdjMma)}* _(${kellyLabelMma})_\n` +
-          `${confEmoji} Confiança: *${_confEffMma}*${bookSourceLine}\n` +
-          `⚠️ _Aposte com responsabilidade._`;
+        const _orgName = /\*TIP ([^*]+)\*/.exec(orgLabel)?.[1] || 'MMA';
+        const _mmaExtra = [];
+        if (recLine) _mmaExtra.push(String(recLine).replace(/^[\s|]+/, '').trim());
+        if (catLine) _mmaExtra.push(String(catLine).replace(/^[\s|]+/, '').trim());
+        const tipMsg = buildTipMessage({
+          sport: 'mma', marketType: 'ML',
+          sportIconOverride: '🥋', sportLabelOverride: _orgName,
+          match: { team1: fight.team1, team2: fight.team2, league: leagueLine },
+          pick: tipTeam, odd: tipOdd, ev: tipEV,
+          stake: formatStakeWithReais('mma', tipStakeAdjMma),
+          conf: _confEffMma, isLive: false,
+          matchTime: fightTime,
+          reason: tipReasonMma,
+          minTake: minTakeOdds || undefined,
+          lineShopText: _bookMma || undefined,
+          extraInfoOnEvLine: `De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%`,
+          kellyLabel: kellyLabelMma,
+          extraNotes: _mmaExtra.length ? _mmaExtra : undefined,
+          imminentNote: bookSourceLine ? String(bookSourceLine).trim() : undefined,
+          seed: String(fight.id || `${fight.team1}|${fight.team2}`),
+        });
 
         // eventName: prioriza org + eventName (ex: "UFC — UFC 305") sobre o "MMA" genérico do TheOddsAPI.
         // Se nenhum resolver achou org (leagueLine vira "MMA" puro), marca como
@@ -20130,19 +20179,21 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }
 
         const _bookTennis = formatLineShopDM(o, norm(tipPlayer) === norm(match.team1) ? 't1' : 't2', { sport: 'tennis', db });
-        const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO 🔴)' : ''}*\n` +
-          `*${match.team1}* vs *${match.team2}*\n` +
-          `📋 ${match.league}${grandSlamBadge}\n` +
-          `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n` +
-          liveScoreLine + '\n' +
-          whyLineTennis +
-          `🎯 Aposta: *${tipPlayer}* @ *${tipOdd}*\n` +
-          minTakeLine +
-          _bookTennis +
-          `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${formatStakeWithReais('tennis', String(tipStake).replace(/u+$/i, ''))}*\n` +
-          `${confEmoji} Confiança: *${tipConf}*\n\n` +
-          `⚠️ _Aposte com responsabilidade._`;
+        const tipMsg = buildTipMessage({
+          sport: 'tennis', marketType: 'ML',
+          match: { team1: match.team1, team2: match.team2, league: `${match.league}${grandSlamBadge}` },
+          pick: tipPlayer, odd: tipOdd, ev: tipEV,
+          stake: formatStakeWithReais('tennis', String(tipStake).replace(/u+$/i, '')),
+          conf: tipConf, isLive: isLiveTennis,
+          matchTime,
+          liveScoreLine: liveScoreLine || undefined,
+          reason: tipReasonTennis,
+          minTake: minTakeOdds || undefined,
+          lineShopText: _bookTennis || undefined,
+          extraInfoOnEvLine: `De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%`,
+          extraNotes: [`${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)}`],
+          seed: String(match.id || `${match.team1}|${match.team2}`),
+        });
 
         const pickIsT1 = norm(tipPlayer) === norm(match.team1);
         const modelPPick = pickIsT1 ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
@@ -21451,18 +21502,22 @@ Máximo 200 palavras.`;
 
         const _pickSideFbDm = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
         const _bookFb = _pickSideFbDm ? formatLineShopDM(match.odds, _pickSideFbDm, { sport: 'football', db }) : '';
-        const tipMsg = `⚽ 💰 *TIP FUTEBOL*\n` +
-          `*${match.team1}* vs *${match.team2}*\n` +
-          `📋 ${match.league}\n` +
-          `🕐 ${matchTime} (BRT)\n\n` +
-          `🎯 Aposta: ${marketLabel} @ *${tipOdd}*\n` +
-          minTakeLine +
-          _bookFb +
-          `📈 EV: *+${tipEV}%* | Mercado: ${probMkt}%${probMdl ? ` | Modelo: ${probMdl}%` : ''}\n` +
-          `💵 Stake: *${formatStakeWithReais('football', tipStake)}*\n` +
-          `${confEmoji} Confiança: *${tipConf}*\n` +
-          (fixtureInfo && homeFormData ? `📊 Forma: ${fmtForm(homeFormData.form)} vs ${fmtForm(awayFormData?.form)}\n` : '') +
-          `\n⚠️ _Aposte com responsabilidade._`;
+        const tipMsg = buildTipMessage({
+          sport: 'football', marketType: tipMarket,
+          match: { team1: match.team1, team2: match.team2, league: match.league },
+          pick: marketLabel, pickPreFormatted: true,
+          odd: tipOdd, ev: tipEV,
+          stake: formatStakeWithReais('football', tipStake),
+          conf: tipConf, isLive: false,
+          matchTime,
+          minTake: minTakeOdds || undefined,
+          lineShopText: _bookFb || undefined,
+          extraInfoOnEvLine: `Mercado: ${probMkt}%${probMdl ? ` | Modelo: ${probMdl}%` : ''}`,
+          extraNotes: (fixtureInfo && homeFormData)
+            ? [`📊 Forma: ${fmtForm(homeFormData.form)} vs ${fmtForm(awayFormData?.form)}`]
+            : undefined,
+          seed: String(match.id || `${match.team1}|${match.team2}`),
+        });
 
         // API-Football removida: manter match_id como eventId do provedor de odds
         const recordMatchId = String(match.id);
