@@ -10991,6 +10991,85 @@ setInterval(load, 10000);
     return;
   }
 
+  // POST /admin/cs-permap-manual?match_id=cs2_ps_X&maps=16-12,8-16,14-16&key=<KEY>
+  // 2026-05-21: manual ingestion de per-map rounds quando HLTV/PS detailed unavailable.
+  // Format maps=N1-N2,N3-N4,... (CSV de "team1Rounds-team2Rounds" per map em order).
+  // Popula match_results.result_meta_json + propaga cross-rows team+date match.
+  // Settle handler em market-tips-shadow lê e settla tips pending automaticamente.
+  if (p === '/admin/cs-permap-manual' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const matchId = String(parsed.query.match_id || '').trim();
+    const mapsRaw = String(parsed.query.maps || '').trim();
+    if (!matchId) { sendJson(res, { error: 'match_id obrigatório' }, 400); return; }
+    if (!mapsRaw) { sendJson(res, { error: 'maps obrigatório (formato: 16-12,8-16,14-16)' }, 400); return; }
+    try {
+      const mr = db.prepare(`SELECT match_id, game, team1, team2, winner, final_score, resolved_at FROM match_results WHERE match_id = ?`).get(matchId);
+      if (!mr) { sendJson(res, { error: 'match_id not found', match_id: matchId }, 404); return; }
+      const mapEntries = mapsRaw.split(',').map(s => s.trim()).filter(Boolean);
+      const maps = [];
+      for (let i = 0; i < mapEntries.length; i++) {
+        const sm = mapEntries[i].match(/^(\d+)\s*-\s*(\d+)$/);
+        if (!sm) { sendJson(res, { error: `map ${i+1} inválido: "${mapEntries[i]}" (esperado N-N)` }, 400); return; }
+        const r1 = parseInt(sm[1], 10);
+        const r2 = parseInt(sm[2], 10);
+        if (!Number.isFinite(r1) || !Number.isFinite(r2)) { sendJson(res, { error: `map ${i+1} parse err` }, 400); return; }
+        maps.push({
+          map: i + 1,
+          mapName: null,
+          rounds_t1: r1,
+          rounds_t2: r2,
+          winner: r1 > r2 ? mr.team1 : r2 > r1 ? mr.team2 : null,
+        });
+      }
+      const payload = {
+        maps,
+        source: 'manual',
+        ingested_at: new Date().toISOString(),
+      };
+      db.prepare(`UPDATE match_results SET result_meta_json = ? WHERE match_id = ?`)
+        .run(JSON.stringify(payload), matchId);
+      // Propaga cross-rows team+date match
+      const propaA = db.prepare(`
+        UPDATE match_results
+        SET result_meta_json = ?
+        WHERE game IN ('cs', 'cs2', 'counterstrike')
+          AND match_id != ?
+          AND (result_meta_json IS NULL OR result_meta_json NOT LIKE '%"maps":%')
+          AND lower(team1) = lower(?) AND lower(team2) = lower(?)
+          AND ABS(julianday(resolved_at) - julianday(?)) < 1.0
+      `).run(JSON.stringify(payload), matchId, mr.team1, mr.team2, mr.resolved_at);
+      const propaB = db.prepare(`
+        UPDATE match_results
+        SET result_meta_json = ?
+        WHERE game IN ('cs', 'cs2', 'counterstrike')
+          AND match_id != ?
+          AND (result_meta_json IS NULL OR result_meta_json NOT LIKE '%"maps":%')
+          AND lower(team1) = lower(?) AND lower(team2) = lower(?)
+          AND ABS(julianday(resolved_at) - julianday(?)) < 1.0
+      `).run(JSON.stringify(payload), matchId, mr.team2, mr.team1, mr.resolved_at);
+      const propagated = (propaA?.changes || 0) + (propaB?.changes || 0);
+      // Fire settle imediato pra tips desta match settlarem agora
+      let settled = 0, skipped = 0;
+      try {
+        const { settleShadowTips } = require('./lib/market-tips-shadow');
+        const s = settleShadowTips(db, { force: true });
+        settled = s.settled || 0;
+        skipped = s.skipped || 0;
+      } catch (_) {}
+      sendJson(res, {
+        ok: true,
+        match_id: matchId,
+        team1: mr.team1, team2: mr.team2,
+        maps: maps.length,
+        propagated,
+        settle: { settled, skipped },
+        sample: maps,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/sync-valorant-per-map-rounds?days=14&limit=30&dry=1&key=<ADMIN_KEY>
   // 2026-05-21: ingestion VLR.gg per-map rounds (mirror sync-cs-per-map-rounds).
   // Mesma estrutura result_meta_json.maps[] — settle handler agnóstico ao source.
