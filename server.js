@@ -15475,6 +15475,113 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/pnl-granular: breakdown multi-dim de tips reais (P1 granularity).
+  // Aggrega ML real (tips) + MT dispatched (market_tips_shadow). Tudo BRT-aware.
+  // GET /admin/pnl-granular?days=30&minN=3&key=<KEY>
+  if (p === '/admin/pnl-granular' && req.method === 'GET') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const minN = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '3', 10) || 3));
+    try {
+      // Unified CTE: ML real + MT dispatched. side normalizado, bucket de odd.
+      const cutoffMod = `-${days} days`;
+      const tipsRows = db.prepare(`
+        SELECT 'ML' AS kind,
+               sport,
+               UPPER(COALESCE(market_type, 'ML')) AS market,
+               COALESCE(tip_participant, '') AS side,
+               odds,
+               COALESCE(profit_reais, 0) AS profit,
+               CAST(REPLACE(REPLACE(stake, 'u', ''), 'U', '') AS REAL) AS stake,
+               result,
+               event_name AS league
+          FROM tips
+         WHERE COALESCE(is_shadow, 0) = 0
+           AND COALESCE(archived, 0) = 0
+           AND result IN ('win', 'loss', 'void')
+           AND DATE(settled_at, '-3 hours') >= DATE('now', '-3 hours', ?)
+      `).all(cutoffMod);
+      const mtRows = db.prepare(`
+        SELECT 'MT' AS kind,
+               sport,
+               UPPER(market) AS market,
+               COALESCE(side, '') AS side,
+               odd AS odds,
+               COALESCE(profit_units, 0) AS profit,
+               COALESCE(stake_units, 0) AS stake,
+               result,
+               league
+          FROM market_tips_shadow
+         WHERE result IN ('win', 'loss', 'void')
+           AND admin_dm_sent_at IS NOT NULL
+           AND DATE(settled_at, '-3 hours') >= DATE('now', '-3 hours', ?)
+      `).all(cutoffMod);
+      const rows = [...tipsRows, ...mtRows];
+
+      const bucketOdd = (o) => {
+        const n = parseFloat(o);
+        if (!Number.isFinite(n) || n <= 0) return '?';
+        if (n < 1.6) return '<1.6';
+        if (n < 2.0) return '1.6-2.0';
+        if (n < 2.5) return '2.0-2.5';
+        if (n < 4.0) return '2.5-4.0';
+        return '>4.0';
+      };
+
+      const agg = (key) => {
+        const map = new Map();
+        for (const r of rows) {
+          const k = key(r);
+          if (!k) continue;
+          const e = map.get(k) || { n: 0, w: 0, l: 0, v: 0, profit: 0, stake: 0 };
+          e.n++;
+          e.profit += r.profit || 0;
+          e.stake += r.stake || 0;
+          if (r.result === 'win') e.w++;
+          else if (r.result === 'loss') e.l++;
+          else if (r.result === 'void') e.v++;
+          map.set(k, e);
+        }
+        const arr = [];
+        for (const [k, e] of map) {
+          if (e.n < minN) continue;
+          const settled = e.w + e.l;
+          arr.push({
+            key: k, n: e.n, w: e.w, l: e.l, v: e.v,
+            profit: +e.profit.toFixed(2),
+            stake: +e.stake.toFixed(2),
+            roi_pct: e.stake > 0 ? +(e.profit / e.stake * 100).toFixed(1) : null,
+            hit_pct: settled > 0 ? +(e.w / settled * 100).toFixed(0) : null,
+          });
+        }
+        arr.sort((a, b) => b.profit - a.profit);
+        return arr;
+      };
+
+      const by_sport = agg(r => r.sport);
+      const by_sport_kind = agg(r => `${r.sport}|${r.kind}`);
+      const by_sport_market = agg(r => `${r.sport}|${r.market}`);
+      const by_sport_market_side = agg(r => `${r.sport}|${r.market}|${r.side}`);
+      const by_sport_market_bucket = agg(r => `${r.sport}|${r.market}|${bucketOdd(r.odds)}`);
+      const by_sport_market_league = agg(r => `${r.sport}|${r.market}|${(r.league || '').slice(0, 60)}`);
+
+      sendJson(res, {
+        ok: true, days, minN,
+        n_total: rows.length,
+        n_ml: tipsRows.length,
+        n_mt: mtRows.length,
+        by_sport,
+        by_sport_kind,
+        by_sport_market,
+        by_sport_market_side,
+        by_sport_market_bucket,
+        by_sport_market_league,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/alerts: lista alerts persistidos (analytics_alerts).
   // GET /admin/alerts?status=open&days=7&key=<ADMIN_KEY>
   if (p === '/admin/alerts' && (req.method === 'GET' || req.method === 'POST')) {
