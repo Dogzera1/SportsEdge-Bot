@@ -3971,10 +3971,12 @@ async function runAutoAnalysis() {
                 if (_isShadowDispatch(recHa, 'lol')) {
                   log('INFO', 'AUTO', `[SHADOW] LoL HANDICAP ${favTeam} @ ${hOdd} — DM suprimida${recHa?.autoShadowed ? ' (auto-shadow)' : ''}`);
                 } else {
+                  let _dmOkLolHa = false;
                   for (const [userId, prefs] of subscribedUsers) {
                     if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
-                    try { await sendDM(resolveTipsToken('esports'), userId, hMsg); } catch(_) {}
+                    try { await sendDM(resolveTipsToken('esports'), userId, hMsg); _dmOkLolHa = true; } catch(_) {}
                   }
+                  if (_dmOkLolHa) _markDmDispatched(recHa.tipId);
                 }
                 break;
               }
@@ -4316,11 +4318,16 @@ async function runAutoAnalysis() {
             if (_isShadowDispatch(recUp, 'lol')) {
               log('INFO', 'AUTO-TIP', `[SHADOW] LoL upcoming ${tipTeam} @ ${tipOdd} — DM suprimida${recUp?.autoShadowed ? ' (auto-shadow)' : ''}`);
             } else {
+              let _dmOkLolUp = false;
               for (const [userId, prefs] of subscribedUsers) {
                 if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
-                try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtnUp || undefined); }
+                try {
+                  await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtnUp || undefined);
+                  _dmOkLolUp = true;
+                }
                 catch(e) { if (e.message?.includes('403')) _safeUnsub(userId); }
               }
+              if (_dmOkLolUp) _markDmDispatched(recUp.tipId);
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
             log('INFO', 'AUTO-TIP', `Esports upcoming: ${tipTeam} @ ${tipOdd}`);
@@ -17555,10 +17562,12 @@ Máximo 200 palavras.`;
           log('INFO', 'AUTO-DOTA', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
         } else {
           const _betBtnDota = _buildTipBetButton('dota2', o, isT1bet ? 't1' : 't2', match, tipStakeAdj, tipOdd);
+          let _dmOkDota = false;
           for (const [uid, sports] of subscribedUsers) {
             if (!sports.has('esports')) continue;
-            await sendDM(token, uid, msg, _betBtnDota || undefined).catch(() => {});
+            try { await sendDM(token, uid, msg, _betBtnDota || undefined); _dmOkDota = true; } catch (_) {}
           }
+          if (_dmOkDota) _markDmDispatched(rec.tipId);
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
@@ -17785,10 +17794,12 @@ async function analyzeDotaMapTip(match, token) {
     if (_isShadowDispatch(rec, 'dota2')) {
       log('INFO', 'AUTO-DOTA-MAP', `[SHADOW] MAPA ${mapN}: ${pickTeam} @ ${pickOdd} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
     } else {
+      let _dmOkDotaMap = false;
       for (const [uid, sports] of subscribedUsers) {
         if (!sports.has('esports')) continue;
-        await sendDM(token, uid, msg).catch(() => {});
+        try { await sendDM(token, uid, msg); _dmOkDotaMap = true; } catch (_) {}
       }
+      if (_dmOkDotaMap) _markDmDispatched(rec.tipId);
     }
     log('INFO', 'AUTO-DOTA-MAP', `TIP MAPA ${mapN}: ${pickTeam} @ ${pickOdd} (EV ${pickEv.toFixed(1)}%, conf ${pred.confidence})`);
     analyzedDota.set(mapKey, { ts: now, tipSent: true });
@@ -18574,10 +18585,12 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         }
 
         const _betBtnMma = _buildTipBetButton('mma', fight.odds, _pickSideMma, fight, tipStake, tipOdd);
+        let _dmOkMma = false;
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'mma')) continue;
-          try { await sendDM(token, userId, tipMsg, _betBtnMma || undefined); } catch(_) {}
+          try { await sendDM(token, userId, tipMsg, _betBtnMma || undefined); _dmOkMma = true; } catch(_) {}
         }
+        if (_dmOkMma) _markDmDispatched(rec.tipId);
         analyzedMma.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
@@ -20221,10 +20234,12 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         // (_tennisShadowOnly) + bloqueia server-side flip.
         const _tennisShadowDispatched = _tennisMlShadow || _isShadowDispatch(rec, 'tennis');
         if (!_tennisShadowDispatched) {
+          let _dmOkTen = false;
           for (const [userId, prefs] of subscribedUsers) {
             if (!_shouldDispatchToSubscriber(userId, prefs, 'tennis')) continue;
-            try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
+            try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); _dmOkTen = true; } catch(_) {}
           }
+          if (_dmOkTen) _markDmDispatched(rec.tipId);
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
         const shadowReason = _tennisMlShadow
@@ -21668,10 +21683,12 @@ Máximo 200 palavras.`;
         }
 
         const _betBtnFb = _buildTipBetButton('football', match.odds, _pickSideFb, match, tipStakeAdjFb, tipOdd);
+        let _dmOkFb = false;
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'football')) continue;
-          try { await sendDM(token, userId, tipMsg, _betBtnFb || undefined); } catch(_) {}
+          try { await sendDM(token, userId, tipMsg, _betBtnFb || undefined); _dmOkFb = true; } catch(_) {}
         }
+        if (_dmOkFb) _markDmDispatched(recFb.tipId);
         analyzedFootball.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
@@ -21934,10 +21951,12 @@ async function pollTableTennis(runOnce = false) {
           continue;
         }
         const _betBtnTt = _buildTipBetButton('tabletennis', match.odds, direction, match, String(stakeAdj), pickOdd);
+        let _dmOkTt = false;
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'tabletennis')) continue;
-          try { await sendDM(token, userId, msg, _betBtnTt || undefined); } catch (_) {}
+          try { await sendDM(token, userId, msg, _betBtnTt || undefined); _dmOkTt = true; } catch (_) {}
         }
+        if (_dmOkTt) _markDmDispatched(rec.tipId);
         log('INFO', 'AUTO-TT', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
       }
@@ -22956,10 +22975,12 @@ Máximo 200 palavras.`;
           `⚠️ _Aposte com responsabilidade._`;
 
         const _betBtnCs = _buildTipBetButton('cs', match.odds, direction, match, String(stakeAdj), pickOdd);
+        let _dmOkCs = false;
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'cs')) continue;
-          try { await sendDM(token, userId, msg, _betBtnCs || undefined); } catch (_) {}
+          try { await sendDM(token, userId, msg, _betBtnCs || undefined); _dmOkCs = true; } catch (_) {}
         }
+        if (_dmOkCs) _markDmDispatched(rec.tipId);
         log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         // CLV delayed capture — match CS termina em ~30-40min, capture odds T+3min
         scheduleLiveClvCapture('cs', match, pickTeam, match.id, pickOdd);
@@ -23774,10 +23795,12 @@ Máximo 180 palavras.`;
           `⚠️ _Aposte com responsabilidade._`;
 
         const _betBtnVal = _buildTipBetButton('valorant', match.odds, direction, match, String(stakeAdj), pickOdd);
+        let _dmOkVal = false;
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'valorant')) continue;
-          try { await sendDM(token, userId, msg, _betBtnVal || undefined); } catch (_) {}
+          try { await sendDM(token, userId, msg, _betBtnVal || undefined); _dmOkVal = true; } catch (_) {}
         }
+        if (_dmOkVal) _markDmDispatched(rec.tipId);
         log('INFO', 'AUTO-VAL', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         scheduleLiveClvCapture('valorant', match, pickTeam, match.id, pickOdd);
         await new Promise(r => setTimeout(r, 3000));
@@ -24118,10 +24141,12 @@ async function runAutoDarts() {
             continue;
           }
           const _betBtnDarts = _buildTipBetButton('darts', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
+          let _dmOkDarts = false;
           for (const [userId, prefs] of subscribedUsers) {
             if (!_shouldDispatchToSubscriber(userId, prefs, 'darts')) continue;
-            try { await sendDM(dartsConfig.token, userId, tipMsg, _betBtnDarts || undefined); } catch(_) {}
+            try { await sendDM(dartsConfig.token, userId, tipMsg, _betBtnDarts || undefined); _dmOkDarts = true; } catch(_) {}
           }
+          if (_dmOkDarts) _markDmDispatched(rec.tipId);
           log('INFO', 'AUTO-DARTS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -24379,10 +24404,12 @@ async function runAutoSnooker() {
             continue;
           }
           const _betBtnSn = _buildTipBetButton('snooker', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
+          let _dmOkSn = false;
           for (const [userId, prefs] of subscribedUsers) {
             if (!_shouldDispatchToSubscriber(userId, prefs, 'snooker')) continue;
-            try { await sendDM(snookerConfig.token, userId, tipMsg, _betBtnSn || undefined); } catch(_) {}
+            try { await sendDM(snookerConfig.token, userId, tipMsg, _betBtnSn || undefined); _dmOkSn = true; } catch(_) {}
           }
+          if (_dmOkSn) _markDmDispatched(rec.tipId);
           log('INFO', 'AUTO-SNOOKER', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -24806,10 +24833,12 @@ async function runAutoBasket() {
       if (_isShadowDispatch(rec, 'basket')) {
         log('INFO', 'AUTO-BASKET', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
       } else {
+        let _dmOkBk = false;
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'basket')) continue;
-          try { await sendDM(basketConfig.token, userId, tipMsg); } catch (_) {}
+          try { await sendDM(basketConfig.token, userId, tipMsg); _dmOkBk = true; } catch (_) {}
         }
+        if (_dmOkBk) _markDmDispatched(rec.tipId);
       }
     }
     if (!_drainedBasket && _hadLiveBasket) _livePhaseExit('basket');
