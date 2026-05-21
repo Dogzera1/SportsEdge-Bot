@@ -10142,6 +10142,16 @@ async function _runAiShadow(sport, ctx, opts = {}) {
         }
       } catch (_) { /* _leagueTier throws em sport desconhecido → não bloqueia */ }
     }
+    // 5. DeepSeek backoff cross-path — main LoL AI path (bot.js:11247+) seta
+    // __deepseekBackoffUntil em 429 mas shadow ignorava → burst 7 football matches
+    // todos disparam mesmo após primeiro 429 (audit log 2026-05-21 11:48-11:49Z).
+    // Compartilha state global. Mesmo TTL (default DEEPSEEK_BACKOFF_MS=180000=3min).
+    if (Date.now() < (global.__deepseekBackoffUntil || 0)) {
+      const remainMs = (global.__deepseekBackoffUntil || 0) - Date.now();
+      try { _metrics.incr('ai_shadow_skip_backoff', { sport }); } catch (_) {}
+      log('INFO', TAG, `skip DeepSeek backoff (${Math.round(remainMs/1000)}s restante): ${match.team1} vs ${match.team2}`);
+      return;
+    }
     // Reserva slot — incrementa cooldown + daily BEFORE call (atomico, evita double-count em fire-and-forget)
     if (match?.id) _aiShadowMatchCooldown.set(`${sport}|${match.id}`, Date.now());
     {
@@ -10150,6 +10160,7 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       _aiShadowDailyCount.set(dk, (_aiShadowDailyCount.get(dk) || 0) + 1);
     }
     log('INFO', TAG, `entry: ${match.team1} vs ${match.team2} promptLen=${prompt.length}`);
+    global.__deepseekLastCallTs = Date.now(); // shared cross-path (mirror line 11381)
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
@@ -10157,6 +10168,15 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       sport,
       shadowBypass: true,
     });
+    // 2026-05-21: trigger global backoff em 429 — mirror main path bot.js:11388.
+    // Cross-sport: 429 em football shadow seta backoff que pausa todos os outros
+    // sports (LoL/Dota/Tennis/MMA/CS/VAL/Football) por DEEPSEEK_BACKOFF_MS (3min).
+    if (resp?.__status === 429 || String(resp?.error || '').toLowerCase().includes('rate')) {
+      const ttl = Math.max(60 * 1000, parseInt(process.env.DEEPSEEK_BACKOFF_MS || '180000', 10) || 180000);
+      global.__deepseekBackoffUntil = Date.now() + ttl;
+      log('WARN', TAG, `DeepSeek 429: backoff cross-path ${Math.round(ttl/60000)}min ativado`);
+      try { _metrics.incr('ai_shadow_429', { sport }); } catch (_) {}
+    }
     log('INFO', TAG, `claude resp: blocked=${resp?.blocked} status=${resp?.__status} provider=${resp?.provider} hasContent=${!!resp?.content?.[0]?.text} err=${resp?.error || '-'}`);
     const text = resp?.content?.map(b => b.text || '').join('') || '';
     if (!text) {
