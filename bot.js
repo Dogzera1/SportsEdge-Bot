@@ -3669,7 +3669,7 @@ async function runAutoAnalysis() {
             continue;
           }
           // Global Risk Manager (cross-sport)
-          const desiredUnits = parseFloat(String(tipStake).replace('u', '')) || 0;
+          const desiredUnits = parseFloat(String(tipStake).replace('u', '').replace(',','.')) || 0;
           const riskAdj = await applyGlobalRisk('lol', desiredUnits, match.leagueSlug || match.league);
           if (!riskAdj.ok) { log('INFO', 'RISK', `lol: bloqueada (${riskAdj.reason})`); continue; }
           const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
@@ -4220,7 +4220,7 @@ async function runAutoAnalysis() {
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
             // Risk Manager cross-sport (faltava no upcoming — bug fix mid-Abr 2026)
-            const desiredUnitsUp = parseFloat(String(tipStake).replace('u', '')) || 0;
+            const desiredUnitsUp = parseFloat(String(tipStake).replace('u', '').replace(',','.')) || 0;
             const riskAdjUp = await applyGlobalRisk('lol', desiredUnitsUp, match.leagueSlug || match.league);
             if (!riskAdjUp.ok) {
               log('INFO', 'RISK', `lol upcoming: bloqueada (${riskAdjUp.reason})`);
@@ -7053,7 +7053,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     let trustInfo = null;
     try {
       const { applyTrustToStake } = require('./lib/league-trust');
-      const stakeNum = typeof stake === 'number' ? stake : parseFloat(String(stake || '1').replace('u','')) || 1;
+      const stakeNum = typeof stake === 'number' ? stake : parseFloat(String(stake || '1').replace('u','').replace(',','.')) || 1;
       const t = applyTrustToStake(db, sport, match.league, market_type, stakeNum);
       if (t.applied) {
         log('INFO', 'LEAGUE-TRUST', `${sport}/${match.league}/${market_type}: trust=${t.trust} (n=${t.info.n} ROI=${t.info.roi}% src=${t.info.source}) stake ${stakeNum}u → ${t.stakeFinal}u`);
@@ -7079,7 +7079,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       const _stakeMult = parseFloat(process.env[_stakeKey]);
       if (Number.isFinite(_stakeMult) && _stakeMult > 0 && _stakeMult <= 2.0) {
         const stakeNumS = typeof stakeAdjusted === 'number' ? stakeAdjusted
-          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
+          : parseFloat(String(stakeAdjusted || '1').replace('u','').replace(',','.')) || 1;
         const stakeNew = Math.round(stakeNumS * _stakeMult * 100) / 100;
         log('INFO', 'MT-STAKE-MULT', `${sport}/${marketKey}: ${stakeNumS}u × ${_stakeMult} = ${stakeNew}u (env ${_stakeKey})`);
         stakeAdjusted = stakeNew;
@@ -7102,7 +7102,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       const tierMult = _mtTierClassifier.getTierStakeMult(sport, tier);
       if (Number.isFinite(tierMult) && tierMult !== 1.0) {
         const stakeNumT = typeof stakeAdjusted === 'number' ? stakeAdjusted
-          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
+          : parseFloat(String(stakeAdjusted || '1').replace('u','').replace(',','.')) || 1;
         // Snap em 0.05u step.
         const stakeNewT = Math.round(stakeNumT * tierMult * 20) / 20;
         log('INFO', 'MT-TIER-MULT', `${sport}/${match.league}/${tier}: ${stakeNumT}u × ${tierMult} = ${stakeNewT}u`);
@@ -7123,7 +7123,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     if (!/^(1|true|yes)$/i.test(String(process.env.MT_GLOBAL_RISK_DISABLED || ''))) {
       try {
         const stakeNumGR = typeof stakeAdjusted === 'number' ? stakeAdjusted
-          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
+          : parseFloat(String(stakeAdjusted || '1').replace('u','').replace(',','.')) || 1;
         const riskAdj = await applyGlobalRisk(sport, stakeNumGR, match.league);
         if (!riskAdj.ok) {
           log('INFO', 'MT-RISK-BLOCK', `${sport}/${marketKey}/${sideKey}: ${riskAdj.reason} — skip dispatch`);
@@ -7189,7 +7189,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       // market_mult + tier_mult), DB gravava ajustado → divergência reportada
       // entre Telegram message e dashboard.
       const stakeFinalNum = typeof stakeAdjusted === 'number' ? stakeAdjusted
-        : parseFloat(String(stakeAdjusted || '1').replace('u','')) || null;
+        : parseFloat(String(stakeAdjusted || '1').replace('u','').replace(',','.')) || null;
       return { tipId: rec.tipId, stakeFinal: stakeFinalNum };
     }
     return null;
@@ -15487,7 +15487,7 @@ async function poll(token, sport) {
                   const stakeArg = text.split(/\s+/)[1];
                   let realStake = parseFloat(String(stakeArg || '').replace('u', '').replace(',', '.'));
                   if (!Number.isFinite(realStake) || realStake < 0) {
-                    realStake = parseFloat(String(tip.stake || '1').replace('u', '')) || 1;
+                    realStake = parseFloat(String(tip.stake || '1').replace('u', '').replace(',','.')) || 1;
                   }
                   try {
                     db.prepare(`INSERT OR REPLACE INTO tip_user_action (tip_id, action, real_stake_units, ts) VALUES (?, 'placed', ?, datetime('now'))`).run(tip.id, realStake);
@@ -17391,7 +17391,7 @@ Máximo 200 palavras.`;
         : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'dota2' });
       if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); _dotaCycleSkips.kelly_neg++; await _sleep(2000); continue; }
 
-      const riskAdj = await applyGlobalRisk('dota2', parseFloat(String(tipStake).replace('u', '')) || 0, match.league);
+      const riskAdj = await applyGlobalRisk('dota2', parseFloat(String(tipStake).replace('u', '').replace(',','.')) || 0, match.league);
       if (!riskAdj.ok) { log('INFO', 'RISK', `dota2: bloqueada (${riskAdj.reason})`); continue; }
       const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
 

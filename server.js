@@ -4861,7 +4861,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
             const { getSportUnitValue } = require('./lib/sport-unit');
             const bk = stmts.getBankroll.get(sport);
             const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-            const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+            const su = parseFloat(String(tip.stake || '1').replace('u','').replace(',','.')) || 1;
             return parseFloat((su * uv).toFixed(2));
           })();
       const odds = parseFloat(tip.odds) || 1;
@@ -9863,7 +9863,7 @@ setInterval(load, 10000);
         const { getSportUnitValue } = require('./lib/sport-unit');
         const bk = stmts.getBankroll.get('tennis');
         const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-        const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+        const su = parseFloat(String(tip.stake || '1').replace('u','').replace(',','.')) || 1;
         const stakeR = (Number.isFinite(Number(tip.stake_reais)) && Number(tip.stake_reais) > 0)
           ? Number(tip.stake_reais)
           : parseFloat((su * uv).toFixed(2));
@@ -9965,7 +9965,7 @@ setInterval(load, 10000);
           const { getSportUnitValue } = require('./lib/sport-unit');
           const bk = stmts.getBankroll.get('tennis');
           const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-          const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+          const su = parseFloat(String(tip.stake || '1').replace('u','').replace(',','.')) || 1;
           const stakeR = (Number.isFinite(Number(tip.stake_reais)) && Number(tip.stake_reais) > 0)
             ? Number(tip.stake_reais)
             : parseFloat((su * uv).toFixed(2));
@@ -10229,7 +10229,7 @@ setInterval(load, 10000);
           const { getSportUnitValue } = require('./lib/sport-unit');
           const bk = stmts.getBankroll.get(sport);
           const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-          const su = parseFloat(String(tip.stake || '1').replace('u', '')) || 1;
+          const su = parseFloat(String(tip.stake || '1').replace('u', '').replace(',','.')) || 1;
           // SEMPRE recalcula via tier (ignora stake_reais stored pre-computado com unit errada)
           const stakeR = parseFloat((su * uv).toFixed(2));
           const odds = parseFloat(tip.odds) || 1;
@@ -16022,7 +16022,7 @@ load();
               const { getSportUnitValue } = require('./lib/sport-unit');
               const bk = stmts.getBankroll.get(sport);
               const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-              const su = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+              const su = parseFloat(String(t.stake || '1').replace('u','').replace(',','.')) || 1;
               return parseFloat((su * uv).toFixed(2));
             } catch (_) { return 1; }
           })();
@@ -23955,7 +23955,7 @@ load();
         const cover = (sideGames + line) > oppGames;
         const result = cover ? 'win' : 'loss';
         const odds = parseFloat(t.odds) || 1;
-        const stakeU = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+        const stakeU = parseFloat(String(t.stake || '1').replace('u','').replace(',','.')) || 1;
         // Stake_reais via tier
         let stakeR = stakeU;
         try {
@@ -26885,7 +26885,7 @@ load();
           const bk = stmts.getBankroll.get(sport);
           if (bk) {
             const unitValue = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
-            const stakeUnits = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+            const stakeUnits = parseFloat(String(t.stake || '1').replace('u','').replace(',','.')) || 1;
             _stakeReaisPre = parseFloat((stakeUnits * unitValue).toFixed(2));
           }
         } catch(_) {}
@@ -32011,7 +32011,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
               const { getSportUnitValue } = require('./lib/sport-unit');
               const bk = stmts.getBankroll.get(sport);
               const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-              const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+              const su = parseFloat(String(tip.stake || '1').replace('u','').replace(',','.')) || 1;
               return parseFloat((su * uv).toFixed(2));
             })();
             const odds = parseFloat(tip.odds) || 1;
@@ -32704,7 +32704,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const unitValue = (bk.initial_banca || 100) / 100;
         const backfill = db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?");
         for (const t of orphans) {
-          const stakeR = t.stake_reais || parseFloat(((parseFloat(String(t.stake || '1').replace('u','')) || 1) * unitValue).toFixed(2));
+          const stakeR = t.stake_reais || parseFloat(((parseFloat(String(t.stake || '1').replace('u','').replace(',','.')) || 1) * unitValue).toFixed(2));
           const odds = parseFloat(t.odds) || 1;
           const profitR = t.result === 'win'
             ? parseFloat((stakeR * (odds - 1)).toFixed(2))
