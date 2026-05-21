@@ -3935,7 +3935,15 @@ async function runAutoAnalysis() {
                   { gate: 'h_odd_max', passed: true, value: hOdd, threshold: 4.00 },
                   { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(lol,ML)=false' },
                 ];
-                await serverPost('/record-tip', {
+                // 2026-05-21 fix: capture rec + tipId guard + _isShadowDispatch (P5).
+                // Antes: fire-and-forget /record-tip + isBucketShadowed só lia env.
+                // Server podia rejeitar via badRequest/dedup/news-impact mas DM
+                // disparava igual. _isShadowDispatch checa rec.autoShadowed (server
+                // rotation) + rec.isShadow + isBucketShadowed (fallback).
+                // TODO próxima sessão: migrar stake (hEV/100)*10 pra calcKellyWithP
+                // — modelP=cleanSweep não é P(handicap covered), análise mais profunda
+                // necessária (memory project_lol_kills_calibration_2026_04_25 pattern).
+                const recHa = await serverPost('/record-tip', {
                   matchId: canonicalMatchId('esports', String(match.id) + '_H'), eventName: match.league,
                   p1: match.team1, p2: match.team2, tipParticipant: favTeam,
                   odds: String(hOdd), ev: String(hEV.toFixed(1)), stake: String(hStake),
@@ -3945,13 +3953,21 @@ async function runAutoAnalysis() {
                   gates_evaluated: _mlGatesLolH,
                 }, 'lol');
 
-                if (!isBucketShadowed('lol')) {
+                if (!recHa?.tipId) {
+                  const why = (recHa?.reason || recHa?.error)
+                    ? ` (${recHa.reason || recHa.error}${recHa?.__status ? ' [HTTP ' + recHa.__status + ']' : ''})`
+                    : '';
+                  log(recHa?.skipped ? 'INFO' : 'WARN', 'AUTO', `LoL HANDICAP record-tip falhou para ${favTeam} @ ${hOdd}${why} — tip abortada`);
+                  break;
+                }
+
+                if (_isShadowDispatch(recHa, 'lol')) {
+                  log('INFO', 'AUTO', `[SHADOW] LoL HANDICAP ${favTeam} @ ${hOdd} — DM suprimida${recHa?.autoShadowed ? ' (auto-shadow)' : ''}`);
+                } else {
                   for (const [userId, prefs] of subscribedUsers) {
                     if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
                     try { await sendDM(resolveTipsToken('esports'), userId, hMsg); } catch(_) {}
                   }
-                } else {
-                  log('INFO', 'AUTO', `[SHADOW] LoL HANDICAP ${favTeam} — DM suprimida`);
                 }
                 break;
               }
