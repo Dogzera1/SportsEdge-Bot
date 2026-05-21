@@ -27646,6 +27646,23 @@ load();
             }
           } catch (e) { log('WARN', 'LINE-SHOP', `Fail compute: ${e.message}`); }
         }
+        // 2026-05-21: fallback direto pra pinnacle_odd quando caller não passa
+        // lineShopOdds. MT path (recordMarketTipAsRegular) usa Pinnacle como
+        // anchor de pricing — tip.odd JÁ é o Pinnacle. Sem este path, pinnacle_odd
+        // ficava NULL → fireAutoBetHook fallback opts.expectedOdd (best-book
+        // inflado em paths que passam lineShopOdds com bestBook != Pinnacle).
+        // Cross-sport: aplica a qualquer payload com t.pinnacleOdd direto.
+        if (result?.lastInsertRowid && t.pinnacleOdd != null) {
+          try {
+            const _pinDirect = parseFloat(t.pinnacleOdd);
+            if (Number.isFinite(_pinDirect) && _pinDirect > 1) {
+              const _existing = db.prepare('SELECT pinnacle_odd FROM tips WHERE id = ?').get(result.lastInsertRowid);
+              if (_existing && _existing.pinnacle_odd == null) {
+                db.prepare('UPDATE tips SET pinnacle_odd = ? WHERE id = ?').run(_pinDirect, result.lastInsertRowid);
+              }
+            }
+          } catch (e) { log('DEBUG', 'PIN-ODD-DIRECT', `err: ${e.message}`); }
+        }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
         // Metrics: counter por sport + isLive + isShadow.
         try {

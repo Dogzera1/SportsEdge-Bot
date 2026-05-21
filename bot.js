@@ -7247,6 +7247,10 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       p1: match.team1, p2: match.team2,
       tipParticipant: participant,
       odds: tip.odd,
+      // 2026-05-21: MT pricing usa Pinnacle como anchor → tip.odd JÁ é
+      // o Pinnacle odd. Persistir explícito em tips.pinnacle_odd via /record-tip
+      // pra fireAutoBetHook usar como expectedOdd (P0-1 fix 812830b).
+      pinnacleOdd: parseFloat(tip.odd) || null,
       ev: tip.ev,
       stake: stakeStr,
       confidence: conf,
