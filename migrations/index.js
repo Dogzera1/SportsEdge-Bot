@@ -3227,6 +3227,39 @@ const migrations = [
       } catch (e) { console.log(`[mig 121] dm_dispatched_at: ${e.message}`); }
     },
   },
+  {
+    id: '122_match_results_result_meta_json',
+    up(db) {
+      // 2026-05-21: stat markets sem handler (totalAces/totalDoubleFaults/duration/
+      // firstBlood/totalKills series + per-map rounds CS/Val) precisam stat data
+      // NÃO ingerida em match_results (schema atual: winner, final_score só).
+      //
+      // Adicionar result_meta_json TEXT column pra payload arbitrário ingerido
+      // ao settle:
+      //   football: { team1_goals, team2_goals, btts, half_time, ... }
+      //   tennis: { aces_t1, aces_t2, df_t1, df_t2, duration_min, ... }
+      //   cs/val: { maps: [{ map_num, rounds_t1, rounds_t2, duration_s }, ...] }
+      //   dota2/lol: { games: [{ map_num, kills_t1, kills_t2, duration_s, first_blood_team }] }
+      //
+      // Ingestion paths a atualizar próximas sessões:
+      //   - Football: api-football scoreboard tem team_goals
+      //   - Tennis: Sofascore stats endpoint tem aces/df per player
+      //   - CS: HLTV scoreboard endpoint tem rounds per-map
+      //   - Dota/LoL: PandaScore games array + Riot livestats
+      //
+      // Idempotent via PRAGMA check.
+      try {
+        const cols = db.prepare(`PRAGMA table_info(match_results)`).all();
+        const hasCol = cols.some(c => c.name === 'result_meta_json');
+        if (!hasCol) {
+          db.exec(`ALTER TABLE match_results ADD COLUMN result_meta_json TEXT`);
+          console.log('[mig 122] added match_results.result_meta_json column');
+        } else {
+          console.log('[mig 122] match_results.result_meta_json already exists, skipping');
+        }
+      } catch (e) { console.log(`[mig 122] result_meta_json: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
