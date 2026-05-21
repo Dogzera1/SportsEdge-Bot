@@ -22287,7 +22287,7 @@ async function pollCs(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs2', 'BAIXA', null, match.league), { sport: 'cs' });
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs', 'BAIXA', null, match.league), { sport: 'cs' });
                       if (t.correlationDiscount > 0 && typeof stake === 'number') {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
@@ -22424,7 +22424,7 @@ async function pollCs(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs2', 'BAIXA', null, match.league), { sport: 'cs' });
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs', 'BAIXA', null, match.league), { sport: 'cs' });
                       if (!(stake > 0)) continue;
                       const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
