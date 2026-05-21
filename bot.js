@@ -5221,18 +5221,48 @@ async function notifySettledTips() {
       // 2026-05-20: tip settle com foto custom — win=green/loss=red. Photo URL
       // serve do server.js static (/img/tip_win.jpg, /img/tip_loss.jpg). Caption
       // herda Markdown formatting do msg. Void/push stay text-only (sendDM).
+      // 2026-05-21: streak counter — quando win + última N wins consecutivas
+      // ≥ TIP_WIN_STREAK_THRESHOLD (default 3), troca imagem pra tip_win_streak.jpg
+      // (Sequência de Green!). Streak cross-sport (visão usuário, todos os tips
+      // reais). Void/push não quebram streak (apenas win/loss contam).
+      // Override threshold via env TIP_WIN_STREAK_THRESHOLD=N.
+      let _winStreak = 0;
+      if (tip.result === 'win') {
+        try {
+          const _streakRows = db.prepare(`
+            SELECT result FROM tips
+            WHERE (is_shadow IS NULL OR is_shadow = 0)
+              AND (archived IS NULL OR archived = 0)
+              AND result IN ('win','loss')
+              AND settled_at IS NOT NULL
+              AND settled_at <= ?
+            ORDER BY settled_at DESC
+            LIMIT 10
+          `).all(tip.settled_at);
+          for (const r of _streakRows) {
+            if (r.result === 'win') _winStreak++;
+            else break;
+          }
+        } catch (_) {}
+      }
+      const _streakThreshold = Math.max(2, parseInt(process.env.TIP_WIN_STREAK_THRESHOLD || '3', 10) || 3);
+      const _isStreakActive = tip.result === 'win' && _winStreak >= _streakThreshold;
       const _baseUrl = (process.env.PUBLIC_BASE_URL || 'https://sportsedge-bot-production.up.railway.app').replace(/\/+$/, '');
       const _photoUrl = tip.result === 'win'
-        ? `${_baseUrl}/img/tip_win.jpg`
+        ? (_isStreakActive ? `${_baseUrl}/img/tip_win_streak.jpg` : `${_baseUrl}/img/tip_win.jpg`)
         : (tip.result === 'loss' ? `${_baseUrl}/img/tip_loss.jpg` : null);
+      // Add streak banner ao caption quando ativo (visibility extra além da imagem).
+      const _msgWithStreak = _isStreakActive
+        ? `🔥 *${_winStreak} GREENS CONSECUTIVOS!* 🔥\n\n${msg}`
+        : msg;
       let sent = 0;
       for (const [userId, prefs] of subscribedUsers) {
         if (!_shouldDispatchToSubscriber(userId, prefs, prefKey)) continue;
         try {
           if (_photoUrl) {
-            await sendPhotoFromUrl(token, userId, _photoUrl, msg);
+            await sendPhotoFromUrl(token, userId, _photoUrl, _msgWithStreak);
           } else {
-            await sendDM(token, userId, msg);
+            await sendDM(token, userId, _msgWithStreak);
           }
           sent++;
         } catch (e) {
