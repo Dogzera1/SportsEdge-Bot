@@ -3892,6 +3892,29 @@ async function runAutoAnalysis() {
             // 2026-05-21 (mig 121): rastreia DM dispatch success → updates tips.dm_dispatched_at.
             // Detecta Telegram outage: tip real sem dm marker = bankroll virtual diverge real.
             if (_dmOkLolLs) _markDmDispatched(rec.tipId);
+            // 2026-05-21 (mig 123 Phase 1): Pinnacle auto-bet hook — dry-run default.
+            // tryAutoBet aplica 7 gates (kill switch, dry, stake cap, EV min, caps).
+            // Phase 1 retorna would_bet payload sem executar; Phase 2 (Playwright) executa.
+            // Fire-and-forget — não bloqueia tip flow.
+            (async () => {
+              try {
+                const { tryAutoBet } = require('./lib/pinnacle-auto-bet');
+                const _tipRow = db.prepare(`SELECT id, stake_reais FROM tips WHERE id = ?`).get(rec.tipId);
+                const stakeBrl = parseFloat(_tipRow?.stake_reais) || 0;
+                await tryAutoBet(db, {
+                  tip: { id: rec.tipId },
+                  eventId: match.id,
+                  marketId: 'ML',
+                  side: _pickSideLs,
+                  line: null,
+                  stakeBrl,
+                  expectedOdd: parseFloat(tipOdd),
+                  evPct: parseFloat(tipEV),
+                  sport: 'lol',
+                  league: match.league,
+                });
+              } catch (_) { /* hook não bloqueia tip flow */ }
+            })();
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           // 2026-04-28: também marca matchKeyBase pra cross-state dedup pre↔live.
