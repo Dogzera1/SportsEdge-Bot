@@ -1056,6 +1056,37 @@ setInterval(() => {
   try { require('./lib/metrics').gauge('bot_uptime_s', Math.round(process.uptime())); } catch (_) {}
 }, 60 * 1000).unref();
 
+// 2026-05-21 (audit feed-medic P0): Pinnacle key expired/invalid DM alert.
+// lib/pinnacle.js seta gauge pinnacle_key_expired{status=401|403} quando
+// API retorna unauth. Sem alerta DM, log Railway era único sinal — gap
+// 6-24h até alguém grepar. Cron lê gauge a cada 30min, DM admin se age<2h
+// + value=1. Throttle 6h pra não spam.
+let _pinnacleKeyDmedAt = 0;
+setInterval(() => {
+  try {
+    const snap = require('./lib/metrics').snapshot();
+    const gauges = snap.gauges || {};
+    let detected = null;
+    for (const [k, v] of Object.entries(gauges)) {
+      if (k.startsWith('pinnacle_key_expired') && v.value > 0 && v.age_s < 7200) {
+        detected = { key: k, status: k.match(/status=(\d+)/)?.[1] || 'unknown', age_s: v.age_s };
+        break;
+      }
+    }
+    if (!detected) return;
+    const now = Date.now();
+    if (now - _pinnacleKeyDmedAt < 6 * 60 * 60 * 1000) return;
+    _pinnacleKeyDmedAt = now;
+    const dmText = `🔑 *PINNACLE KEY EXPIRED/INVALID*\n\nStatus: \`${detected.status}\`\nAge: ${detected.age_s}s\n\nPipeline odds esports/tennis/football PARADO. Atualizar \`PINNACLE_API_KEY\` no Railway.`;
+    const token = (typeof resolveAlertsToken === 'function') ? resolveAlertsToken() : null;
+    if (token) {
+      sendAdminDMs(token, dmText, { parse_mode: 'Markdown' }, 'pinnacle-key-expired').catch(e => {
+        log('WARN', 'PINNACLE-KEY-ALERT', `DM falhou: ${e.message}`);
+      });
+    }
+  } catch (_) {}
+}, 30 * 60 * 1000).unref();
+
 // ── Metrics bridge bot.js → server.js ──
 // Counters/gauges/timings registrados no bot.js (pollers, sweep, etc) ficam
 // em processo SEPARADO do server.js. Sem este bridge, /health/metrics no
