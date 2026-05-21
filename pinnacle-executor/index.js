@@ -128,30 +128,50 @@ async function _ensureLoggedIn(context) {
   // 2026-05-21: BR default — pinnacle.bet.br (apex domain pós-regulação jul/2024).
   // pinnacle.com/pt/ ainda funciona internacional (PINNACLE_BASE_URL override).
   const base = process.env.PINNACLE_BASE_URL || 'https://pinnacle.bet.br/';
-  await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  // 2026-05-21 fix: aguardar network idle ANTES de procurar login button.
+  // Audit log mostrou locator.click timeout 10s em #4063/#4065 → page ainda
+  // estava carregando assets quando tentou clicar. SPA Angular precisa de
+  // mais tempo pra renderizar elementos interativos. Soft fail (ignore).
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   // Detect logged in via balance/account elements
   const isLogged = await page.locator(
     'text=/sair|logout/i, [data-test-id="user-balance"], [data-test-id="account-menu"]'
   ).first().isVisible().catch(() => false);
   if (isLogged) {
+    log('INFO', 'PLAYWRIGHT', 'already logged in (storageState valid)');
     await page.close();
     return true;
   }
-  // Open login
-  await page.locator(
-    '[data-test-id="login-button"], button:has-text("Entrar"), button:has-text("Login")'
-  ).first().click({ timeout: 10000 });
+  // 2026-05-21 fix: timeout 10s → 30s. Pinnacle BR SPA pode demorar pra
+  // hydratar elementos. + log title/URL pra diagnóstico se ainda falhar.
+  try {
+    await page.locator(
+      '[data-test-id="login-button"], button:has-text("Entrar"), button:has-text("Login"), a:has-text("Entrar"), a:has-text("Login")'
+    ).first().click({ timeout: 30000 });
+  } catch (e) {
+    // Diagnóstico: dump title + URL + visible buttons pra logs
+    let title = '', url = '', buttons = '';
+    try { title = await page.title(); } catch (_) {}
+    try { url = page.url(); } catch (_) {}
+    try {
+      const btnTexts = await page.locator('button, a[role="button"]').allTextContents().catch(() => []);
+      buttons = btnTexts.slice(0, 10).map(b => b.trim().slice(0, 30)).filter(Boolean).join(' | ');
+    } catch (_) {}
+    log('ERROR', 'PLAYWRIGHT', `login-button not found after 30s. title="${title}" url="${url}" visible_buttons="${buttons}"`);
+    throw new Error(`login-button locator timeout 30s. title="${title}" buttons="${buttons.slice(0,200)}"`);
+  }
   // Fill credentials
   await page.locator(
     'input[name="customerId"], input[name="username"], input[type="email"]'
-  ).first().fill(username, { timeout: 10000 });
+  ).first().fill(username, { timeout: 15000 });
   await page.locator(
     'input[name="password"], input[type="password"]'
   ).first().fill(password);
   await page.locator(
     'button[type="submit"]:has-text("Entrar"), button[type="submit"]:has-text("Login"), button[data-test-id="login-submit"]'
   ).first().click();
-  await page.waitForLoadState('networkidle', { timeout: 30000 });
+  await page.waitForLoadState('networkidle', { timeout: 45000 });
   await context.storageState({ path: STORAGE_STATE_PATH });
   log('INFO', 'PLAYWRIGHT', 'login OK, storageState saved');
   await page.close();

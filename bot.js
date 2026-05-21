@@ -10982,7 +10982,7 @@ async function autoAnalyzeMatch(token, match) {
                         log('INFO', 'MT-GUARD', `lol/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                         continue;
                       }
-                      const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) {
@@ -11171,7 +11171,7 @@ async function autoAnalyzeMatch(token, match) {
                           log('INFO', 'MT-GUARD', `lol/${t.market}/${t.side}: kills DM skipped — disabled por leak guard`);
                           continue;
                         }
-                        const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                         const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (inMemFresh || dbFresh) continue;
@@ -17200,7 +17200,7 @@ async function _pollDotaInner(runOnce = false) {
                       log('INFO', 'MT-GUARD', `dota2/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                       continue;
                     }
-                    const dedupKey = `dota2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                    const dedupKey = `dota2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                     const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                     const dbFresh = wasAdminDmSentRecently(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                     if (inMemFresh || dbFresh) {
@@ -19553,7 +19553,7 @@ async function pollTennis(runOnce = false) {
                           log('INFO', 'MT-GUARD', `tennis/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                           continue;
                         }
-                        const dedupKey = `tennis|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const dedupKey = `tennis|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                         const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (inMemFresh || dbFresh) {
@@ -21077,7 +21077,7 @@ async function pollFootball(runOnce = false) {
                         log('INFO', 'MT-GUARD', `football/${t.market}/${t.side}: DM skipped — disabled por leak guard`);
                         continue;
                       }
-                      const dedupKey = `football|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const dedupKey = `football|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) continue;
@@ -21167,7 +21167,7 @@ async function pollFootball(runOnce = false) {
                           log('INFO', 'MT-GATE-SKIP', `football/${t.market}/${t.side}: ${describeMtGateSkip('football', t.market, t.side, match.league)}`);
                           continue;
                         }
-                        const dedupKey = `football|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const dedupKey = `football|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                         const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (inMemFresh || dbFresh) {
@@ -22538,7 +22538,7 @@ async function pollCs(runOnce = false) {
                         log('INFO', 'MT-GUARD', `cs2/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                         continue;
                       }
-                      const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       // 2026-05-12: sport='cs' (mig 074 — tips/shadow gravam como 'cs'); cs2 era key órfã.
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'cs', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
@@ -22676,7 +22676,7 @@ async function pollCs(runOnce = false) {
                         log('INFO', 'MT-GATE-SKIP', `cs2/${marketPeriod}/${t.side}: ${describeMtGateSkip('cs2', marketPeriod, t.side, match.league)}`);
                         continue;
                       }
-                      const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${marketPeriod}|${t.line}|${t.side}`;
+                      const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${marketPeriod}|${t.line}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'cs', match, market: marketPeriod, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) {
@@ -23493,7 +23493,7 @@ async function pollValorant(runOnce = false) {
                         log('INFO', 'MT-GUARD', `valorant/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                         continue;
                       }
-                      const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) {
@@ -23602,7 +23602,7 @@ async function pollValorant(runOnce = false) {
                         log('INFO', 'MT-GATE-SKIP', `valorant/${marketPeriod}/${t.side}: ${describeMtGateSkip('valorant', marketPeriod, t.side, match.league)}`);
                         continue;
                       }
-                      const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${marketPeriod}|${t.line}|${t.side}`;
+                      const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${marketPeriod}|${t.line}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'valorant', match, market: marketPeriod, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) {
@@ -24784,7 +24784,7 @@ async function runAutoBasket() {
                       log('INFO', 'MT-GUARD', `basket/${t.market}/${t.side}: DM skipped — disabled por leak guard`);
                       continue;
                     }
-                    const dedupKey = `basket|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                    const dedupKey = `basket|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                     const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                     const dbFresh = wasAdminDmSentRecently(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                     if (inMemFresh || dbFresh) continue;
@@ -24868,7 +24868,7 @@ async function runAutoBasket() {
                           log('INFO', 'MT-GATE-SKIP', `basket/${t.market}/${t.side}: ${describeMtGateSkip('basket', t.market, t.side, match.league)}`);
                           continue;
                         }
-                        const dedupKey = `basket|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const dedupKey = `basket|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}`;
                         const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (inMemFresh || dbFresh) {
