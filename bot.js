@@ -24691,6 +24691,17 @@ async function runAutoBasket() {
         ? 'MÉDIA'
         : 'BAIXA';
 
+      // 2026-05-21 fix: gates_evaluated.league_allowed era label fake — registrava
+      // passed:true sem chamar isLeagueBlocked. Mirror snooker bot.js:24274 + LoL
+      // bot.js:3724. league_blocklist 2-part (memory commit 2b9d4d1) protege MT
+      // mas ML basket escapava. Cross-sport audit P5: basket era único sport ML
+      // sem call real isLeagueBlocked().
+      if (isLeagueBlocked('basket', match.league, 'ML')) {
+        log('INFO', 'AUTO-BASKET', `[BLOCK] basket/${match.league} — tip suprimida`);
+        analyzedBasket.set(key, { ts: now, tipSent: false });
+        continue;
+      }
+
       const rec = await serverPost('/record-tip', {
         matchId: String(match.id), eventName: match.league || 'nba',
         p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
