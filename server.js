@@ -14956,9 +14956,30 @@ setInterval(load, 60000);
       const all = Object.entries(out).filter(([, v]) => v.n > 0);
       const totalAllStake = all.reduce((a, [, v]) => a + (v.total_stake_reais || 0), 0);
       const totalAllProfit = all.reduce((a, [, v]) => a + (v.total_profit_reais || 0), 0);
+      // 2026-05-21: surface oldest_settled_at globalmente pra UX clarification.
+      // Audit prévio flagou "windows 7d/30d/90d retornam idêntico" — não era bug
+      // no binding mas pós-reset bankroll 2026-05-18 todo dataset estava em ≤3d
+      // → window cap = dataset completo. Hint permite distinguir "no data
+      // older than window" vs bug.
+      let _oldest = null;
+      try {
+        const _r = db.prepare(`
+          SELECT MIN(settled_at) AS oldest
+          FROM tips
+          WHERE result IN ('win','loss','void','push')
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            ${sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : ''}
+        `).get();
+        _oldest = _r?.oldest || null;
+      } catch (_) {}
       sendJson(res, {
         ok: true,
         days,
+        oldest_settled_at: _oldest,
+        window_captures_all: _oldest
+          ? (Date.parse(String(_oldest).replace(' ', 'T') + 'Z') >= Date.now() - days * 86400000)
+          : false,
         per_sport: out,
         summary: {
           n_sports_active: all.length,
