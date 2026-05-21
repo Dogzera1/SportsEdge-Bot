@@ -33,6 +33,7 @@ const _mtAutoPromote = require('./lib/mt-auto-promote');
 const _mtMarketPromote = require('./lib/mt-market-promote');
 const _leagueTierLib = require('./lib/league-tier');
 const _mtTierClassifier = require('./lib/mt-tier-classifier');
+const { buildTipMessage } = require('./lib/tip-message-builder');
 
 // Helper: formata stake em "Xu (R$Y.YY)" pegando unit tier atual do sport.
 // Tier vem do DB (bankroll do sport). Se DB offline, usa R$1 base.
@@ -21936,15 +21937,17 @@ async function pollTableTennis(runOnce = false) {
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const fightTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const _bookTT = formatLineShopDM(match.odds, direction, { sport: 'tabletennis', db });
-        const msg = `🏓 💰 *TIP TÊNIS DE MESA*\n\n` +
-          `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n🕐 ${fightTime} (BRT)\n\n` +
-          `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
-          `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-          `💵 Stake: *${formatStakeWithReais('tabletennis', stakeAdj)}*\n` +
-          `${confEmoji} Confiança: *${conf}*\n` +
-          _bookTT +
-          `_${tipReason}_\n\n` +
-          `⚠️ _Aposte com responsabilidade._`;
+        const msg = buildTipMessage({
+          sport: 'tabletennis', marketType: 'ML', sportLabelOverride: 'TÊNIS DE MESA',
+          match: { team1: match.team1, team2: match.team2, league: match.league },
+          pick: pickTeam, odd: pickOdd, ev: evPct.toFixed(1),
+          stake: formatStakeWithReais('tabletennis', stakeAdj),
+          conf, isLive: false,
+          matchTime: fightTime !== '—' ? fightTime : undefined,
+          reason: tipReason,
+          lineShopText: _bookTT || undefined,
+          seed: String(match.id || `${match.team1}|${match.team2}`),
+        });
 
         // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
         // ANTES do DM dispatch. Antes, TT NÃO tinha gate algum — server podia rotar
@@ -22968,15 +22971,18 @@ Máximo 200 palavras.`;
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = csMapNum > 0 ? ` — MAPA ${csMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
         const _bookCs = formatLineShopDM(match.odds, direction, { sport: 'cs', db });
-        const msg = `🔫 💰 *TIP CS2${phaseLabel}*\n\n` +
-          `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
-          `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
-          `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-          `💵 Stake: *${formatStakeWithReais('cs', stakeAdj)}*\n` +
-          `${confEmoji} Confiança: *${conf}*\n` +
-          _bookCs +
-          `_${tipReason}_\n\n` +
-          `⚠️ _Aposte com responsabilidade._`;
+        const msg = buildTipMessage({
+          sport: 'cs', marketType: 'ML', sportLabelOverride: 'CS2',
+          match: { team1: match.team1, team2: match.team2, league: `${match.league}${match.format ? ` (${match.format})` : ''}` },
+          pick: pickTeam, odd: pickOdd, ev: evPct.toFixed(1),
+          stake: formatStakeWithReais('cs', stakeAdj),
+          conf, isLive: csMapNum > 0,
+          matchTime: matchTime !== '—' ? matchTime : undefined,
+          reason: tipReason,
+          lineShopText: _bookCs || undefined,
+          extraNotes: phaseLabel ? [`🗺️ ${phaseLabel.replace(/^ — /, '').trim()}`] : undefined,
+          seed: String(match.id || `${match.team1}|${match.team2}`),
+        });
 
         const _betBtnCs = _buildTipBetButton('cs', match.odds, direction, match, String(stakeAdj), pickOdd);
         let _dmOkCs = false;
@@ -23788,15 +23794,18 @@ Máximo 180 palavras.`;
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = valMapNum > 0 ? ` — MAPA ${valMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
         const _bookVal = formatLineShopDM(match.odds, direction, { sport: 'valorant', db });
-        const msg = `🎯 💰 *TIP VALORANT${phaseLabel}*\n\n` +
-          `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
-          `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
-          `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-          `💵 Stake: *${formatStakeWithReais('valorant', stakeAdj)}*\n` +
-          `${confEmoji} Confiança: *${conf}*\n` +
-          _bookVal +
-          `_${tipReason}_\n\n` +
-          `⚠️ _Aposte com responsabilidade._`;
+        const msg = buildTipMessage({
+          sport: 'valorant', marketType: 'ML',
+          match: { team1: match.team1, team2: match.team2, league: `${match.league}${match.format ? ` (${match.format})` : ''}` },
+          pick: pickTeam, odd: pickOdd, ev: evPct.toFixed(1),
+          stake: formatStakeWithReais('valorant', stakeAdj),
+          conf, isLive: valMapNum > 0,
+          matchTime: matchTime !== '—' ? matchTime : undefined,
+          reason: tipReason,
+          lineShopText: _bookVal || undefined,
+          extraNotes: phaseLabel ? [`🗺️ ${phaseLabel.replace(/^ — /, '').trim()}`] : undefined,
+          seed: String(match.id || `${match.team1}|${match.team2}`),
+        });
 
         const _betBtnVal = _buildTipBetButton('valorant', match.odds, direction, match, String(stakeAdj), pickOdd);
         let _dmOkVal = false;
@@ -24127,14 +24136,18 @@ async function runAutoDarts() {
           const _bookDarts = formatLineShopDM(match.odds, ml.direction, { sport: 'darts', db });
           const _matchTimeDarts = match.time ? fmtMatchTime(match.time) : '';
           const _timeLineDarts = _matchTimeDarts ? `🕐 ${_matchTimeDarts} (BRT)\n` : '';
-          const tipMsg = `🎯 💰 *TIP DARTS${isLiveDarts ? ' (AO VIVO 🔴)' : ''}*\n` +
-            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n${_timeLineDarts}\n` +
-            `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
-            `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-            `💵 Stake: *${formatStakeWithReais('darts', stakeAdj)}* _(1/8 Kelly)_\n` +
-            _bookDarts +
-            `🧠 Por quê: _${tipReason}_\n\n` +
-            `⚠️ _Aposte com responsabilidade._`;
+          const tipMsg = buildTipMessage({
+            sport: 'darts', marketType: 'ML',
+            match: { team1: match.team1, team2: match.team2, league: match.league },
+            pick: pickTeam, odd: pickOdd, ev: evPct.toFixed(1),
+            stake: formatStakeWithReais('darts', stakeAdj),
+            conf: 'MÉDIA', isLive: isLiveDarts,
+            matchTime: _matchTimeDarts || undefined,
+            reason: tipReason,
+            lineShopText: _bookDarts || undefined,
+            kellyLabel: '1/8 Kelly',
+            seed: String(match.id || `${match.team1}|${match.team2}`),
+          });
 
           // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
           // ANTES do DM dispatch. Antes, darts NÃO tinha gate — server podia rotar
@@ -24390,14 +24403,18 @@ async function runAutoSnooker() {
           const _bookSn = formatLineShopDM(match.odds, ml.direction, { sport: 'snooker', db });
           const _matchTimeSn = match.time ? fmtMatchTime(match.time) : '';
           const _timeLineSn = _matchTimeSn ? `🕐 ${_matchTimeSn} (BRT)\n` : '';
-          const tipMsg = `🎱 💰 *TIP SNOOKER${isLiveSnooker ? ' (AO VIVO 🔴)' : ''}*\n` +
-            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n${_timeLineSn}\n` +
-            `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
-            `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-            `💵 Stake: *${formatStakeWithReais('snooker', stakeAdj)}*\n` +
-            _bookSn +
-            `🧠 ${tipReason}\n\n` +
-            `⚠️ _Odds Pinnacle._`;
+          const tipMsg = buildTipMessage({
+            sport: 'snooker', marketType: 'ML',
+            match: { team1: match.team1, team2: match.team2, league: match.league },
+            pick: pickTeam, odd: pickOdd, ev: evPct.toFixed(1),
+            stake: formatStakeWithReais('snooker', stakeAdj),
+            conf: 'MÉDIA', isLive: isLiveSnooker,
+            matchTime: _matchTimeSn || undefined,
+            reason: tipReason,
+            lineShopText: _bookSn || undefined,
+            extraNotes: ['_Odds: Pinnacle._'],
+            seed: String(match.id || `${match.team1}|${match.team2}`),
+          });
 
           // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
           // ANTES do DM dispatch. Antes, snooker NÃO tinha gate — server podia rotar
@@ -24824,13 +24841,17 @@ async function runAutoBasket() {
       // DM path (futuro, não usado em fase 1):
       const _matchTimeBk = match.time ? fmtMatchTime(match.time) : '';
       const _timeLineBk = _matchTimeBk ? `🕐 ${_matchTimeBk} (BRT)\n` : '';
-      const tipMsg = `🏀 💰 *TIP BASKET${isLiveBasket ? ' (AO VIVO 🔴)' : ''}*\n` +
-        `*${match.team1}* vs *${match.team2}*\n📋 ${match.league || 'NBA'}\n${_timeLineBk}\n` +
-        `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
-        `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-        `💵 Stake: *${formatStakeWithReais('basket', stakeAdj)}*\n` +
-        `🧠 ${tipReason}\n\n` +
-        `⚠️ _Odds The Odds API._`;
+      const tipMsg = buildTipMessage({
+        sport: 'basket', marketType: 'ML',
+        match: { team1: match.team1, team2: match.team2, league: match.league || 'NBA' },
+        pick: pickTeam, odd: pickOdd, ev: evPct.toFixed(1),
+        stake: formatStakeWithReais('basket', stakeAdj),
+        conf: 'MÉDIA', isLive: isLiveBasket,
+        matchTime: _matchTimeBk || undefined,
+        reason: tipReason,
+        extraNotes: ['_Odds: The Odds API._'],
+        seed: String(match.id || `${match.team1}|${match.team2}`),
+      });
       // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
       // ANTES do DM dispatch. Antes, basket NÃO tinha gate — server podia rotar
       // pra shadow e DM disparava. Helper checa rec.isShadow + rec.autoShadowed.
@@ -26211,6 +26232,30 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           }
           if (stuckBySport.length) {
             auditLines.push(`• Shadow stuck >24h: ${stuckBySport.join(', ')} (rodar diag p/ triagem)`);
+          }
+        } catch (_) {}
+        // 2026-05-21 audit observability: kelly_product_capped fire >threshold/h
+        // = composição multiplier sistematicamente excede 0.15 SAGRADO. Cap é
+        // safety net, normal mode firing implica calibration off OR tier×market
+        // mults aplicados em multiple layers. Threshold 5/h conservador —
+        // override via KELLY_CAP_ALERT_THRESHOLD_PER_HOUR env.
+        try {
+          const m = require('./lib/metrics');
+          const snap1h = m.snapshot1h();
+          const threshold = parseFloat(process.env.KELLY_CAP_ALERT_THRESHOLD_PER_HOUR || '5');
+          let kellyCapHits = 0;
+          const bySport = {};
+          for (const [key, val] of Object.entries(snap1h.counters || {})) {
+            if (!/^kelly_product_capped/.test(key)) continue;
+            const v = Number(val) || 0;
+            kellyCapHits += v;
+            const tagMatch = key.match(/sport=([^,|]+)/);
+            const sp = tagMatch ? tagMatch[1] : 'unknown';
+            bySport[sp] = (bySport[sp] || 0) + v;
+          }
+          if (kellyCapHits > threshold) {
+            const sportBreak = Object.entries(bySport).map(([s, n]) => `${s}=${n}`).join(' ');
+            auditLines.push(`• Kelly cap disparou ${kellyCapHits}x/1h > ${threshold} (${sportBreak}) — verificar composição tier×market×trust×clv`);
           }
         } catch (_) {}
         if (auditLines.length) {
