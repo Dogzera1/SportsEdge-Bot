@@ -60,34 +60,140 @@ async function placeBetMock(payload) {
   };
 }
 
-async function placeBetPlaywright(payload) {
-  // TODO Phase 2.1: implementar Playwright flow
-  //   const { chromium } = require('playwright');
-  //   const browser = await chromium.launch({ headless: true });
-  //   const context = await browser.newContext({ /* user agent, cookies session */ });
-  //   const page = await context.newPage();
-  //   await page.goto('https://www.pinnacle.com/login');
-  //   // ... login form fill
-  //   await page.fill('#email', process.env.PINNACLE_USERNAME);
-  //   await page.fill('#password', process.env.PINNACLE_PASSWORD);
-  //   await page.click('button[type="submit"]');
-  //   await page.waitForNavigation();
-  //   // Navigate to event
-  //   await page.goto(`https://www.pinnacle.com/en/event/${payload.event_id}`);
-  //   // Click market + side
-  //   await page.click(`[data-market-id="${payload.market_id}"] [data-side="${payload.side}"]`);
-  //   // Input stake
-  //   await page.fill('input[name="stake"]', String(payload.stake_brl));
-  //   // Submit + parse receipt
-  //   await page.click('button.place-bet');
-  //   const ticket = await page.textContent('.bet-receipt .ticket-id');
-  //   const actualOdd = await page.textContent('.bet-receipt .odd');
-  //   await browser.close();
-  //   return { ok: true, ticket_id: ticket, actual_odd: parseFloat(actualOdd), ... };
-  return {
-    ok: false,
-    error: 'playwright mode not implemented — see Phase 2.1 TODO comments',
+// 2026-05-21: Persistent browser context — single login session reused across bets.
+// Cold-start every bet seria 5-10s pra login. Quente: ~2s pra navigate+place.
+// Stored via Playwright storageState (cookies + localStorage) em /tmp.
+let _persistentBrowser = null;
+let _persistentContext = null;
+const STORAGE_STATE_PATH = '/tmp/pinnacle-session.json';
+const fs = require('fs');
+
+async function _getOrCreateContext() {
+  // Lazy require Playwright (only loaded if mode=playwright)
+  const { chromium } = require('playwright');
+  if (_persistentBrowser && _persistentContext) {
+    try {
+      // Quick health check — context.pages() throws se closed
+      _persistentContext.pages();
+      return { browser: _persistentBrowser, context: _persistentContext };
+    } catch (_) {
+      _persistentBrowser = null;
+      _persistentContext = null;
+    }
+  }
+  _persistentBrowser = await chromium.launch({
+    headless: !/^(0|false|no)$/i.test(String(process.env.PLAYWRIGHT_HEADLESS ?? 'true')),
+    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+  });
+  const contextOpts = {
+    userAgent: process.env.PLAYWRIGHT_UA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 800 },
+    locale: 'pt-BR',
   };
+  // Reuse session if storageState exists
+  if (fs.existsSync(STORAGE_STATE_PATH)) {
+    contextOpts.storageState = STORAGE_STATE_PATH;
+    console.log('[executor] reusing storageState from', STORAGE_STATE_PATH);
+  }
+  _persistentContext = await _persistentBrowser.newContext(contextOpts);
+  return { browser: _persistentBrowser, context: _persistentContext };
+}
+
+async function _ensureLoggedIn(context) {
+  const username = process.env.PINNACLE_USERNAME;
+  const password = process.env.PINNACLE_PASSWORD;
+  if (!username || !password) throw new Error('PINNACLE_USERNAME/PASSWORD não setadas');
+  const page = await context.newPage();
+  // Pinnacle BR redirect: pinnacle.com → pinnacle.com/pt/ ou /br/
+  const base = process.env.PINNACLE_BASE_URL || 'https://www.pinnacle.com/pt/';
+  await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Detect if logged in (has "logout" or "balance" element)
+  const isLogged = await page.locator('text=Sair, text=Logout, [data-test-id="user-balance"]').first().isVisible().catch(() => false);
+  if (isLogged) {
+    await page.close();
+    return true;
+  }
+  // Trigger login modal
+  await page.locator('[data-test-id="login-button"], button:has-text("Entrar"), button:has-text("Login")').first().click({ timeout: 10000 });
+  // Fill credentials (Pinnacle uses customerId+password — pode variar)
+  await page.locator('input[name="customerId"], input[name="username"], input[type="email"]').first().fill(username, { timeout: 10000 });
+  await page.locator('input[name="password"], input[type="password"]').first().fill(password);
+  await page.locator('button[type="submit"], button:has-text("Entrar"), button:has-text("Login")').first().click();
+  // Wait login complete (balance visible or URL change)
+  await page.waitForLoadState('networkidle', { timeout: 30000 });
+  // Save state pra reuse
+  await context.storageState({ path: STORAGE_STATE_PATH });
+  console.log('[executor] login OK, storageState saved');
+  await page.close();
+  return true;
+}
+
+async function placeBetPlaywright(payload) {
+  let context;
+  try {
+    const ctx = await _getOrCreateContext();
+    context = ctx.context;
+    await _ensureLoggedIn(context);
+  } catch (e) {
+    return { ok: false, error: `playwright init/login: ${e.message}` };
+  }
+
+  const page = await context.newPage();
+  try {
+    // Navigate to event page. Pinnacle URL pattern: /pt/<sport>/<league>/<teams>/<event_id>
+    // ou direct: /pt/event/<event_id>. Tentamos genérico.
+    const eventUrl = process.env.PINNACLE_EVENT_URL_TEMPLATE
+      ? process.env.PINNACLE_EVENT_URL_TEMPLATE.replace('{event_id}', payload.event_id)
+      : `https://www.pinnacle.com/pt/event/${payload.event_id}`;
+    await page.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForLoadState('networkidle', { timeout: 15000 });
+
+    // Click market + side. Pinnacle DOM:
+    //   [data-test-id="market-${marketId}"] [data-test-id="side-${side}"]
+    // ou: button:has-text("<oddValue>") quando market é único.
+    const marketSelector = `[data-market-type="${payload.market_id}"], [data-test-id="market-${payload.market_id}"]`;
+    const sideSelector = `[data-side="${payload.side}"], [data-test-id="side-${payload.side}"], button:has-text("${payload.expected_odd}")`;
+    await page.locator(marketSelector).first().locator(sideSelector).first().click({ timeout: 15000 });
+
+    // Input stake (modal/sidebar abre após click no odd)
+    await page.locator('input[name="stake"], input[data-test-id="stake-input"]').first().fill(String(payload.stake_brl), { timeout: 10000 });
+
+    // Wait for odd refresh (Pinnacle pode re-cotacao após adicionar bet slip)
+    await page.waitForTimeout(1000);
+
+    // Check current odd vs expected (slippage guard)
+    const currentOddText = await page.locator('[data-test-id="current-odd"], .bet-slip-odd').first().textContent().catch(() => null);
+    const currentOdd = currentOddText ? parseFloat(currentOddText.replace(',', '.')) : payload.expected_odd;
+    const slippagePct = Math.abs(currentOdd - payload.expected_odd) / payload.expected_odd * 100;
+    if (slippagePct > (payload.max_slippage_pct || 2)) {
+      await page.close();
+      return { ok: false, error: `slippage ${slippagePct.toFixed(1)}% > max ${payload.max_slippage_pct}% (expected=${payload.expected_odd} current=${currentOdd})` };
+    }
+
+    // Submit
+    await page.locator('button[data-test-id="place-bet-button"], button:has-text("Confirmar Aposta"), button:has-text("Place Bet")').first().click({ timeout: 10000 });
+
+    // Parse receipt
+    await page.waitForSelector('[data-test-id="bet-receipt"], .bet-receipt, text=/ticket|recibo|confirmed/i', { timeout: 15000 });
+    const ticketText = await page.locator('[data-test-id="ticket-id"], .ticket-number').first().textContent().catch(() => null);
+    const ticketId = ticketText ? ticketText.trim() : `PW-${Date.now()}`;
+
+    // Save updated storageState (cookies refresh)
+    await context.storageState({ path: STORAGE_STATE_PATH });
+    await page.close();
+
+    return {
+      ok: true,
+      ticket_id: ticketId,
+      actual_odd: currentOdd,
+      stake_brl: payload.stake_brl,
+      status: 'placed',
+    };
+  } catch (e) {
+    try { await page.screenshot({ path: `/tmp/pinnacle-err-${Date.now()}.png` }).catch(() => {}); } catch (_) {}
+    try { await page.close(); } catch (_) {}
+    return { ok: false, error: `playwright bet: ${e.message}` };
+  }
 }
 
 async function placeBetApi(payload) {
