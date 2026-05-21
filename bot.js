@@ -19608,7 +19608,7 @@ async function pollTennis(runOnce = false) {
                         const _gate_tn = await _mtTryRecordAndShouldDm({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
                         if (!_gate_tn.allowDm) continue;
                         const _stakeForDm = Number.isFinite(_gate_tn.stakeFinal) ? _gate_tn.stakeFinal : stake;
-                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets, stakeBoosted: _isHgGoldSegment });
                         const _mtMarkup_tennis = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'tennis' });
                           const r = await sendAdminDMs(tnToken, dm, _mtMarkup_tennis ? { reply_markup: _mtMarkup_tennis } : undefined, 'tennis-market-tip');
                         if (r.sent > 0) {
