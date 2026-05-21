@@ -5921,6 +5921,9 @@ try {
   }
   // Hydrate _pathDisableRuntime ocorre depois (linha ~5390 onde a const é declarada);
   // chamada aqui quebraria por TDZ. loadFromDb já populou o cache do gates-runtime-state.
+  // 2026-05-21: periodic reload pra capturar manual sets via /admin/kelly-mult-set
+  // e /admin/mt-bucket-skip-set (server.js escreve em DB, bot.js cache é separada).
+  setInterval(() => { try { _gatesRuntimeState.loadFromDb(db); } catch (_) {} }, 5 * 60 * 1000);
 } catch (e) { log('WARN', 'GATES-AUTOTUNE', `init: ${e.message}`); }
 
 // Epoch tracking — log inicial pra rastrear deploy. Capture real acontece em
