@@ -15264,17 +15264,20 @@ setInterval(load, 60000);
 
   // ── /admin/pnl-daily-now: dispara manualmente o digest do cron runPnlDaily.
   // Usa lib/pnl-daily-message (mesma logic do cron). Broadcast pra ADMIN_CHAT_IDS
-  // + subscribed groups (chat_id<0). Suporta skip_today=1 (omite seção "hoje").
-  // GET /admin/pnl-daily-now?key=<KEY>&skip_today=1&dry=1
+  // + subscribed groups (chat_id<0). Suporta skip_today=1 (omite seção "hoje")
+  // e skip_summary=1 (omite 30d+Total — só janela 7d). Ambos+ skip flags ativos
+  // = header substitui pela janela real (ex: "14/05 a 20/05").
+  // GET /admin/pnl-daily-now?key=<KEY>&skip_today=1&skip_summary=1&dry=1
   if (p === '/admin/pnl-daily-now' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const skipToday = parsed.query.skip_today === '1' || parsed.query.skip_today === 'true';
+    const skipSummary = parsed.query.skip_summary === '1' || parsed.query.skip_summary === 'true';
     const dry = parsed.query.dry === '1' || parsed.query.dry === 'true';
     (async () => {
       try {
         const { buildPnlDailyMessage } = require('./lib/pnl-daily-message');
-        const { msg, stats, today } = buildPnlDailyMessage(db, { skipToday });
+        const { msg, stats, today } = buildPnlDailyMessage(db, { skipToday, skipSummary });
 
         if (dry) {
           sendJson(res, { ok: true, dry: true, today, stats, telegram_preview: msg });
@@ -15336,7 +15339,7 @@ setInterval(load, 60000);
         const sent = results.filter(r => r.ok).length;
         const failed = results.length - sent;
 
-        sendJson(res, { ok: true, today, stats, skip_today: skipToday, sent, failed, targets: results, telegram_preview: msg });
+        sendJson(res, { ok: true, today, stats, skip_today: skipToday, skip_summary: skipSummary, sent, failed, targets: results, telegram_preview: msg });
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     })();
     return;
