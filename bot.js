@@ -27648,15 +27648,21 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runTennisMtRealHealthWatch().catch(() => {}), 105 * 60 * 1000);
 
   // Esports MT calib refit daily (05h local). Multi-sport (lol/cs2/dota2/valorant).
-  // Usa scripts/fit-tennis-markov-calibration.js (sport-agnostic apesar do nome
-  // legacy) com --sport=X --filter=pre. Live tips skipped por instabilidade
-  // ocasional do PAV em LoL filter=all (TODO investigar).
+  //
+  // 2026-05-21 audit: refator pra usar /admin/mt-refit-calib (mesma pattern de
+  // tennis). Antes usava spawn(node, [fit-tennis-markov-calibration.js, --sport=X])
+  // com MIN_TIER_N=30 hardcoded — sample LoL last 90d distribuído tier1=34/
+  // tier2=12/other=29 → só tier1 qualifica, script gerava só flat bins (tiers
+  // vazio). lol-mt-calib.json estava stale ~9 dias por isso.
+  // Endpoint usa min 12 (defaults menor) + stratify=tier_side gera sides quando
+  // sample >= MIN_SIDE_N=30 por (tier, side). tiers_only=true preserva flat fallback.
   //
   // Schema v2.1 side-aware materializado em lib/<sport>-mt-calib.json.
   // Consumido por scanMarkets via calibLib (lib/sport-mt-calib.js factory).
   //
   // Opt-out: ESPORTS_CALIB_REFIT_DISABLED=true.
   // Filter sports: ESPORTS_CALIB_REFIT_SPORTS=lol,cs2 (default = todos 4).
+  // Override window: ESPORTS_CALIB_TRAIN_DAYS=45, ESPORTS_CALIB_EVAL_DAYS=14.
   let _lastEsportsCalibRefitDay = null;
   async function runEsportsCalibRefitDaily() {
     if (/^(1|true|yes)$/i.test(String(process.env.ESPORTS_CALIB_REFIT_DISABLED || ''))) return;
@@ -27666,28 +27672,63 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const today = now.toISOString().slice(0, 10);
     if (_lastEsportsCalibRefitDay === today) return;
     _lastEsportsCalibRefitDay = today;
+    const adminKey = (process.env.ADMIN_KEY || '').trim();
+    if (!adminKey) { log('WARN', 'ESPORTS-CALIB-REFIT', 'ADMIN_KEY ausente — pulando'); return; }
     const sports = String(process.env.ESPORTS_CALIB_REFIT_SPORTS || 'lol,cs2,dota2,valorant')
       .split(',').map(s => s.trim()).filter(Boolean);
-    const path = require('path');
-    const { spawn } = require('child_process');
-    const script = path.join(__dirname, 'scripts', 'fit-tennis-markov-calibration.js');
+    const trainDays = parseInt(process.env.ESPORTS_CALIB_TRAIN_DAYS ?? '45', 10);
+    const evalDays = parseInt(process.env.ESPORTS_CALIB_EVAL_DAYS ?? '14', 10);
+    const http = require('http');
+    const port = process.env.PORT || 3000;
     const results = [];
     for (const sport of sports) {
       try {
-        const dbPath = process.env.DB_PATH || './sportsedge.db';
-        const out = await new Promise((resolve) => {
-          const child = spawn(process.execPath, [script, `--sport=${sport}`, '--min-new-samples=0', `--db=${dbPath}`, '--filter=pre'], { cwd: __dirname });
-          let stdout = '';
-          child.stdout.on('data', d => stdout += d);
-          child.stderr.on('data', d => stdout += d);
-          child.on('close', (code) => resolve({ code, stdout }));
-          setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 120_000);
+        const reqPath = `/admin/mt-refit-calib?sport=${sport}&days=${trainDays}&eval_days=${evalDays}&regime=all&stratify=tier_side&tiers_only=true&write=true&key=${encodeURIComponent(adminKey)}`;
+        const r = await new Promise((resolve, reject) => {
+          const req = http.get('http://localhost:' + port + reqPath, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+          });
+          req.on('error', reject);
+          req.setTimeout(120000, () => { req.destroy(new Error('timeout')); });
         });
-        const postLine = out.stdout.split('\n').find(l => l.includes('POST (calib)')) || '';
-        const savedLine = out.stdout.includes('[saved]') ? 'saved' : (out.stdout.includes('[ABORT]') ? 'aborted' : 'no-write');
-        results.push(`${sport}: ${savedLine} | ${postLine.trim().slice(0, 120)}`);
-        log('INFO', 'ESPORTS-CALIB-REFIT', `${sport} exit=${out.code} ${savedLine}`);
-        // 2026-05-12: invalida cache da lib factory pós-write pra próximo cycle pegar imediato
+        if (!r.ok) {
+          // 400 "insufficient train sample" OR "tiers_only requires existing
+          // calib file" são esperados em sports sem volume — NÃO é erro fatal.
+          // Retry sem tiers_only se bootstrap (primeira vez).
+          if (/tiers_only.*requires existing/.test(r.error || '')) {
+            const bootstrapPath = reqPath.replace('&tiers_only=true', '');
+            const r2 = await new Promise((resolve, reject) => {
+              const req = http.get('http://localhost:' + port + bootstrapPath, (res) => {
+                let body = '';
+                res.on('data', c => body += c);
+                res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+              });
+              req.on('error', reject);
+              req.setTimeout(120000, () => { req.destroy(new Error('timeout')); });
+            });
+            if (r2.ok) {
+              results.push(`${sport}: bootstrap-write n_train=${r2.n_train}`);
+              log('INFO', 'ESPORTS-CALIB-REFIT', `${sport} bootstrap (first-time) ok n_train=${r2.n_train}`);
+            } else {
+              results.push(`${sport}: bootstrap-failed (${r2.error})`);
+              log('WARN', 'ESPORTS-CALIB-REFIT', `${sport} bootstrap failed: ${r2.error}`);
+            }
+          } else {
+            results.push(`${sport}: skip (${r.error || 'unknown'})`);
+            log('WARN', 'ESPORTS-CALIB-REFIT', `${sport}: ${r.error || 'unknown'}`);
+          }
+          continue;
+        }
+        // Success — sumariza tiers + sides
+        const tierSummary = Object.entries(r.markets || {}).map(([m, v]) => {
+          const tiers = v.tiers ? Object.keys(v.tiers).length : 0;
+          return `${m}(${tiers}t)`;
+        }).join(' ');
+        results.push(`${sport}: ok ${r.write_mode} n_train=${r.n_train} ${tierSummary}`);
+        log('INFO', 'ESPORTS-CALIB-REFIT', `${sport} ${r.write_mode} n_train=${r.n_train} ${tierSummary}`);
+        // Invalida cache da lib factory pós-write pra próximo cycle pegar imediato
         try { require('./lib/sport-mt-calib').getSportMtCalib(sport)._invalidate(); } catch (_) {}
       } catch (e) {
         results.push(`${sport}: ERROR ${e.message}`);
