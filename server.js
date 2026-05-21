@@ -10992,43 +10992,89 @@ setInterval(load, 10000);
   }
 
   // GET /admin/pinnacle-auto-bet-status?key=<KEY>
-  // 2026-05-21: status do auto-bet Pinnacle — envs, contadores, tips executadas.
+  // 2026-05-21: status do auto-bet Pinnacle — envs, contadores, executor health.
   if (p === '/admin/pinnacle-auto-bet-status' && req.method === 'GET') {
-    // Aceitar ?key= via _isAdminQueryKeyDeprecated (compat com outros endpoints admin).
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      const daily = db.prepare(`
-        SELECT COUNT(*) AS n, COALESCE(SUM(stake_reais), 0) AS totalBrl
-        FROM tips WHERE pinnacle_bet_id IS NOT NULL AND date(sent_at) = ?
-      `).get(today) || { n: 0, totalBrl: 0 };
-      const enabled = /^(1|true|yes)$/i.test(String(process.env.PINNACLE_AUTO_BET_ENABLED ?? ''));
-      const dry = !/^(0|false|no)$/i.test(String(process.env.PINNACLE_AUTO_BET_DRY ?? 'true'));
-      sendJson(res, {
-        ok: true,
-        config: {
-          enabled,
-          dry_run: dry,
-          require_confirm: !/^(0|false|no)$/i.test(String(process.env.PINNACLE_AUTO_BET_REQUIRE_CONFIRM ?? 'true')),
-          max_stake_brl: parseFloat(process.env.PINNACLE_MAX_STAKE_BRL || '20'),
-          daily_cap_brl: parseFloat(process.env.PINNACLE_DAILY_CAP_BRL || '100'),
-          daily_cap_count: parseInt(process.env.PINNACLE_DAILY_CAP_COUNT || '10', 10),
-          hourly_cap_count: parseInt(process.env.PINNACLE_HOURLY_CAP_COUNT || '3', 10),
-          min_ev_pct: parseFloat(process.env.PINNACLE_MIN_EV_PCT || '5'),
-          phase: enabled && !dry ? 'phase_2_real (NOT IMPLEMENTED — real bets blocked)' : 'phase_1_dry_run',
-        },
-        daily_usage: {
-          bets_count: daily.n,
-          stake_total_brl: +(daily.totalBrl || 0).toFixed(2),
-        },
-        warnings: [
-          !enabled ? 'PINNACLE_AUTO_BET_ENABLED=false (master kill switch active)' : null,
-          dry ? 'DRY mode: logs payloads, no real bets' : null,
-          enabled && !dry ? '⚠️ ENABLED + !DRY — real betting attempts blocked at lib level (Phase 2 não pronto)' : null,
-        ].filter(Boolean),
-      });
-    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    (async () => {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const daily = db.prepare(`
+          SELECT COUNT(*) AS n, COALESCE(SUM(stake_reais), 0) AS totalBrl
+          FROM tips WHERE pinnacle_bet_id IS NOT NULL AND date(sent_at) = ?
+        `).get(today) || { n: 0, totalBrl: 0 };
+        const enabled = /^(1|true|yes)$/i.test(String(process.env.PINNACLE_AUTO_BET_ENABLED ?? ''));
+        const dry = !/^(0|false|no)$/i.test(String(process.env.PINNACLE_AUTO_BET_DRY ?? 'true'));
+        const executorUrl = (process.env.PINNACLE_EXECUTOR_URL || '').trim();
+
+        // Active executor healthcheck (5s timeout)
+        let executorHealth = null;
+        if (executorUrl) {
+          try {
+            const u = new URL(executorUrl.replace(/\/+$/, '') + '/healthz');
+            const isHttps = u.protocol === 'https:';
+            const lib = isHttps ? require('https') : require('http');
+            executorHealth = await new Promise((resolve) => {
+              const req2 = lib.request({
+                host: u.hostname, port: u.port || (isHttps ? 443 : 80),
+                path: u.pathname, method: 'GET', timeout: 5000, rejectUnauthorized: false,
+              }, r2 => {
+                let d = '';
+                r2.on('data', c => d += c);
+                r2.on('end', () => {
+                  try { resolve({ status: r2.statusCode, ...JSON.parse(d) }); }
+                  catch (_) { resolve({ status: r2.statusCode, raw: d.slice(0, 200) }); }
+                });
+              });
+              req2.on('error', e => resolve({ status: 0, err: e.message }));
+              req2.on('timeout', () => { req2.destroy(); resolve({ status: 0, err: 'timeout' }); });
+              req2.end();
+            });
+          } catch (e) { executorHealth = { status: 0, err: e.message }; }
+        }
+
+        // Determine real phase
+        let phase;
+        if (!enabled) phase = 'disabled (master kill switch off)';
+        else if (dry) phase = 'phase_1_dry_run (logs only)';
+        else if (!executorUrl) phase = 'phase_2_blocked (PINNACLE_EXECUTOR_URL not set)';
+        else if (!executorHealth || executorHealth.status !== 200) phase = 'phase_2_executor_unreachable';
+        else if (executorHealth.mode === 'mock') phase = 'phase_2_mock (fake tickets, validate pipeline)';
+        else if (executorHealth.mode === 'playwright') phase = 'phase_2_playwright (REAL BETS)';
+        else if (executorHealth.mode === 'api') phase = 'phase_2_api (REAL BETS via Pinnacle API)';
+        else phase = `phase_2 (executor mode=${executorHealth.mode || '?'})`;
+
+        sendJson(res, {
+          ok: true,
+          config: {
+            enabled,
+            dry_run: dry,
+            require_confirm: !/^(0|false|no)$/i.test(String(process.env.PINNACLE_AUTO_BET_REQUIRE_CONFIRM ?? 'true')),
+            max_stake_brl: parseFloat(process.env.PINNACLE_MAX_STAKE_BRL || '20'),
+            daily_cap_brl: parseFloat(process.env.PINNACLE_DAILY_CAP_BRL || '100'),
+            daily_cap_count: parseInt(process.env.PINNACLE_DAILY_CAP_COUNT || '10', 10),
+            hourly_cap_count: parseInt(process.env.PINNACLE_HOURLY_CAP_COUNT || '3', 10),
+            min_ev_pct: parseFloat(process.env.PINNACLE_MIN_EV_PCT || '5'),
+            max_slippage_pct: parseFloat(process.env.PINNACLE_MAX_SLIPPAGE_PCT || '2'),
+            executor_url: executorUrl || null,
+            phase,
+          },
+          executor_health: executorHealth,
+          daily_usage: {
+            bets_count: daily.n,
+            stake_total_brl: +(daily.totalBrl || 0).toFixed(2),
+          },
+          warnings: [
+            !enabled ? 'PINNACLE_AUTO_BET_ENABLED=false (master kill switch active)' : null,
+            dry ? 'DRY mode: logs payloads, no real bets' : null,
+            enabled && !dry && !executorUrl ? '⚠️ ENABLED + !DRY mas PINNACLE_EXECUTOR_URL não setado — bets bloqueados em executor_url_not_configured' : null,
+            enabled && !dry && executorUrl && (!executorHealth || executorHealth.status !== 200) ? `⚠️ EXECUTOR UNREACHABLE: ${executorHealth?.err || 'HTTP ' + executorHealth?.status}` : null,
+            enabled && !dry && executorHealth?.status === 200 && executorHealth.mode === 'playwright' ? '🔴 REAL BETS ATIVADOS via Playwright' : null,
+            enabled && !dry && executorHealth?.status === 200 && executorHealth.mode === 'mock' ? '🟡 MOCK MODE — fake tickets gerados (não bets reais)' : null,
+          ].filter(Boolean),
+        });
+      } catch (e) { sendJson(res, { error: e.message }, 500); }
+    })();
     return;
   }
 
