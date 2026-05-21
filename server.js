@@ -15242,6 +15242,86 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/pnl-daily-now: dispara manualmente o digest do cron runPnlDaily.
+  // Usa lib/pnl-daily-message (mesma logic do cron). Broadcast pra ADMIN_CHAT_IDS
+  // + subscribed groups (chat_id<0). Suporta skip_today=1 (omite seção "hoje").
+  // GET /admin/pnl-daily-now?key=<KEY>&skip_today=1&dry=1
+  if (p === '/admin/pnl-daily-now' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const skipToday = parsed.query.skip_today === '1' || parsed.query.skip_today === 'true';
+    const dry = parsed.query.dry === '1' || parsed.query.dry === 'true';
+    (async () => {
+      try {
+        const { buildPnlDailyMessage } = require('./lib/pnl-daily-message');
+        const { msg, stats, today } = buildPnlDailyMessage(db, { skipToday });
+
+        if (dry) {
+          sendJson(res, { ok: true, dry: true, today, stats, telegram_preview: msg });
+          return;
+        }
+
+        const token = (process.env.TIPS_UNIFIED_TOKEN || process.env.TELEGRAM_TOKEN_ESPORTS || '').trim();
+        if (!token) {
+          sendJson(res, { ok: false, error: 'no token (TIPS_UNIFIED_TOKEN/TELEGRAM_TOKEN_ESPORTS)' }, 500);
+          return;
+        }
+
+        const adminIdsRaw = String(process.env.ADMIN_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+        const targets = new Set(adminIdsRaw);
+
+        // Subscribed groups (user_id<0). TIPS_BROADCAST_TO_GROUPS gate (default ON).
+        const broadcastGroups = !/^(0|false|no)$/i.test(String(process.env.TIPS_BROADCAST_TO_GROUPS ?? 'true'));
+        if (broadcastGroups) {
+          try {
+            const rows = db.prepare(`SELECT user_id FROM users WHERE subscribed = 1 AND user_id < 0`).all();
+            for (const r of rows) targets.add(String(r.user_id));
+          } catch (e) { /* ignore — broadcast best-effort */ }
+        }
+
+        if (targets.size === 0) {
+          sendJson(res, { ok: false, error: 'no targets (ADMIN_CHAT_IDS empty + 0 subscribed groups)' }, 400);
+          return;
+        }
+
+        const https = require('https');
+        const sendOne = (chatId) => new Promise((resolve) => {
+          const body = JSON.stringify({ chat_id: chatId, text: msg, parse_mode: 'Markdown' });
+          const tgReq = https.request({
+            hostname: 'api.telegram.org', port: 443,
+            path: `/bot${token}/sendMessage`,
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+            timeout: 10000,
+          }, (tgRes) => {
+            let bodyResp = '';
+            tgRes.on('data', c => bodyResp += c);
+            tgRes.on('end', () => {
+              let parsedTg = {};
+              try { parsedTg = JSON.parse(bodyResp); } catch (_) {}
+              resolve({ chat_id: chatId, ok: !!parsedTg.ok, status: tgRes.statusCode, description: parsedTg.description });
+            });
+          });
+          tgReq.on('error', (e) => resolve({ chat_id: chatId, ok: false, error: e.message }));
+          tgReq.on('timeout', () => { tgReq.destroy(); resolve({ chat_id: chatId, ok: false, error: 'timeout' }); });
+          tgReq.write(body);
+          tgReq.end();
+        });
+
+        const results = [];
+        for (const t of targets) {
+          const r = await sendOne(t);
+          results.push(r);
+        }
+        const sent = results.filter(r => r.ok).length;
+        const failed = results.length - sent;
+
+        sendJson(res, { ok: true, today, stats, skip_today: skipToday, sent, failed, targets: results, telegram_preview: msg });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
   // ── /admin/alerts: lista alerts persistidos (analytics_alerts).
   // GET /admin/alerts?status=open&days=7&key=<ADMIN_KEY>
   if (p === '/admin/alerts' && (req.method === 'GET' || req.method === 'POST')) {

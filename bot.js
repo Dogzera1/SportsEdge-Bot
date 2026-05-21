@@ -27502,107 +27502,30 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     scheduleNextDigest();
   }
 
-  // ── PnL Daily Report: notificação 1×/dia com PnL diário (últimos 7d em
-  // formato DD/MM = ±X.Xu) + mensal. Default ON; opt-out via PNL_DAILY_AUTO=false.
-  // 2026-05-20: schedule defaults 9 UTC → 0 UTC (= 21h BRT, "9 da noite" no Brasil).
-  // PNL_DAILY_BR_HOUR=21 prevalece sobre PNL_DAILY_HOUR_UTC se setado (BRT-anchored).
+  // ── PnL Daily Report: notificação 1×/dia com PnL diário (hoje + 7d + 30d + total)
+  // Default ON; opt-out via PNL_DAILY_AUTO=false.
+  // 2026-05-21: default PNL_DAILY_BR_HOUR=21 (era vazio → caía pro fallback
+  // PNL_DAILY_HOUR_UTC que prod Railway tinha setado em 9, disparando matinal).
+  // Agora 21h BRT é hardcoded default; override só via env explícito.
   // Token: TIPS_UNIFIED_TOKEN > resolveTipsToken() > resolveAlertsToken (fallback).
   // Context 'pnl-daily-tips-summary' inclui 'tip' → broadcast a subscribed groups
   // via sendAdminDMs (commit 907a524). Group recebe lucro do dia automaticamente.
   const _pnlEnabled = !/^(0|false|no)$/i.test(String(process.env.PNL_DAILY_AUTO ?? 'true'));
   if (_pnlEnabled) {
-    // BR hour override (mais natural pro user BR). BRT = UTC-3.
-    const brHour = parseInt(process.env.PNL_DAILY_BR_HOUR || '', 10);
+    // BR hour default = 21 (BRT). UTC = (21+3) % 24 = 0. Override só via env explícito.
+    const brHour = parseInt(process.env.PNL_DAILY_BR_HOUR || '21', 10);
     const pnlHourUtc = Number.isFinite(brHour) && brHour >= 0 && brHour <= 23
       ? ((brHour + 3) % 24)
-      : parseInt(process.env.PNL_DAILY_HOUR_UTC || '0', 10); // default 0 UTC = 21h BRT
+      : parseInt(process.env.PNL_DAILY_HOUR_UTC || '0', 10);
+    const { buildPnlDailyMessage } = require('./lib/pnl-daily-message');
     const runPnlDaily = async () => {
       try {
-        // 2026-05-20 fix: aggregate ML + MT pra evitar bug runPnlReport (lib query
-        // só tips table, ignora market_tips_shadow). User reportou tennis MT
-        // (handicap/totais) NÃO contadas no daily PnL.
-        const today = new Date().toISOString().slice(0, 10);
-        const lines = [`🌙 *Lucro de Hoje* — ${today}`, ''];
-
-        // ML tips: tabela `tips` is_shadow=0 + archived=0, settled today
-        const mlRows = db.prepare(`
-          SELECT sport, result,
-                 COALESCE(profit_reais, 0) AS profit_reais,
-                 CAST(REPLACE(REPLACE(stake, 'u', ''), 'U', '') AS REAL) AS stake_units
-            FROM tips
-           WHERE COALESCE(is_shadow, 0) = 0
-             AND COALESCE(archived, 0) = 0
-             AND result IN ('win', 'loss', 'void')
-             AND DATE(settled_at) = ?
-        `).all(today);
-
-        // MT tips: tabela market_tips_shadow settled today.
-        // CRÍTICO: filtra admin_dm_sent_at NOT NULL — só inclui MT que foi
-        // DISPATCHED ao user (admin DM). Tips shadow puro (research only, sem
-        // dispatch) NÃO entram em PnL real — ROI inflado se incluir.
-        // Schema mig 025: addColumnIfMissing admin_dm_sent_at TEXT.
-        const mtRows = db.prepare(`
-          SELECT sport, result,
-                 COALESCE(profit_units, 0) AS profit_units,
-                 COALESCE(stake_units, 0) AS stake_units
-            FROM market_tips_shadow
-           WHERE result IN ('win', 'loss', 'void')
-             AND admin_dm_sent_at IS NOT NULL
-             AND DATE(settled_at) = ?
-        `).all(today);
-
-        const bySport = {};
-        let totW = 0, totL = 0, totV = 0, totProfit = 0, totStake = 0;
-        for (const r of mlRows) {
-          const s = r.sport || '?';
-          bySport[s] = bySport[s] || { mlN: 0, mlP: 0, mtN: 0, mtP: 0, w: 0, l: 0, v: 0 };
-          bySport[s].mlN++;
-          bySport[s].mlP += r.profit_reais || 0;
-          totProfit += r.profit_reais || 0;
-          totStake += r.stake_units || 0;
-          if (r.result === 'win') { bySport[s].w++; totW++; }
-          else if (r.result === 'loss') { bySport[s].l++; totL++; }
-          else if (r.result === 'void') { bySport[s].v++; totV++; }
-        }
-        for (const r of mtRows) {
-          const s = r.sport || '?';
-          bySport[s] = bySport[s] || { mlN: 0, mlP: 0, mtN: 0, mtP: 0, w: 0, l: 0, v: 0 };
-          bySport[s].mtN++;
-          bySport[s].mtP += r.profit_units || 0;
-          totProfit += r.profit_units || 0;
-          totStake += r.stake_units || 0;
-          if (r.result === 'win') { bySport[s].w++; totW++; }
-          else if (r.result === 'loss') { bySport[s].l++; totL++; }
-          else if (r.result === 'void') { bySport[s].v++; totV++; }
-        }
-        const totSettled = totW + totL + totV;
-        const roi = totStake > 0 ? (totProfit / totStake * 100) : 0;
-        lines.push(`📊 ${totSettled} liquidadas (${totW}W ${totL}L ${totV}V)`);
-        lines.push(`💰 *${totProfit >= 0 ? '+' : ''}${totProfit.toFixed(2)}u* (${totProfit >= 0 ? '+' : ''}${roi.toFixed(1)}% ROI · ${totStake.toFixed(1)}u stake)`);
-
-        const sportsSorted = Object.entries(bySport).sort((a, b) => (b[1].mlP + b[1].mtP) - (a[1].mlP + a[1].mtP));
-        if (sportsSorted.length > 0) {
-          lines.push('', '*Por sport:*');
-          for (const [s, d] of sportsSorted) {
-            const c = d.mlN + d.mtN;
-            const p = d.mlP + d.mtP;
-            if (c === 0) continue;
-            const parts = [];
-            if (d.mlN > 0) parts.push(`ML ${d.mlN}`);
-            if (d.mtN > 0) parts.push(`MT ${d.mtN}`);
-            const emoji = p > 0 ? '🟢' : p < 0 ? '🔴' : '⚪';
-            lines.push(`${emoji} ${s}: ${parts.join(' + ')} (${d.w}W${d.l}L${d.v}V) → ${p >= 0 ? '+' : ''}${p.toFixed(2)}u`);
-          }
-        } else {
-          lines.push('', '_Nenhuma tip liquidada hoje._');
-        }
-
-        const msg = lines.join('\n');
+        const { msg, stats } = buildPnlDailyMessage(db, { skipToday: false });
         const token = (process.env.TIPS_UNIFIED_TOKEN || '').trim()
           || (typeof resolveTipsToken === 'function' ? resolveTipsToken('') : null)
           || resolveAlertsToken();
         if (token) await sendAdminDMs(token, msg, { parse_mode: 'Markdown' }, 'pnl-daily-tips-summary');
-        log('INFO', 'PNL-DAILY', `Report enviado · ML+MT total ${totProfit.toFixed(2)}u (ML ${mlRows.length}, MT ${mtRows.length})`);
+        log('INFO', 'PNL-DAILY', `Report enviado · today ${stats.today_profit.toFixed(2)}u (n=${stats.today_n}, 7d=${stats.past7d_days}d, 30d=${stats.sum30d_n}, total=${stats.sumAll_n})`);
       } catch (e) { log('WARN', 'PNL-DAILY', `erro: ${e.message}`); }
     };
     const scheduleNextPnl = () => {
