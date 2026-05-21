@@ -11553,9 +11553,16 @@ setInterval(load, 10000);
   // - Conta duplicatas: total - distinct(match_id||game||source)
   // - apply=1: dedup (keep MAX(id)) + recria UNIQUE INDEX
   if (p === '/admin/match-result-sources-unique-check' && (req.method === 'GET' || req.method === 'POST')) {
-    if (!requireAdmin(req, res)) return;
+    const apply = String(parsed.query.apply || '0') === '1';
+    // Read-only (apply=0): aceita query.key fallback pra browser quick-check.
+    // Destructive (apply=1): exige header x-admin-key via requireAdmin full check.
+    if (apply) {
+      if (!requireAdmin(req, res)) return;
+    } else {
+      const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+      if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized', tip: 'use ?key= for read-only OR header x-admin-key for apply=1' }, 401); return; }
+    }
     try {
-      const apply = String(parsed.query.apply || '0') === '1';
       // Check existing UNIQUE indices
       const indices = db.prepare(`
         SELECT name, sql FROM sqlite_master
