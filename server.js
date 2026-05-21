@@ -21319,9 +21319,54 @@ load();
       // CRITICAL: backtest consome evalTips (out-of-sample) quando eval_days>0.
       // Calib treinado em trainTips; aplicado em tips nunca vistas pelo PAV.
       const backtestSet = evalDays > 0 ? evalTips : tips;
+      // 2026-05-21 audit: backtest agora usa LOOKUP HIERÁRQUICO mesmo schema
+      // do consumer (lib/tennis-markov-calib.js:165). Antes só usava flat v1
+      // bins (calibByMarket[m].bins), ignorando tiers/sides recém-fitados.
+      // Resultado: backtest mensurava calib DIFERENTE do que prod usa.
+      // Causa-fix tennis ROI POST -12.7% vs PRE -7.5% (impossível avaliar real
+      // benefit do tier-aware quando backtest ignora tiers).
+      // Priority (mais específico → mais genérico):
+      //   1. markets[m].tiers[tier].sides[side].bins  (v2.1)
+      //   2. markets[m].tiers[tier].bins              (v2)
+      //   3. markets[m].sides[side].bins              (v2.1 noside fallback)
+      //   4. markets[m].bins                          (v1 default)
+      let _tierForBt = null;
+      let _normSideBt = null;
+      try {
+        const { classifyTierString } = require('./lib/tier-classifier');
+        _tierForBt = (lg) => classifyTierString(sport, lg);
+        _normSideBt = (s) => {
+          const v = String(s || '').toLowerCase().trim();
+          if (v === 'home' || v === 'team1' || v === 'h' || v === '1') return 'home';
+          if (v === 'away' || v === 'team2' || v === 'a' || v === '2') return 'away';
+          if (v === 'over' || v === 'o') return 'over';
+          if (v === 'under' || v === 'u') return 'under';
+          return null;
+        };
+      } catch (_) { /* tier classifier opcional — fallback flat */ }
+      const _resolveBinsForTip = (t) => {
+        const m = calibByMarket[t.market];
+        if (!m) return null;
+        const tier = _tierForBt ? _tierForBt(t.league) : null;
+        const side = _normSideBt ? _normSideBt(t.side) : null;
+        // v2.1: tier + side
+        if (tier && side && m.tiers?.[tier]?.sides?.[side]?.bins?.length) {
+          return m.tiers[tier].sides[side].bins;
+        }
+        // v2: tier only
+        if (tier && m.tiers?.[tier]?.bins?.length) {
+          return m.tiers[tier].bins;
+        }
+        // v2.1-noside: side only
+        if (side && m.sides?.[side]?.bins?.length) {
+          return m.sides[side].bins;
+        }
+        // v1: flat
+        return m.bins;
+      };
       for (const t of backtestSet) {
         if (!Number.isFinite(t.p_model) || !Number.isFinite(t.odd)) continue;
-        const pCalib = applyCalib(t.p_model, calibByMarket[t.market]?.bins);
+        const pCalib = applyCalib(t.p_model, _resolveBinsForTip(t));
         const evRaw = (t.p_model * t.odd - 1) * 100;
         const evCalib = (pCalib * t.odd - 1) * 100;
         const passRaw = evRaw >= MIN_EV && t.p_model < 0.95 && t.odd >= 1.5;
