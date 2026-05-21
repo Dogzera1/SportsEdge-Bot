@@ -26446,28 +26446,76 @@ load();
         // do bot.js (applyGlobalRisk) checava — MT scanners (market-tip-processor,
         // dota-extras, lol-kills, basket-mt) faziam record-tip direto, bypassando
         // o gate. Skip pra is_shadow=1 (não consome cota dia real).
+        // 2026-05-21: + cap granular per (sport, market) via DAILY_TIP_LIMIT_<SPORT>_<MARKET>.
+        // Conta tips reais ML (tabela tips) + MT dispatched (market_tips_shadow) que
+        // mapeiam pro mesmo market_type via MARKET_TYPE_MAP (ex: HANDICAP_GAMES ML
+        // + handicapGames MT compartilham cap quando configurado).
         if (!t.isShadow) {
-          const _dailyLimit = (() => {
-            const sportKey = `DAILY_TIP_LIMIT_${String(sport).toUpperCase()}`;
-            const sportLimit = parseInt(process.env[sportKey] || '', 10);
-            if (Number.isFinite(sportLimit) && sportLimit > 0) return sportLimit;
-            const globalLimit = parseInt(process.env.DAILY_TIP_LIMIT || '', 10);
-            if (Number.isFinite(globalLimit) && globalLimit > 0) return globalLimit;
+          const sportU = String(sport).toUpperCase();
+          const mlMarketType = String(t.market_type || 'ML').toUpperCase();
+          const marketKeyEnv = mlMarketType.replace(/[^A-Z0-9]/g, '_');
+          // Hierarquia: (sport, market) > sport > global
+          const _capInfo = (() => {
+            const smKey = `DAILY_TIP_LIMIT_${sportU}_${marketKeyEnv}`;
+            const smLim = parseInt(process.env[smKey] || '', 10);
+            if (Number.isFinite(smLim) && smLim > 0) return { limit: smLim, scope: 'sport_market', key: smKey };
+            const sLim = parseInt(process.env[`DAILY_TIP_LIMIT_${sportU}`] || '', 10);
+            if (Number.isFinite(sLim) && sLim > 0) return { limit: sLim, scope: 'sport', key: `DAILY_TIP_LIMIT_${sportU}` };
+            const gLim = parseInt(process.env.DAILY_TIP_LIMIT || '', 10);
+            if (Number.isFinite(gLim) && gLim > 0) return { limit: gLim, scope: 'global', key: 'DAILY_TIP_LIMIT' };
             return null;
           })();
-          if (_dailyLimit) {
+          if (_capInfo) {
             try {
               const tzH = parseFloat(process.env.DAILY_TZ_OFFSET_H ?? '-3');
               const offsetMod = `${tzH >= 0 ? '+' : '-'}${Math.abs(tzH)} hours`;
-              const _row = db.prepare(`
-                SELECT COUNT(*) AS n FROM tips
-                WHERE sport = ?
-                  AND sent_at >= datetime(datetime('now', ?), 'start of day', ?)
-                  AND (archived IS NULL OR archived = 0)
-                  AND COALESCE(is_shadow, 0) = 0
-              `).get(sport, offsetMod, `${tzH >= 0 ? '-' : '+'}${Math.abs(tzH)} hours`);
-              if ((_row?.n || 0) >= _dailyLimit) {
-                sendJson(res, { ok: false, skipped: true, reason: 'daily_tip_limit', count: _row.n, limit: _dailyLimit });
+              const negOffset = `${tzH >= 0 ? '-' : '+'}${Math.abs(tzH)} hours`;
+              let count = 0;
+              if (_capInfo.scope === 'sport_market') {
+                // Count ML real (tips) with matching market_type
+                const tipsRow = db.prepare(`
+                  SELECT COUNT(*) AS n FROM tips
+                  WHERE sport = ?
+                    AND UPPER(COALESCE(market_type, 'ML')) = ?
+                    AND sent_at >= datetime(datetime('now', ?), 'start of day', ?)
+                    AND (archived IS NULL OR archived = 0)
+                    AND COALESCE(is_shadow, 0) = 0
+                `).get(sport, mlMarketType, offsetMod, negOffset);
+                count += tipsRow?.n || 0;
+                // Count MT dispatched (market_tips_shadow) — reverse lookup MT keys
+                // que mapeiam pro mesmo mlMarketType via MARKET_TYPE_MAP
+                try {
+                  const { MARKET_TYPE_MAP } = require('./lib/mt-result-propagator');
+                  const mtKeys = Object.entries(MARKET_TYPE_MAP)
+                    .filter(([, v]) => v === mlMarketType)
+                    .map(([k]) => k);
+                  if (mtKeys.length) {
+                    const placeholders = mtKeys.map(() => '?').join(',');
+                    const mtRow = db.prepare(`
+                      SELECT COUNT(*) AS n FROM market_tips_shadow
+                      WHERE sport = ?
+                        AND market IN (${placeholders})
+                        AND admin_dm_sent_at IS NOT NULL
+                        AND admin_dm_sent_at >= datetime(datetime('now', ?), 'start of day', ?)
+                    `).get(sport, ...mtKeys, offsetMod, negOffset);
+                    count += mtRow?.n || 0;
+                  }
+                } catch (_) {}
+              } else {
+                // Scope = sport ou global: count all real tips for sport (legacy behavior)
+                const _row = db.prepare(`
+                  SELECT COUNT(*) AS n FROM tips
+                  WHERE sport = ?
+                    AND sent_at >= datetime(datetime('now', ?), 'start of day', ?)
+                    AND (archived IS NULL OR archived = 0)
+                    AND COALESCE(is_shadow, 0) = 0
+                `).get(sport, offsetMod, negOffset);
+                count = _row?.n || 0;
+              }
+              if (count >= _capInfo.limit) {
+                const reason = _capInfo.scope === 'sport_market' ? 'daily_tip_limit_market' : 'daily_tip_limit';
+                log('INFO', 'RISK-CAP', `${sport}/${mlMarketType}: ${count}/${_capInfo.limit} (${_capInfo.key}) — BLOQUEADO`);
+                sendJson(res, { ok: false, skipped: true, reason, count, limit: _capInfo.limit, scope: _capInfo.scope, env_key: _capInfo.key });
                 return;
               }
             } catch (_) {}
