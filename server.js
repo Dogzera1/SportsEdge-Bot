@@ -27748,16 +27748,36 @@ load();
         // ficava NULL → fireAutoBetHook fallback opts.expectedOdd (best-book
         // inflado em paths que passam lineShopOdds com bestBook != Pinnacle).
         // Cross-sport: aplica a qualquer payload com t.pinnacleOdd direto.
-        if (result?.lastInsertRowid && t.pinnacleOdd != null) {
-          try {
-            const _pinDirect = parseFloat(t.pinnacleOdd);
-            if (Number.isFinite(_pinDirect) && _pinDirect > 1) {
+        //
+        // 2026-05-21 EXT: ML paths cross-sport — quando lineShopOdds passado mas
+        // computeLineShop não populou pinnacle_odd (caso: bookmaker null OR
+        // _allOdds vazio), reextrai aqui via fallback hierárquico:
+        //   1. t.pinnacleOdd direto (MT path)
+        //   2. t.lineShopOdds.bookmaker === Pinnacle → t.odds direto
+        //   3. t.lineShopOdds._allOdds tem Pinnacle → pega odd pelo pickSide
+        if (result?.lastInsertRowid) {
+          let _pinDirect = parseFloat(t.pinnacleOdd);
+          if ((!Number.isFinite(_pinDirect) || _pinDirect <= 1) && t.lineShopOdds) {
+            const bk = String(t.lineShopOdds.bookmaker || '').toLowerCase();
+            if (bk.includes('pinnacle')) {
+              const v = parseFloat(t.odds);
+              if (Number.isFinite(v) && v > 1) _pinDirect = v;
+            } else if (Array.isArray(t.lineShopOdds._allOdds) && t.pickSide) {
+              const pin = t.lineShopOdds._allOdds.find(o => /pinnacle/i.test(String(o?.bookmaker || '')));
+              if (pin) {
+                const v = parseFloat(pin[t.pickSide]);
+                if (Number.isFinite(v) && v > 1) _pinDirect = v;
+              }
+            }
+          }
+          if (Number.isFinite(_pinDirect) && _pinDirect > 1) {
+            try {
               const _existing = db.prepare('SELECT pinnacle_odd FROM tips WHERE id = ?').get(result.lastInsertRowid);
               if (_existing && _existing.pinnacle_odd == null) {
                 db.prepare('UPDATE tips SET pinnacle_odd = ? WHERE id = ?').run(_pinDirect, result.lastInsertRowid);
               }
-            }
-          } catch (e) { log('DEBUG', 'PIN-ODD-DIRECT', `err: ${e.message}`); }
+            } catch (e) { log('DEBUG', 'PIN-ODD-DIRECT', `err: ${e.message}`); }
+          }
         }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
         // Metrics: counter por sport + isLive + isShadow.
