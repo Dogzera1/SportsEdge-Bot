@@ -10080,6 +10080,25 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       log('DEBUG', TAG, `skip min_edge ${match.team1} vs ${match.team2} edge=${_edgePp.toFixed(1)}pp < ${minEdge}pp`);
       return;
     }
+    // 4. Tier gate — bloqueia AI emit em tier não-1 quando <SPORT>_AI_TIER1_ONLY=true.
+    // 2026-05-21 audit: LoL AI DeepSeek 4/4 losses 7d em tier3 minor leagues
+    // (NACL Winthrop, LCK CL Kiwoom DRX, La Ligue Galions, +1). Modelo overcalla
+    // edge em leagues raras onde sample histórico é insuficiente. Default OFF
+    // (opt-in per sport). Tier1 = major (LCK/LEC/LPL/LCS), tier2 = regional,
+    // tier3 = minor/Academy/Challenger. Helper _leagueTier (memory commit 7f9dcc9
+    // tier classifier unificado) — null tier (não classificado) é tratado como
+    // unknown e PASSA (conservador, não força skip).
+    const tier1OnlyEnv = String(process.env[`${sportU}_AI_TIER1_ONLY`] ?? '');
+    if (/^(1|true|yes)$/i.test(tier1OnlyEnv) && eventName) {
+      try {
+        const tier = _leagueTier(sport, eventName);
+        if (tier && tier > 1) {
+          try { _metrics.incr('ai_shadow_skip_tier', { sport, tier: String(tier) }); } catch (_) {}
+          log('INFO', TAG, `skip tier ${tier} (${sportU}_AI_TIER1_ONLY=true): ${match.team1} vs ${match.team2} [${eventName}]`);
+          return;
+        }
+      } catch (_) { /* _leagueTier throws em sport desconhecido → não bloqueia */ }
+    }
     // Reserva slot — incrementa cooldown + daily BEFORE call (atomico, evita double-count em fire-and-forget)
     if (match?.id) _aiShadowMatchCooldown.set(`${sport}|${match.id}`, Date.now());
     {
