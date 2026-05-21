@@ -15214,6 +15214,192 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-21 (data audit): GET /admin/tips-unit-audit?days=7&key=<KEY>
+  // Lista tips REAIS (is_shadow=0) onde stake_reais ≠ stake_units (text col stake).
+  // Suporte ao processo de revertir 1u=R$10 → 1u=R$1 retroativamente.
+  // Output inclui correção proposta + delta bankroll esperado.
+  // GET-only (read), nenhum UPDATE.
+  if (p === '/admin/tips-unit-audit' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '7', 10) || 7));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const targetUnitValue = parseFloat(parsed.query.target_unit || '1') || 1;
+    try {
+      const rows = db.prepare(`
+        SELECT id, sport, market_type, tip_participant, participant1, participant2,
+          event_name, odds, ev, stake, stake_reais, profit_reais,
+          result, is_shadow, is_live, archived, sent_at, settled_at, match_id
+        FROM tips
+        WHERE sent_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          ${sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : ''}
+        ORDER BY id DESC
+      `).all(`-${days} days`);
+
+      function _parseUnits(s) {
+        const m = String(s || '').match(/(\d+(?:[.,]\d+)?)\s*u/i);
+        return m ? parseFloat(m[1].replace(',', '.')) : null;
+      }
+      function _expectedProfit(units, odds, result) {
+        if (!Number.isFinite(units) || !Number.isFinite(odds) || units <= 0) return null;
+        switch (result) {
+          case 'win':  return +(units * (odds - 1)).toFixed(2);
+          case 'loss': return +(-units).toFixed(2);
+          case 'void': case 'push': return 0;
+          default: return null;
+        }
+      }
+
+      const affected = [];
+      let totalStakeOld = 0, totalStakeNew = 0;
+      let totalProfitOld = 0, totalProfitNew = 0;
+      let nSettled = 0, nPending = 0;
+
+      for (const r of rows) {
+        const units = _parseUnits(r.stake);
+        const stakeR = Number(r.stake_reais);
+        if (!Number.isFinite(units) || !Number.isFinite(stakeR) || units <= 0) continue;
+        const ratio = stakeR / units;
+        if (Math.abs(ratio - targetUnitValue) <= 0.05) continue; // já está correto
+
+        const newStakeReais = +(units * targetUnitValue).toFixed(2);
+        const newProfitReais = _expectedProfit(units, Number(r.odds), r.result);
+        const profitOld = Number(r.profit_reais) || 0;
+        const profitDelta = newProfitReais != null ? +(newProfitReais - profitOld).toFixed(2) : 0;
+
+        affected.push({
+          id: r.id, sport: r.sport, market: r.market_type,
+          pick: r.tip_participant, p1: r.participant1, p2: r.participant2,
+          odds: r.odds, units, stake_reais_atual: stakeR, ratio: +ratio.toFixed(2),
+          stake_reais_novo: newStakeReais,
+          profit_reais_atual: profitOld,
+          profit_reais_novo: newProfitReais,
+          profit_delta: profitDelta,
+          result: r.result, is_live: r.is_live,
+          sent_at: r.sent_at, settled_at: r.settled_at,
+          league: r.event_name, match_id: r.match_id,
+        });
+
+        if (['win','loss','void','push'].includes(r.result)) {
+          nSettled++;
+          totalProfitOld += profitOld;
+          totalProfitNew += (newProfitReais || 0);
+        } else {
+          nPending++;
+        }
+        totalStakeOld += stakeR;
+        totalStakeNew += newStakeReais;
+      }
+
+      sendJson(res, {
+        ok: true,
+        days,
+        sport: sportFilter || 'all',
+        target_unit_value: targetUnitValue,
+        n_affected: affected.length,
+        n_settled: nSettled,
+        n_pending: nPending,
+        summary: {
+          total_stake_reais_atual: +totalStakeOld.toFixed(2),
+          total_stake_reais_novo: +totalStakeNew.toFixed(2),
+          total_stake_delta: +(totalStakeNew - totalStakeOld).toFixed(2),
+          total_profit_reais_atual_settled: +totalProfitOld.toFixed(2),
+          total_profit_reais_novo_settled: +totalProfitNew.toFixed(2),
+          bankroll_delta_expected: +(totalProfitNew - totalProfitOld).toFixed(2),
+        },
+        affected,
+        note: 'GET-only — nenhum UPDATE feito. Pra aplicar, use /admin/tips-unit-rescale (POST com ?confirm=true).',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // 2026-05-21 (data correction): POST /admin/tips-unit-rescale?days=7&target_unit=1&confirm=true&key=<KEY>
+  // APLICA correção. Requer confirm=true. Recalcula stake_reais + profit_reais
+  // baseado em stake_units × target_unit. Soft-update — não mexe em bankroll
+  // automaticamente (force-sync separado).
+  if (p === '/admin/tips-unit-rescale' && req.method === 'POST') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const confirm = String(parsed.query.confirm || '').toLowerCase() === 'true';
+    if (!confirm) {
+      sendJson(res, { ok: false, error: 'confirm_required', tip: 'Add ?confirm=true' }, 400);
+      return;
+    }
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '7', 10) || 7));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const targetUnitValue = parseFloat(parsed.query.target_unit || '1') || 1;
+    const idsFilter = String(parsed.query.ids || '').trim();
+    try {
+      let sql = `
+        SELECT id, sport, market_type, odds, stake, stake_reais, profit_reais, result
+        FROM tips
+        WHERE sent_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+      `;
+      if (sportFilter) sql += ` AND sport = '${sportFilter.replace(/'/g, "''")}'`;
+      if (idsFilter) {
+        const ids = idsFilter.split(',').map(x => parseInt(x.trim(), 10)).filter(Number.isFinite);
+        if (ids.length === 0) { sendJson(res, { ok: false, error: 'invalid_ids' }, 400); return; }
+        sql += ` AND id IN (${ids.join(',')})`;
+      }
+      const rows = db.prepare(sql).all(`-${days} days`);
+
+      function _parseUnits(s) {
+        const m = String(s || '').match(/(\d+(?:[.,]\d+)?)\s*u/i);
+        return m ? parseFloat(m[1].replace(',', '.')) : null;
+      }
+      function _expectedProfit(units, odds, result) {
+        if (!Number.isFinite(units) || !Number.isFinite(odds) || units <= 0) return null;
+        switch (result) {
+          case 'win':  return +(units * (odds - 1)).toFixed(2);
+          case 'loss': return +(-units).toFixed(2);
+          case 'void': case 'push': return 0;
+          default: return null;
+        }
+      }
+
+      const stmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
+      const updates = [];
+      let totalProfitDelta = 0;
+      const tx = db.transaction(() => {
+        for (const r of rows) {
+          const units = _parseUnits(r.stake);
+          const stakeR = Number(r.stake_reais);
+          if (!Number.isFinite(units) || !Number.isFinite(stakeR) || units <= 0) continue;
+          const ratio = stakeR / units;
+          if (Math.abs(ratio - targetUnitValue) <= 0.05) continue;
+          const newStake = +(units * targetUnitValue).toFixed(2);
+          const newProfit = _expectedProfit(units, Number(r.odds), r.result);
+          // Se pending (result NULL), preserva profit_reais NULL
+          const profitToSet = newProfit != null ? newProfit : null;
+          stmt.run(newStake, profitToSet, r.id);
+          updates.push({ id: r.id, sport: r.sport,
+            stake_reais_old: stakeR, stake_reais_new: newStake,
+            profit_reais_old: Number(r.profit_reais) || 0,
+            profit_reais_new: profitToSet,
+            result: r.result });
+          if (['win','loss','void','push'].includes(r.result) && newProfit != null) {
+            totalProfitDelta += (newProfit - (Number(r.profit_reais) || 0));
+          }
+        }
+      });
+      tx();
+      log('WARN', 'TIPS-RESCALE', `${updates.length} tips rescaled target=R$${targetUnitValue}/u profit_delta=R$${totalProfitDelta.toFixed(2)} (sport=${sportFilter || 'all'}, days=${days}, ids=${idsFilter || 'all'})`);
+      sendJson(res, {
+        ok: true,
+        n_updated: updates.length,
+        profit_delta_total: +totalProfitDelta.toFixed(2),
+        updates,
+        note: 'Bankroll NÃO recomputado automaticamente. Se quiser, rode /admin/force-bankroll-sync separado.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (audit): cross-sport correlation matrix.
   // GET /admin/sport-correlation?days=30&key=<KEY>
   // Daily PnL per sport → pairwise Pearson correlation. Sports altamente
