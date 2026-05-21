@@ -7287,6 +7287,22 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       // entre Telegram message e dashboard.
       const stakeFinalNum = typeof stakeAdjusted === 'number' ? stakeAdjusted
         : parseFloat(String(stakeAdjusted || '1').replace('u','').replace(',','.')) || null;
+      // 2026-05-21: Pinnacle auto-bet hook MT path (paralelo aos 14 ML wires).
+      // Gap descoberto: MT tip #4040 (LoL TOTAL/UNDER) não foi auto-bet pq MT
+      // dispatch (`recordMarketTipAsRegular`) escapava do hook — só wires ML.
+      // fireAutoBetHook re-lê pinnacle_odd/model_p_pick do DB (P0 audit fix
+      // commit 812830b) e aplica all 7 gates (kill switch, shadow, live, cap).
+      fireAutoBetHook(db, {
+        tipId: rec.tipId,
+        eventId: match.id,
+        marketId: marketKey,
+        side: sideKey,
+        line: tip.line ?? null,
+        expectedOdd: parseFloat(tip.odd),
+        evPct: parseFloat(tip.ev),
+        sport,
+        league: match.league,
+      });
       return { tipId: rec.tipId, stakeFinal: stakeFinalNum };
     }
     return null;
