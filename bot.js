@@ -21812,6 +21812,38 @@ Máximo 200 palavras.`;
           continue;
         }
 
+        // 2026-05-21: live odds drift guard cross-sport extension (lol/cs/dota/val
+        // pattern). Football live in-play emite com elapsedMin+score → odds movem
+        // rápido (goal/red card swings -20-40% em <30s). Re-fetch /football-matches
+        // pré-DM/auto-bet; aborta se drift > FOOTBALL_LIVE_DRIFT_PP (default cap
+        // em lib/utils.checkLiveOddsDrift). Apenas live + tem _pickSideFb (1X2).
+        // Note: tip já gravada em DB (consistente com LoL pattern); abort suprime
+        // DM + auto-bet (não rebobina record-tip). Próxima iteração re-poll.
+        if (isFbLive && _pickSideFb) {
+          try {
+            const _freshFb = await serverGet('/football-matches').catch(() => null);
+            const _freshMatchFb = Array.isArray(_freshFb)
+              ? _freshFb.find(x => String(x.id) === String(recordMatchId || match.id))
+              : null;
+            const _freshOddsFb = _freshMatchFb?.odds || null;
+            const _freshSideOdd = _freshOddsFb
+              ? (_pickSideFb === 'h' ? _freshOddsFb.t1
+                 : _pickSideFb === 'a' ? _freshOddsFb.t2
+                 : _pickSideFb === 'd' ? _freshOddsFb.draw : null)
+              : null;
+            const _freshOddNumFb = parseFloat(_freshSideOdd);
+            if (Number.isFinite(_freshOddNumFb) && _freshOddNumFb > 1) {
+              const _driftFb = checkLiveOddsDrift({ tipOdd: parseFloat(tipOdd), freshOdd: _freshOddNumFb, sport: 'football' });
+              if (_driftFb.stale) {
+                log('WARN', 'AUTO-FOOTBALL',
+                  `Odds stale: tip @ ${tipOdd} mercado agora ${_freshOddNumFb} (drift ${_driftFb.driftPct}% > cap ${_driftFb.cap}) — abortando DM/auto-bet ${tipTeam}`);
+                analyzedFootball.set(key, { ts: now, tipSent: true });
+                continue;
+              }
+            }
+          } catch (_) { /* defensive: drift check is best-effort */ }
+        }
+
         const _betBtnFb = _buildTipBetButton('football', match.odds, _pickSideFb, match, tipStakeAdjFb, tipOdd);
         let _dmOkFb = false;
         for (const [userId, prefs] of subscribedUsers) {
