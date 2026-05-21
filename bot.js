@@ -25249,6 +25249,27 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('auto_shadow', checkAutoShadow), AUTO_SHADOW_CHECK_INTERVAL_MS);
   setTimeout(_wrapCron('auto_shadow', checkAutoShadow), 5 * 60 * 1000); // primeiro check 5min pós-boot (DB já tá warm)
 
+  // 2026-05-21: CS per-map rounds ingestion cron — habilita settle automático de
+  // handicap_rounds_mapN + total_rounds_mapN markets (lib/cs-per-map-ingest +
+  // mig 122 result_meta_json). Default ON (opt-out via CS_PERMAP_INGEST_AUTO=false).
+  // Cada 30min: bulk ingest últimos 14d sem meta populado (rate-limited 1.5s entre
+  // HLTV calls). Roda ~5min pós-boot pra ingestion catch-up imediata.
+  if (!/^(0|false|no)$/i.test(String(process.env.CS_PERMAP_INGEST_AUTO ?? 'true'))) {
+    const _runCsPermapIngest = async () => {
+      try {
+        const { bulkIngest } = require('./lib/cs-per-map-ingest');
+        const days = parseInt(process.env.CS_PERMAP_INGEST_DAYS || '14', 10) || 14;
+        const limit = parseInt(process.env.CS_PERMAP_INGEST_LIMIT || '20', 10) || 20;
+        const r = await bulkIngest(db, { days, limit });
+        if (r.ingested > 0 || r.errors.length > 0) {
+          log('INFO', 'CS-PERMAP-CRON', `examined=${r.examined} ingested=${r.ingested} skipped=${r.skipped} errors=${r.errors.length}`);
+        }
+      } catch (e) { log('WARN', 'CS-PERMAP-CRON', `${e.message}`); }
+    };
+    setInterval(_wrapCron('cs_permap_ingest', _runCsPermapIngest), 30 * 60 * 1000);
+    setTimeout(_wrapCron('cs_permap_ingest', _runCsPermapIngest), 5 * 60 * 1000);
+  }
+
   // Auto-Healer: detecta anomalias via Health Sentinel e aplica fixes operacionais.
   // Default ON — desativar via AUTO_HEALER_ENABLED=false
   // Jittered ±60s pra evitar collision com stale_line/book_bug (todos 5min).
