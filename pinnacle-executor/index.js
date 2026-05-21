@@ -77,6 +77,16 @@ let _persistentContext = null;
 const fs = require('fs');
 const STORAGE_STATE_PATH = process.env.PLAYWRIGHT_STORAGE_PATH || '/tmp/pinnacle-session.json';
 
+// 2026-05-21 idempotency cache: tip_id → { ts, result } pra anti-dup HTTP retry
+// Cleanup automático após 10min (sweep no place-bet handler)
+const _idempotencyCache = new Map();
+function _cleanIdempotency() {
+  const now = Date.now();
+  for (const [k, v] of _idempotencyCache.entries()) {
+    if (now - v.ts > 10 * 60 * 1000) _idempotencyCache.delete(k);
+  }
+}
+
 async function _getOrCreateContext() {
   const { chromium } = require('playwright');
   if (_persistentBrowser && _persistentContext) {
@@ -177,7 +187,9 @@ async function placeBetPlaywright(payload) {
 
     await page.waitForTimeout(1000); // odd refresh
 
-    // Slippage check
+    // Slippage check — ASYMMETRIC (audit P1-4 fix):
+    //   - Odd DOWN (Pinnacle baixou) = nos prejudica, reject se shift > max
+    //   - Odd UP (Pinnacle subiu = melhor pra user) = SEMPRE aceita (free edge)
     const currentOddText = await page.locator(
       '[data-test-id="current-odd"], .bet-slip-odd, [data-test-id="bet-slip-price"]'
     ).first().textContent().catch(() => null);
@@ -185,13 +197,19 @@ async function placeBetPlaywright(payload) {
       ? parseFloat(String(currentOddText).replace(',', '.').replace(/[^\d.]/g, ''))
       : payload.expected_odd;
     const expected = payload.expected_odd;
-    const slippagePct = Math.abs(currentOdd - expected) / expected * 100;
-    if (slippagePct > (payload.max_slippage_pct || 2)) {
+    // Negative shift (Pinnacle baixou) é prejudicial; positive (subiu) é bom
+    const slipDownPct = currentOdd < expected ? ((expected - currentOdd) / expected * 100) : 0;
+    if (slipDownPct > (payload.max_slippage_pct || 2)) {
       await page.close();
       return {
         ok: false,
-        error: `slippage ${slippagePct.toFixed(2)}% > max ${payload.max_slippage_pct}% (expected=${expected} current=${currentOdd})`,
+        error: `slippage DOWN ${slipDownPct.toFixed(2)}% > max ${payload.max_slippage_pct}% (expected=${expected} current=${currentOdd})`,
       };
+    }
+    // Positive slip log (free edge — Pinnacle subiu)
+    if (currentOdd > expected) {
+      const slipUpPct = ((currentOdd - expected) / expected * 100);
+      log('INFO', 'SLIPPAGE-UP', `accepting positive slip +${slipUpPct.toFixed(2)}% (expected=${expected} current=${currentOdd})`);
     }
 
     // Confirm bet
@@ -267,13 +285,30 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 400, { ok: false, error: 'invalid stake_brl' });
     }
 
-    log('INFO', 'BET-REQ', `${payload.sport}/${payload.market_id}/${payload.side} stake=R$${payload.stake_brl} odd=${payload.expected_odd} event=${payload.event_id}`);
+    // 2026-05-21 audit RH-1: idempotency via tip_id cache. Anti HTTP retry → 2x bet.
+    // Cache map { tip_id: { ts, result } } com TTL 10min. Cobre Railway proxy retry +
+    // bot retry. Persistence via /tmp não usado (acceptable: restart limpa state).
+    if (payload.tip_id) {
+      const cached = _idempotencyCache.get(String(payload.tip_id));
+      if (cached && (Date.now() - cached.ts) < 10 * 60 * 1000) {
+        log('INFO', 'IDEMPOTENT', `tip_id=${payload.tip_id} já processado — retornando cached result`);
+        return sendJson(res, 200, { ...cached.result, idempotent: true });
+      }
+    }
+
+    log('INFO', 'BET-REQ', `${payload.sport}/${payload.market_id}/${payload.side} stake=R$${payload.stake_brl} odd=${payload.expected_odd} event=${payload.event_id} tip=${payload.tip_id || '?'}`);
 
     try {
       let result;
       if (MODE === 'playwright') result = await placeBetPlaywright(payload);
       else if (MODE === 'api') result = await placeBetApi(payload);
       else result = await placeBetMock(payload);
+
+      // Cache result em idempotency (apenas se tem tip_id + result resolved)
+      if (payload.tip_id && result) {
+        _idempotencyCache.set(String(payload.tip_id), { ts: Date.now(), result });
+        _cleanIdempotency(); // sweep TTL
+      }
 
       if (result.ok) {
         log('INFO', 'BET-OK', `ticket=${result.ticket_id} odd=${result.actual_odd} stake=R$${result.stake_brl}`);
@@ -283,6 +318,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, result.ok ? 200 : 502, result);
     } catch (e) {
       log('ERROR', 'BET-EXCEPTION', e.message);
+      // Cache exception result tb pra anti-retry
+      if (payload.tip_id) {
+        _idempotencyCache.set(String(payload.tip_id), { ts: Date.now(), result: { ok: false, error: e.message } });
+      }
       return sendJson(res, 500, { ok: false, error: e.message });
     }
   }
