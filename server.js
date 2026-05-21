@@ -10971,6 +10971,25 @@ setInterval(load, 10000);
     return;
   }
 
+  // POST /admin/sync-valorant-per-map-rounds?days=14&limit=30&dry=1&key=<ADMIN_KEY>
+  // 2026-05-21: ingestion VLR.gg per-map rounds (mirror sync-cs-per-map-rounds).
+  // Mesma estrutura result_meta_json.maps[] — settle handler agnóstico ao source.
+  if (p === '/admin/sync-valorant-per-map-rounds' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '14', 10) || 14));
+    const limit = Math.max(1, Math.min(200, parseInt(parsed.query.limit || '30', 10) || 30));
+    const dryRun = /^(1|true|yes)$/i.test(String(parsed.query.dry || ''));
+    (async () => {
+      try {
+        const { bulkIngest } = require('./lib/valorant-per-map-ingest');
+        const r = await bulkIngest(db, { days, limit, dryRun });
+        sendJson(res, { ok: true, days, limit, dry: dryRun, ...r });
+      } catch (e) { sendJson(res, { error: e.message }, 500); }
+    })();
+    return;
+  }
+
   // POST /admin/settle-mt-shadow-kills-manual?id=N&kills=K&key=<ADMIN_KEY>
   // Settla manualmente uma shadow kills tip passando totalKills real.
   // Útil quando OE/PS/Riot resolvers todos falham (ex: Riot livestats aged out).

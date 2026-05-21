@@ -25270,6 +25270,24 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     setTimeout(_wrapCron('cs_permap_ingest', _runCsPermapIngest), 5 * 60 * 1000);
   }
 
+  // 2026-05-21: Valorant per-map rounds ingestion cron (mirror CS).
+  // VLR.gg scraper via lib/vlr.getValorantMatchMapResults. Rate-limit 2s entre calls.
+  if (!/^(0|false|no)$/i.test(String(process.env.VAL_PERMAP_INGEST_AUTO ?? 'true'))) {
+    const _runValPermapIngest = async () => {
+      try {
+        const { bulkIngest } = require('./lib/valorant-per-map-ingest');
+        const days = parseInt(process.env.VAL_PERMAP_INGEST_DAYS || '14', 10) || 14;
+        const limit = parseInt(process.env.VAL_PERMAP_INGEST_LIMIT || '15', 10) || 15;
+        const r = await bulkIngest(db, { days, limit });
+        if (r.ingested > 0 || r.errors.length > 0) {
+          log('INFO', 'VAL-PERMAP-CRON', `examined=${r.examined} ingested=${r.ingested} skipped=${r.skipped} errors=${r.errors.length}`);
+        }
+      } catch (e) { log('WARN', 'VAL-PERMAP-CRON', `${e.message}`); }
+    };
+    setInterval(_wrapCron('val_permap_ingest', _runValPermapIngest), 30 * 60 * 1000);
+    setTimeout(_wrapCron('val_permap_ingest', _runValPermapIngest), 6 * 60 * 1000); // 1min offset vs CS
+  }
+
   // Auto-Healer: detecta anomalias via Health Sentinel e aplica fixes operacionais.
   // Default ON — desativar via AUTO_HEALER_ENABLED=false
   // Jittered ±60s pra evitar collision com stale_line/book_bug (todos 5min).
