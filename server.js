@@ -15073,6 +15073,147 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-21 (granularidade P1): GET /admin/tips-by-confidence?sport=tennis&days=30&key=<KEY>
+  // Breakdown ROI per (confidence) + cross (confidence × market) + (confidence × tier).
+  // Permite decisão promote/demote/cap mais cirúrgica que aggregate ROI.
+  if (p === '/admin/tips-by-confidence' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const minN = Math.max(1, parseInt(parsed.query.minN || '1', 10) || 1);
+    try {
+      const rows = db.prepare(`
+        SELECT sport, confidence, market_type,
+          COALESCE(event_name, '') AS event_name,
+          odds, ev, stake_reais, profit_reais, result, clv_odds,
+          tip_participant
+        FROM tips
+        WHERE result IN ('win','loss','void','push')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          ${sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : ''}
+      `).all(`-${days} days`);
+
+      function _norm(c) {
+        const s = String(c || '').toUpperCase().replace('MÉDIA', 'MEDIA');
+        return ['ALTA','MEDIA','BAIXA'].includes(s) ? s : 'UNKNOWN';
+      }
+      function _stats(list) {
+        const n = list.length;
+        const w = list.filter(r => r.result === 'win').length;
+        const l = list.filter(r => r.result === 'loss').length;
+        const v = list.filter(r => r.result === 'void').length;
+        const p = list.filter(r => r.result === 'push').length;
+        const stake = list.reduce((a,r) => a + (Number(r.stake_reais)||0), 0);
+        const profit = list.reduce((a,r) => a + (Number(r.profit_reais)||0), 0);
+        const avgOdd = n > 0 ? list.reduce((a,r) => a + (Number(r.odds)||0), 0)/n : 0;
+        const avgEv = n > 0 ? list.reduce((a,r) => a + (Number(r.ev)||0), 0)/n : 0;
+        const clvList = list.filter(r => r.clv_odds != null && Number(r.odds) > 1)
+          .map(r => ((Number(r.clv_odds) - Number(r.odds)) / Number(r.odds)) * 100);
+        const avgClv = clvList.length > 0 ? clvList.reduce((a,b) => a+b, 0)/clvList.length : null;
+        return {
+          n, wins: w, losses: l, voids: v, pushes: p,
+          total_stake_reais: +stake.toFixed(2),
+          total_profit_reais: +profit.toFixed(2),
+          roi_pct: stake > 0 ? +((profit/stake)*100).toFixed(2) : 0,
+          win_rate_pct: (w+l) > 0 ? +((w/(w+l))*100).toFixed(1) : 0,
+          avg_odd: +avgOdd.toFixed(2),
+          avg_ev_pct: +avgEv.toFixed(1),
+          avg_clv_pct: avgClv != null ? +avgClv.toFixed(2) : null,
+        };
+      }
+      function _isTier1Tennis(ev) {
+        const s = String(ev || '').toLowerCase();
+        return /grand slam|wimbledon|us open|french open|roland garros|australian open|atp finals|wta finals|masters 1000|atp 1000|wta 1000|indian wells|miami open|monte.?carlo|madrid open|italian open|rome open|cincinnati|shanghai|atp (rome|madrid|toronto|canada|montreal)\b|wta (rome|madrid|toronto|canada|montreal|cincinnati)\b/.test(s);
+      }
+      function _isChallenger(ev) {
+        return /challenger|itf|college/i.test(String(ev || ''));
+      }
+
+      const byConf = { ALTA: [], MEDIA: [], BAIXA: [], UNKNOWN: [] };
+      for (const r of rows) byConf[_norm(r.confidence)].push(r);
+
+      const result = {
+        ok: true,
+        days,
+        sport: sportFilter || 'all',
+        total: rows.length,
+        by_confidence: {},
+      };
+      for (const c of ['ALTA','MEDIA','BAIXA','UNKNOWN']) {
+        if (byConf[c].length === 0 || byConf[c].length < minN) continue;
+        const s = _stats(byConf[c]);
+        result.by_confidence[c] = s;
+      }
+
+      // Per (confidence × market)
+      result.by_confidence_market = {};
+      const allMarkets = [...new Set(rows.map(r => r.market_type || 'ML'))];
+      for (const c of ['ALTA','MEDIA','BAIXA']) {
+        for (const m of allMarkets) {
+          const list = byConf[c].filter(r => (r.market_type || 'ML') === m);
+          if (list.length < minN) continue;
+          result.by_confidence_market[`${c}|${m}`] = _stats(list);
+        }
+      }
+
+      // Per (confidence × tier) — tennis only meaningful
+      if (sportFilter === 'tennis' || !sportFilter) {
+        result.by_confidence_tier_tennis = {};
+        const tierFns = {
+          tier1_slam_masters: r => _isTier1Tennis(r.event_name) && !_isChallenger(r.event_name),
+          tier2_atp_wta_main: r => !_isTier1Tennis(r.event_name) && !_isChallenger(r.event_name),
+          tier3_challenger_itf: r => _isChallenger(r.event_name),
+        };
+        for (const c of ['ALTA','MEDIA','BAIXA']) {
+          for (const [tname, tfn] of Object.entries(tierFns)) {
+            const list = byConf[c].filter(r => r.sport === 'tennis' && tfn(r));
+            if (list.length < minN) continue;
+            result.by_confidence_tier_tennis[`${c}|${tname}`] = _stats(list);
+          }
+        }
+      }
+
+      // Per (confidence × odd bucket)
+      result.by_confidence_odd_bucket = {};
+      const oddBuckets = [
+        { label: '<1.5', min: 0, max: 1.5 },
+        { label: '1.5-2.0', min: 1.5, max: 2.0 },
+        { label: '2.0-2.5', min: 2.0, max: 2.5 },
+        { label: '2.5-4.0', min: 2.5, max: 4.0 },
+        { label: '>4.0', min: 4.0, max: Infinity },
+      ];
+      for (const c of ['ALTA','MEDIA','BAIXA']) {
+        for (const b of oddBuckets) {
+          const list = byConf[c].filter(r => {
+            const o = Number(r.odds) || 0;
+            return o >= b.min && o < b.max;
+          });
+          if (list.length < minN) continue;
+          result.by_confidence_odd_bucket[`${c}|${b.label}`] = _stats(list);
+        }
+      }
+
+      // Recent losses sample por confidence (tail risk)
+      result.recent_losses_by_confidence = {};
+      for (const c of ['ALTA','MEDIA','BAIXA']) {
+        result.recent_losses_by_confidence[c] = byConf[c]
+          .filter(r => r.result === 'loss')
+          .slice(0, 10)
+          .map(r => ({
+            market: r.market_type, side: '', odd: r.odds, ev: r.ev,
+            league: r.event_name, stake: r.stake_reais,
+            participant: r.tip_participant,
+          }));
+      }
+
+      sendJson(res, result);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (audit): cross-sport correlation matrix.
   // GET /admin/sport-correlation?days=30&key=<KEY>
   // Daily PnL per sport → pairwise Pearson correlation. Sports altamente
