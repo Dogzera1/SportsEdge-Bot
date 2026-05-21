@@ -21219,6 +21219,76 @@ load();
         } catch (e) {
           tierStratified._error = e.message;
         }
+      } else if (stratify === 'tier_side') {
+        // 2026-05-21 audit: schema v2.1 (tier × side). Causa-fix tennis HG home
+        // leak — calib_gap +44pp em handicapGames/home EV 5-30% indica que
+        // home/away tem dinâmicas diferentes (serve adv, court familiarity)
+        // que fit monolítico não captura. Consumer (lib/tennis-markov-calib.js)
+        // já lê markets[m].tiers[tier].sides[side].bins com prioridade — só
+        // faltava write path. Mirror lógica do scripts/fit-tennis-markov-calibration.js.
+        // Override threshold: ?min_side_n= (default 30).
+        try {
+          const { classifyTierString } = require('./lib/tier-classifier');
+          const tierFor = (lg) => classifyTierString(sport, lg);
+          const _normSide = (s) => {
+            const v = String(s || '').toLowerCase().trim();
+            if (v === 'home' || v === 'team1' || v === 'h' || v === '1') return 'home';
+            if (v === 'away' || v === 'team2' || v === 'a' || v === '2') return 'away';
+            if (v === 'over' || v === 'o') return 'over';
+            if (v === 'under' || v === 'u') return 'under';
+            return null;
+          };
+          const MIN_SIDE_N = Math.max(12, Math.min(100,
+            parseInt(parsed.query.min_side_n || '30', 10) || 30));
+          const tierKeysPresent = new Set();
+          for (const t of tips) {
+            const tk = tierFor(t.league);
+            if (tk) tierKeysPresent.add(tk);
+          }
+          for (const market of Object.keys(calibByMarket)) {
+            const tiersFit = {};
+            for (const tierKey of tierKeysPresent) {
+              const tierFilter = (t) => tierFor(t.league) === tierKey;
+              const tierFit = fitMarket(market, tierFilter);
+              if (tierFit.skip) {
+                tierStratified[`${market}/${tierKey}_skipped`] = tierFit;
+                continue;
+              }
+              // Per-(tier, side) sub-fit — só sample >= MIN_SIDE_N
+              const tierSideFits = {};
+              const sideKeys = new Set();
+              for (const t of tips) {
+                if (t.market !== market) continue;
+                if (tierFor(t.league) !== tierKey) continue;
+                const sk = _normSide(t.side);
+                if (sk) sideKeys.add(sk);
+              }
+              for (const sideKey of sideKeys) {
+                const sideFilter = (t) =>
+                  tierFor(t.league) === tierKey && _normSide(t.side) === sideKey;
+                const sideSampleN = tips.filter(t => t.market === market && sideFilter(t)).length;
+                if (sideSampleN < MIN_SIDE_N) {
+                  tierStratified[`${market}/${tierKey}/${sideKey}_skipped`] = { skip: 'insufficient_side_sample', n: sideSampleN, min: MIN_SIDE_N };
+                  continue;
+                }
+                const sideFit = fitMarket(market, sideFilter);
+                if (!sideFit.skip) tierSideFits[sideKey] = sideFit;
+                else tierStratified[`${market}/${tierKey}/${sideKey}_skipped`] = sideFit;
+              }
+              tiersFit[tierKey] = Object.keys(tierSideFits).length
+                ? { ...tierFit, sides: tierSideFits }
+                : tierFit;
+            }
+            if (Object.keys(tiersFit).length) {
+              calibByMarket[market].tiers = tiersFit;
+              tierStratified[market] = Object.entries(tiersFit).map(([t, v]) =>
+                v.sides ? `${t}[+${Object.keys(v.sides).length}sides]` : t
+              );
+            }
+          }
+        } catch (e) {
+          tierStratified._error = e.message;
+        }
       }
 
       const applyCalib = (pRaw, marketBins) => {
@@ -21341,8 +21411,8 @@ load();
           let toWrite = payload;
           let writeMode = 'full_rewrite';
           if (tiersOnly) {
-            if (stratify !== 'tier') {
-              sendJson(res, { ok: false, error: 'tiers_only=true requires stratify=tier' }, 400);
+            if (stratify !== 'tier' && stratify !== 'tier_side') {
+              sendJson(res, { ok: false, error: 'tiers_only=true requires stratify=tier or tier_side' }, 400);
               return;
             }
             if (!fs.existsSync(targetPath)) {
