@@ -22817,8 +22817,13 @@ Máximo 200 palavras.`;
         analyzedCs.set(key, { ts: now, tipSent: true });
         if (rec?.skipped) continue;
 
-        if (csConfig.shadowMode) {
-          log('INFO', 'AUTO-CS', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
+        // 2026-05-21 P5 cross-sport fix: usar _isShadowDispatch(rec, sport) em vez
+        // de csConfig.shadowMode (sport-level env). Antes, CS_ML_PER_MAP=1 +
+        // CS_ML_PER_MAP_SHADOW=true (default) gravava tip is_shadow=1 mas DM Telegram
+        // disparava porque gate só checava CS_SHADOW. Helper checa rec.isShadow +
+        // rec.autoShadowed (server retorna desde 2026-05-06). Mirror LoL/Dota.
+        if (_isShadowDispatch(rec, 'cs')) {
+          log('INFO', 'AUTO-CS', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
           continue;
         }
 
@@ -23636,8 +23641,12 @@ Máximo 180 palavras.`;
         if (_leagueRealOverride) {
           log('INFO', 'AUTO-VAL', `[REAL-OVERRIDE] valorant/${match.league} promoted via VALORANT_REAL_LEAGUES: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
         }
-        if (effectiveShadow) {
-          log('INFO', 'AUTO-VAL', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
+        // 2026-05-21 P5 cross-sport fix (mirror CS bot.js:22820): usar _isShadowDispatch(rec, sport)
+        // em vez de effectiveShadow (sport-level). Antes, VALORANT_ML_PER_MAP=1 +
+        // VALORANT_ML_PER_MAP_SHADOW=true (default) gravava tip is_shadow=1 mas DM Telegram
+        // disparava. Helper checa rec.isShadow + rec.autoShadowed. Mirror LoL/Dota.
+        if (_isShadowDispatch(rec, 'valorant')) {
+          log('INFO', 'AUTO-VAL', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
           continue;
         }
 
