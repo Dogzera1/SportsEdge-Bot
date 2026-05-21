@@ -113,4 +113,70 @@ module.exports = function runTests(t) {
       }
     }
   });
+
+  // ── Fase 2A: settle slang pools ──
+
+  t.test('pool result_win existe e contém forra/verde/bateu', () => {
+    t.assert(Array.isArray(POOLS.result_win), 'POOLS.result_win existe');
+    t.assert(POOLS.result_win.length >= 3, '≥3 frases');
+    // Pelo menos UMA frase deve mencionar forra/verde/bateu
+    const joined = POOLS.result_win.join(' | ');
+    t.assert(/forra|verd|bateu|é a que/i.test(joined),
+      `pool win deve ter forra/verde/bateu, got: ${joined}`);
+  });
+
+  t.test('pool result_loss existe e contém chumbo grosso (esse É o lugar)', () => {
+    t.assert(Array.isArray(POOLS.result_loss), 'POOLS.result_loss existe');
+    t.assert(POOLS.result_loss.length >= 3, '≥3 frases');
+    const joined = POOLS.result_loss.join(' | ');
+    t.assert(/chumbo grosso/i.test(joined),
+      `pool loss DEVE ter "chumbo grosso" (esse é o ponto), got: ${joined}`);
+  });
+
+  t.test('pool result_void existe', () => {
+    t.assert(Array.isArray(POOLS.result_void), 'POOLS.result_void existe');
+    t.assert(POOLS.result_void.length >= 2, '≥2 frases');
+  });
+
+  t.test('pool result_push existe', () => {
+    t.assert(Array.isArray(POOLS.result_push), 'POOLS.result_push existe');
+    t.assert(POOLS.result_push.length >= 2, '≥2 frases');
+  });
+
+  t.test('pickSlang result_win retorna do pool correto', () => {
+    const out = pickSlang('result_win', 'tip-1');
+    t.assert(POOLS.result_win.includes(out), `"${out}" deve estar em result_win`);
+  });
+
+  t.test('pickSlang result_loss retorna do pool correto', () => {
+    const out = pickSlang('result_loss', 'tip-1');
+    t.assert(POOLS.result_loss.includes(out), `"${out}" deve estar em result_loss`);
+  });
+
+  t.test('pools settle NÃO mencionam "+18" (settle não precisa de regulatório repetido)', () => {
+    // Footer do settle é separado dos result_xxx slangs. O +18 fica em footer_settle pool.
+    const settlePools = [POOLS.result_win, POOLS.result_loss, POOLS.result_void, POOLS.result_push];
+    for (const pool of settlePools) {
+      for (const phrase of pool) {
+        // Frases curtas estilo "VERDÃO!", "CHUMBO GROSSO." — sem +18 redundante
+        t.assert(!/\+18/.test(phrase), `result pool deve ser curto, sem +18: "${phrase}"`);
+      }
+    }
+  });
+
+  t.test('footer_settle existe e tem +18 (regulatório obrigatório)', () => {
+    t.assert(Array.isArray(POOLS.footer_settle), 'POOLS.footer_settle existe');
+    t.assert(POOLS.footer_settle.length >= 2, '≥2 frases');
+    for (const phrase of POOLS.footer_settle) {
+      t.assert(phrase.includes('+18'), `footer_settle "${phrase}" deve ter +18`);
+      t.assert(/respons/i.test(phrase), `footer_settle "${phrase}" deve mencionar responsabilidade`);
+    }
+  });
+
+  t.test('result_loss tem variações além de "chumbo grosso" (não só uma)', () => {
+    // Garantir que rotação funciona — não só "chumbo grosso" em todas
+    const seeds = ['s1', 's2', 's3', 's4', 's5', 's6'];
+    const outs = new Set(seeds.map(s => pickSlang('result_loss', s)));
+    t.assert(outs.size >= 2, `seeds diversas devem mostrar ≥2 frases distintas em result_loss, got ${outs.size}`);
+  });
 };

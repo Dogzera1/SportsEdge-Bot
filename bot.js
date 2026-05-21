@@ -34,6 +34,7 @@ const _mtMarketPromote = require('./lib/mt-market-promote');
 const _leagueTierLib = require('./lib/league-tier');
 const _mtTierClassifier = require('./lib/mt-tier-classifier');
 const { buildTipMessage } = require('./lib/tip-message-builder');
+const { buildSettleMessage } = require('./lib/settle-message-builder');
 
 // Helper: formata stake em "Xu (R$Y.YY)" pegando unit tier atual do sport.
 // Tier vem do DB (bankroll do sport). Se DB offline, usa R$1 base.
@@ -5198,38 +5199,25 @@ async function notifySettledTips() {
       const token = resolveTipsToken(tokenSport) || resolveTipsToken('esports');
       if (!token) { markStmt.run(tip.id); continue; }
       const emoji = _SETTLE_NOTIFY_EMOJI[sport] || '📌';
-      const resLabel = _settleNotifyResultLabel(tip.result);
       const profit = Number(tip.profit_reais);
       const stakeR = Number(tip.stake_reais);
       const odd = Number(tip.odds);
       const mkt = String(tip.market_type || 'ML').toUpperCase();
-      const liveTag = Number(tip.is_live) ? ' 🔴 LIVE' : '';
-      let profitLine = '';
-      if (tip.result === 'void' || tip.result === 'push') {
-        profitLine = Number.isFinite(stakeR) && stakeR > 0
-          ? `↩️ Stake devolvida: *R$${stakeR.toFixed(2)}*`
-          : '↩️ Stake devolvida';
-      } else if (Number.isFinite(profit)) {
-        const sign = profit >= 0 ? '+' : '';
-        const stakeNote = Number.isFinite(stakeR) && stakeR > 0 ? ` _(stake R$${stakeR.toFixed(2)})_` : '';
-        profitLine = `💰 P/L: *${sign}R$${profit.toFixed(2)}*${stakeNote}`;
-      }
-      const matchupLine = (tip.participant1 && tip.participant2)
-        ? `*${tip.participant1}* vs *${tip.participant2}*`
-        : '';
-      const leagueLine = (tip.event_name && tip.event_name !== matchupLine)
-        ? `📋 ${tip.event_name}`
-        : '';
-      const pickLine = tip.tip_participant
-        ? `🎯 Aposta: *${tip.tip_participant}*${mkt !== 'ML' ? ` (${mkt})` : ''}${Number.isFinite(odd) && odd > 0 ? ` @ ${odd.toFixed(2)}` : ''}`
-        : '';
-      const msg = [
-        `${emoji} ${resLabel}${liveTag}`,
-        matchupLine,
-        leagueLine,
-        pickLine,
-        profitLine ? `\n${profitLine}` : '',
-      ].filter(Boolean).join('\n');
+      const msg = buildSettleMessage({
+        sport, result: tip.result,
+        sportIconOverride: emoji,
+        match: {
+          team1: tip.participant1, team2: tip.participant2,
+          league: tip.event_name || null,
+        },
+        pick: tip.tip_participant || null,
+        marketType: mkt,
+        odd: Number.isFinite(odd) && odd > 0 ? odd : undefined,
+        profit: Number.isFinite(profit) ? profit : undefined,
+        stake: Number.isFinite(stakeR) && stakeR > 0 ? stakeR : undefined,
+        isLive: !!Number(tip.is_live),
+        seed: String(tip.id || tip.match_id || `${tip.participant1}|${tip.participant2}`),
+      });
       // 2026-05-20: tip settle com foto custom — win=green/loss=red. Photo URL
       // serve do server.js static (/img/tip_win.jpg, /img/tip_loss.jpg). Caption
       // herda Markdown formatting do msg. Void/push stay text-only (sendDM).
