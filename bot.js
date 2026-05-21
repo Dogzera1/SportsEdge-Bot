@@ -3920,7 +3920,14 @@ async function runAutoAnalysis() {
                 if (hEV < 5.0) continue;
                 if (hOdd < 1.30 || hOdd > 4.00) continue;
 
-                const hStake = Math.max(0.5, Math.min(2.0, (hEV / 100) * 10)).toFixed(1);
+                // 2026-05-21: migrado de Math.max(0.5, Math.min(2.0, (hEV/100)*10))
+                // pra calcKellyWithP. modelP=cleanSweepP é P(handicap -1.5 covered)
+                // válida em Bo3 LoL (line típica market). 1/10 Kelly + confKey=BAIXA
+                // respeita KELLY_PRODUCT_CAP_FRAC (lib/utils.js:340) + EV throttle +
+                // _kellyCal global. Strip 'u' suffix pra preservar formato hStake.
+                const _hStakeRaw = calcKellyWithP(modelP, hOdd, 1/10, { sport: 'lol', confKey: 'BAIXA' });
+                const hStake = String(_hStakeRaw).replace('u', '');
+                if (hStake === '0' || parseFloat(hStake) <= 0) continue; // Kelly negativo / fail-safe
                 const hMsg = `🎮 ♟️ *TIP HANDICAP*\n` +
                   `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
                   `🎯 Aposta: *${favTeam}* ${mktName}\n` +
@@ -3947,9 +3954,6 @@ async function runAutoAnalysis() {
                 // Server podia rejeitar via badRequest/dedup/news-impact mas DM
                 // disparava igual. _isShadowDispatch checa rec.autoShadowed (server
                 // rotation) + rec.isShadow + isBucketShadowed (fallback).
-                // TODO próxima sessão: migrar stake (hEV/100)*10 pra calcKellyWithP
-                // — modelP=cleanSweep não é P(handicap covered), análise mais profunda
-                // necessária (memory project_lol_kills_calibration_2026_04_25 pattern).
                 const recHa = await serverPost('/record-tip', {
                   matchId: canonicalMatchId('esports', String(match.id) + '_H'), eventName: match.league,
                   p1: match.team1, p2: match.team2, tipParticipant: favTeam,
