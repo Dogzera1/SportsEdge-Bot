@@ -14998,6 +14998,81 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-21 (audit live monitoring): GET /admin/live-vs-pre-roi?days=30&key=<KEY>
+  // Compara ROI/n/CLV de tips live (is_live=1) vs pre-match (is_live=0) per sport.
+  // Validation: Pinnacle auto-bet phase 2 skip live silencioso — endpoint permite
+  // verificar se exclusão custou edge OR proteção (live ROI <  pre-match ROI = OK).
+  if (p === '/admin/live-vs-pre-roi' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    try {
+      const rows = db.prepare(`
+        SELECT sport,
+          COALESCE(is_live, 0) AS is_live,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(COALESCE(stake_reais, 0)) AS stake,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
+          AVG(CASE WHEN clv_odds IS NOT NULL AND odds > 1 THEN ((clv_odds - odds) / odds * 100) END) AS avg_clv_pct
+        FROM tips
+        WHERE result IN ('win','loss','void','push')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          ${sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : ''}
+        GROUP BY sport, COALESCE(is_live, 0)
+        ORDER BY sport ASC, is_live ASC
+      `).all(`-${days} days`);
+      const bySport = {};
+      for (const r of rows) {
+        const sp = r.sport;
+        if (!bySport[sp]) bySport[sp] = { pre: null, live: null };
+        const bucket = {
+          n: r.n,
+          wins: r.wins,
+          losses: r.losses,
+          stake_reais: +Number(r.stake || 0).toFixed(2),
+          profit_reais: +Number(r.profit || 0).toFixed(2),
+          roi_pct: r.stake > 0 ? +((r.profit / r.stake) * 100).toFixed(2) : 0,
+          win_rate_pct: (r.wins + r.losses) > 0 ? +((r.wins / (r.wins + r.losses)) * 100).toFixed(2) : 0,
+          avg_clv_pct: r.avg_clv_pct != null ? +Number(r.avg_clv_pct).toFixed(2) : null,
+        };
+        if (r.is_live === 1) bySport[sp].live = bucket;
+        else bySport[sp].pre = bucket;
+      }
+      // Per-sport delta + verdict
+      const verdicts = {};
+      for (const [sp, v] of Object.entries(bySport)) {
+        if (v.pre && v.live) {
+          const deltaRoi = v.live.roi_pct - v.pre.roi_pct;
+          const deltaClv = (v.live.avg_clv_pct ?? 0) - (v.pre.avg_clv_pct ?? 0);
+          verdicts[sp] = {
+            roi_delta_pp: +deltaRoi.toFixed(2),
+            clv_delta_pp: +deltaClv.toFixed(2),
+            verdict: deltaRoi > 5 ? 'LIVE_OUTPERFORMS_+5pp'
+              : deltaRoi < -5 ? 'PRE_OUTPERFORMS_+5pp'
+              : 'COMPARABLE',
+          };
+        } else if (v.pre && !v.live) {
+          verdicts[sp] = { verdict: 'NO_LIVE_SAMPLE' };
+        } else if (!v.pre && v.live) {
+          verdicts[sp] = { verdict: 'NO_PRE_SAMPLE' };
+        }
+      }
+      sendJson(res, {
+        ok: true,
+        days,
+        per_sport: bySport,
+        verdicts,
+        note: 'live = is_live=1, pre = is_live=0. Real tips only (is_shadow=0, archived=0). NULL clv_delta = clv não capturado em ambos buckets.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (audit): cross-sport correlation matrix.
   // GET /admin/sport-correlation?days=30&key=<KEY>
   // Daily PnL per sport → pairwise Pearson correlation. Sports altamente

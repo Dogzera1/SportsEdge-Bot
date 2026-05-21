@@ -3860,6 +3860,7 @@ async function runAutoAnalysis() {
                 const _driftLol = checkLiveOddsDrift({ tipOdd, freshOdd: _freshPickOddLol, sport: 'lol' });
                 if (_driftLol.stale) {
                   log('WARN', 'AUTO-LOL', `Odds stale: tip @ ${tipOdd} mercado agora ${_freshPickOddLol} (drift ${_driftLol.driftPct}% > cap ${_driftLol.cap}) — abortando ${tipTeam}`);
+                  try { require('./lib/metrics').incr('stale_abort_total', { sport: 'lol' }); } catch (_) {}
                   analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: false, hadLiveStats: !!result?.hasLiveStats || prev?.hadLiveStats || false, staleAbort: true });
                   continue;
                 }
@@ -17656,6 +17657,7 @@ Máximo 200 palavras.`;
               const _driftDota = checkLiveOddsDrift({ tipOdd, freshOdd: _freshPickOddDota, sport: 'dota' });
               if (_driftDota.stale) {
                 log('WARN', 'AUTO-DOTA', `Odds stale: tip @ ${tipOdd} mercado ${_freshPickOddDota} (drift ${_driftDota.driftPct}% > cap ${_driftDota.cap}) — abortando ${tipTeam}`);
+                try { require('./lib/metrics').incr('stale_abort_total', { sport: 'dota2' }); } catch (_) {}
                 setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false, staleAbort: true });
                 await _sleep(2000); continue;
               }
@@ -21837,6 +21839,7 @@ Máximo 200 palavras.`;
               if (_driftFb.stale) {
                 log('WARN', 'AUTO-FOOTBALL',
                   `Odds stale: tip @ ${tipOdd} mercado agora ${_freshOddNumFb} (drift ${_driftFb.driftPct}% > cap ${_driftFb.cap}) — abortando DM/auto-bet ${tipTeam}`);
+                try { require('./lib/metrics').incr('stale_abort_total', { sport: 'football' }); } catch (_) {}
                 analyzedFootball.set(key, { ts: now, tipSent: true });
                 continue;
               }
@@ -23120,6 +23123,7 @@ Máximo 200 palavras.`;
               const _driftCs = checkLiveOddsDrift({ tipOdd: pickOdd, freshOdd: _freshPickOddCs, sport: 'cs' });
               if (_driftCs.stale) {
                 log('WARN', 'AUTO-CS', `Odds stale: tip @ ${pickOdd} mercado ${_freshPickOddCs} (drift ${_driftCs.driftPct}% > cap ${_driftCs.cap}) — abortando ${pickTeam}`);
+                try { require('./lib/metrics').incr('stale_abort_total', { sport: 'cs' }); } catch (_) {}
                 continue;
               }
             }
@@ -23944,6 +23948,7 @@ Máximo 180 palavras.`;
               const _driftVal = checkLiveOddsDrift({ tipOdd: pickOdd, freshOdd: _freshPickOddVal, sport: 'valorant' });
               if (_driftVal.stale) {
                 log('WARN', 'AUTO-VAL', `Odds stale: tip @ ${pickOdd} mercado ${_freshPickOddVal} (drift ${_driftVal.driftPct}% > cap ${_driftVal.cap}) — abortando ${pickTeam}`);
+                try { require('./lib/metrics').incr('stale_abort_total', { sport: 'valorant' }); } catch (_) {}
                 continue;
               }
             }
