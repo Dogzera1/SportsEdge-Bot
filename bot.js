@@ -18507,6 +18507,18 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           }, 'mma').catch(() => {});
         }
 
+        // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
+        // ANTES do DM dispatch. Antes, MMA NÃO tinha gate algum — server podia
+        // rotar pra shadow via _autoRouteToShadow (ml_disabled / SHADOW_LEAGUES /
+        // ml_bucket_blocked) e DM disparava igual. Helper checa rec.isShadow +
+        // rec.autoShadowed + isBucketShadowed. Mirror LoL/Dota/CS/VAL.
+        if (_isShadowDispatch(rec, 'mma')) {
+          log('INFO', 'AUTO-MMA', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
+          analyzedMma.set(key, { ts: now, tipSent: true });
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
+
         const _betBtnMma = _buildTipBetButton('mma', fight.odds, _pickSideMma, fight, tipStake, tipOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'mma')) continue;
@@ -20148,7 +20160,13 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }
 
         const _betBtnTen = _buildTipBetButton('tennis', o, pickIsT1 ? 't1' : 't2', match, tipStakeAdjTennis, tipOdd);
-        if (!_tennisMlShadow) {
+        // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): adiciona check
+        // do server autoShadow rotation além do _tennisMlShadow local. Antes server
+        // podia rotar pra shadow (_autoRouteToShadow) e DM disparava — _tennisMlShadow
+        // local var não pegava rec.autoShadowed. Helper preserva research existente
+        // (_tennisShadowOnly) + bloqueia server-side flip.
+        const _tennisShadowDispatched = _tennisMlShadow || _isShadowDispatch(rec, 'tennis');
+        if (!_tennisShadowDispatched) {
           for (const [userId, prefs] of subscribedUsers) {
             if (!_shouldDispatchToSubscriber(userId, prefs, 'tennis')) continue;
             try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
@@ -20157,8 +20175,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
         const shadowReason = _tennisMlShadow
           ? (_tennisShadowOnly ? ' [SHADOW non-top-tier]' : ' [SHADOW ml-validation]')
-          : '';
-        log('INFO', 'AUTO-TENNIS', `Tip ${_tennisMlShadow ? 'shadow-only' : 'enviada'}${isLivePhase ? ' (LIVE)' : ''}${shadowReason}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
+          : (_isShadowDispatch(rec, 'tennis') ? (rec?.autoShadowed ? ' [SHADOW auto-rotated]' : ' [SHADOW server-flag]') : '');
+        log('INFO', 'AUTO-TENNIS', `Tip ${_tennisShadowDispatched ? 'shadow-only' : 'enviada'}${isLivePhase ? ' (LIVE)' : ''}${shadowReason}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         // CLV delayed pra live tennis (pregame já é pego pelo updater async normal)
         if (isLivePhase) scheduleLiveClvCapture('tennis', match, tipPlayer, match.id, tipOdd);
         await new Promise(r => setTimeout(r, 5000));
@@ -21585,10 +21603,13 @@ Máximo 200 palavras.`;
           await new Promise(r => setTimeout(r, 2000)); continue;
         }
 
-        // Shadow gate: DB registrou (isShadow=1 acima); não envia DM.
-        if (fbConfig?.shadowMode) {
+        // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): usa _isShadowDispatch
+        // em vez de fbConfig.shadowMode (env sport-level). Server pode rotar tip pra
+        // shadow via _autoRouteToShadow (ml_disabled, SHADOW_LEAGUES, ml_bucket_blocked)
+        // — helper pega rec.autoShadowed que env-check ignorava.
+        if (_isShadowDispatch(rec, 'football')) {
           analyzedFootball.set(key, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} (DB log only)`);
+          log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} (DB log only)${recFb?.autoShadowed ? ' (auto-shadow)' : ''}`);
           continue;
         }
 
@@ -21850,6 +21871,14 @@ async function pollTableTennis(runOnce = false) {
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
+        // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
+        // ANTES do DM dispatch. Antes, TT NÃO tinha gate algum — server podia rotar
+        // pra shadow e DM disparava. Helper checa rec.isShadow + rec.autoShadowed.
+        if (_isShadowDispatch(rec, 'tabletennis')) {
+          log('INFO', 'AUTO-TT', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
         const _betBtnTt = _buildTipBetButton('tabletennis', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!_shouldDispatchToSubscriber(userId, prefs, 'tabletennis')) continue;
@@ -24026,6 +24055,14 @@ async function runAutoDarts() {
             `🧠 Por quê: _${tipReason}_\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
+          // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
+          // ANTES do DM dispatch. Antes, darts NÃO tinha gate — server podia rotar
+          // pra shadow e DM disparava. Helper checa rec.isShadow + rec.autoShadowed.
+          if (_isShadowDispatch(rec, 'darts')) {
+            log('INFO', 'AUTO-DARTS', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
           const _betBtnDarts = _buildTipBetButton('darts', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
           for (const [userId, prefs] of subscribedUsers) {
             if (!_shouldDispatchToSubscriber(userId, prefs, 'darts')) continue;
@@ -24279,6 +24316,14 @@ async function runAutoSnooker() {
             `🧠 ${tipReason}\n\n` +
             `⚠️ _Odds Pinnacle._`;
 
+          // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
+          // ANTES do DM dispatch. Antes, snooker NÃO tinha gate — server podia rotar
+          // pra shadow e DM disparava. Helper checa rec.isShadow + rec.autoShadowed.
+          if (_isShadowDispatch(rec, 'snooker')) {
+            log('INFO', 'AUTO-SNOOKER', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
           const _betBtnSn = _buildTipBetButton('snooker', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
           for (const [userId, prefs] of subscribedUsers) {
             if (!_shouldDispatchToSubscriber(userId, prefs, 'snooker')) continue;
@@ -24690,9 +24735,16 @@ async function runAutoBasket() {
         `💵 Stake: *${formatStakeWithReais('basket', stakeAdj)}*\n` +
         `🧠 ${tipReason}\n\n` +
         `⚠️ _Odds The Odds API._`;
-      for (const [userId, prefs] of subscribedUsers) {
-        if (!_shouldDispatchToSubscriber(userId, prefs, 'basket')) continue;
-        try { await sendDM(basketConfig.token, userId, tipMsg); } catch (_) {}
+      // 2026-05-21 P5 cross-sport fix (extensão commit ade938a): gate shadow
+      // ANTES do DM dispatch. Antes, basket NÃO tinha gate — server podia rotar
+      // pra shadow e DM disparava. Helper checa rec.isShadow + rec.autoShadowed.
+      if (_isShadowDispatch(rec, 'basket')) {
+        log('INFO', 'AUTO-BASKET', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
+      } else {
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'basket')) continue;
+          try { await sendDM(basketConfig.token, userId, tipMsg); } catch (_) {}
+        }
       }
     }
     if (!_drainedBasket && _hadLiveBasket) _livePhaseExit('basket');
