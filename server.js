@@ -10994,7 +10994,9 @@ setInterval(load, 10000);
   // GET /admin/pinnacle-auto-bet-status?key=<KEY>
   // 2026-05-21: status do auto-bet Pinnacle — envs, contadores, tips executadas.
   if (p === '/admin/pinnacle-auto-bet-status' && req.method === 'GET') {
-    if (!requireAdmin(req, res)) return;
+    // Aceitar ?key= via _isAdminQueryKeyDeprecated (compat com outros endpoints admin).
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const today = new Date().toISOString().slice(0, 10);
       const daily = db.prepare(`
@@ -11034,7 +11036,8 @@ setInterval(load, 10000);
   // 2026-05-21: marca tip como aposta executada externally (manual workflow).
   // Phase 2 Playwright chamará markBetExecuted programaticamente; este endpoint cobre manual.
   if (p === '/admin/pinnacle-bet-confirm' && req.method === 'POST') {
-    if (!requireAdmin(req, res)) return;
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const tipId = parseInt(parsed.query.tip_id || '', 10);
     const ticketId = String(parsed.query.ticket_id || '').trim();
     const actualOdd = parseFloat(parsed.query.actual_odd || '');
