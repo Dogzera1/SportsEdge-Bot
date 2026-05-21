@@ -15582,6 +15582,70 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/kelly-mult-set: persiste kelly_mult per (sport[, market]) em
+  // gates_runtime_state pra cap manual de stake — não precisa Railway env.
+  // Hierarquia bot.js getKellyFraction já lê esse path (linha 6117):
+  //   gates_runtime_state[sport]['kelly_mult|<MARKET>']  → market-specific
+  //   gates_runtime_state[sport]['kelly_mult']           → sport-wide
+  // Range válido [0.2, 1.5]. Multiplica _KELLY_DEFAULTS por este valor.
+  // POST /admin/kelly-mult-set?sport=lol&market=ML&mult=0.5&reason=...&key=
+  if (p === '/admin/kelly-mult-set' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = parsed.query.market ? String(parsed.query.market).trim().toUpperCase() : null;
+    const mult = parseFloat(parsed.query.mult);
+    const reason = String(parsed.query.reason || 'manual').slice(0, 200);
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    if (!Number.isFinite(mult) || mult < 0.2 || mult > 1.5) {
+      sendJson(res, { ok: false, error: 'mult must be in [0.2, 1.5]' }, 400); return;
+    }
+    try {
+      const grs = require('./lib/gates-runtime-state');
+      const gateKey = market ? `kelly_mult|${market}` : 'kelly_mult';
+      grs.setManual(db, sport, gateKey, mult, { reason });
+      log('INFO', 'KELLY-MULT-SET', `${sport}${market ? '|' + market : ''}: kelly_mult=${mult} (${reason})`);
+      sendJson(res, {
+        ok: true, sport, market, mult, gate_key: gateKey, reason,
+        note: 'Aplicado imediato no próximo /record-tip via getKellyFraction(). bot.js relê DB on-demand.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // ── /admin/mt-bucket-skip-set: skip emit de tips em buckets específicos de odd
+  // per (sport, market). Persiste em gates_runtime_state com gate_key='mt_bucket_skip|<MARKET>'.
+  // Value: CSV de buckets a pular. Buckets válidos: '<1.6','1.6-2.0','2.0-2.5','2.5-4.0','>4.0'.
+  // POST /admin/mt-bucket-skip-set?sport=tennis&market=handicapGames&buckets=2.0-2.5&reason=...&key=
+  // Pass buckets='' pra limpar.
+  if (p === '/admin/mt-bucket-skip-set' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const bucketsRaw = String(parsed.query.buckets || '').trim();
+    const reason = String(parsed.query.reason || 'manual').slice(0, 200);
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
+    const validBuckets = new Set(['<1.6', '1.6-2.0', '2.0-2.5', '2.5-4.0', '>4.0']);
+    const buckets = bucketsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    for (const b of buckets) {
+      if (!validBuckets.has(b)) { sendJson(res, { ok: false, error: `invalid bucket "${b}" — use one of ${[...validBuckets].join(',')}` }, 400); return; }
+    }
+    try {
+      const grs = require('./lib/gates-runtime-state');
+      const gateKey = `mt_bucket_skip|${market}`;
+      // gates_runtime_state.setAuto only accepts numeric — armazenar bucket codes
+      // bitmask. Bit 0=<1.6, 1=1.6-2.0, 2=2.0-2.5, 3=2.5-4.0, 4=>4.0.
+      const BIT = { '<1.6': 1, '1.6-2.0': 2, '2.0-2.5': 4, '2.5-4.0': 8, '>4.0': 16 };
+      const mask = buckets.reduce((m, b) => m | BIT[b], 0);
+      grs.setManual(db, sport, gateKey, mask, { reason: `${reason} [${buckets.join(',') || 'none'}]` });
+      log('INFO', 'MT-BUCKET-SKIP', `${sport}|${market}: skip=[${buckets.join(',') || 'none'}] mask=${mask} (${reason})`);
+      sendJson(res, {
+        ok: true, sport, market, skip_buckets: buckets, mask, gate_key: gateKey, reason,
+        note: 'Aplicado imediato no próximo /record-tip. mask=0 limpa.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/alerts: lista alerts persistidos (analytics_alerts).
   // GET /admin/alerts?status=open&days=7&key=<ADMIN_KEY>
   if (p === '/admin/alerts' && (req.method === 'GET' || req.method === 'POST')) {
@@ -26706,6 +26770,26 @@ load();
               }
             } catch (_) {}
           }
+
+          // 2026-05-21: MT bucket skip per (sport, market). Persist via
+          // /admin/mt-bucket-skip-set → gates_runtime_state[sport]['mt_bucket_skip|<MARKET>']
+          // como bitmask (bit 0=<1.6, 1=1.6-2.0, 2=2.0-2.5, 3=2.5-4.0, 4=>4.0).
+          // Defesa contra leaks bucket-específicos (ex: tennis handicapGames 2.0-2.5
+          // -10.73u/n=45 em 30d). Aplica em qualquer kind (ML real + MT dispatched).
+          try {
+            const oddVal = parseFloat(t.odds);
+            if (Number.isFinite(oddVal) && oddVal > 1) {
+              const bucketBit = oddVal < 1.6 ? 1 : oddVal < 2.0 ? 2 : oddVal < 2.5 ? 4 : oddVal < 4.0 ? 8 : 16;
+              const bucketName = oddVal < 1.6 ? '<1.6' : oddVal < 2.0 ? '1.6-2.0' : oddVal < 2.5 ? '2.0-2.5' : oddVal < 4.0 ? '2.5-4.0' : '>4.0';
+              const grs = require('./lib/gates-runtime-state');
+              const skipMaskMl = grs.getGateValue(sport, `mt_bucket_skip|${mlMarketType}`);
+              if (Number.isFinite(skipMaskMl) && skipMaskMl & bucketBit) {
+                log('INFO', 'RISK-CAP', `${sport}/${mlMarketType}/odd=${oddVal} bucket=${bucketName} in skip mask ${skipMaskMl} — BLOQUEADO`);
+                sendJson(res, { ok: false, skipped: true, reason: 'bucket_skip', sport, market: mlMarketType, odd: oddVal, bucket: bucketName, skip_mask: skipMaskMl });
+                return;
+              }
+            }
+          } catch (_) {}
         }
         // 2026-05-05: Learned corrections (CALIBRATION layer, NÃO gate). Aplica
         // prob_shrink + ev_shrink derivadas pelo readiness-learner.
