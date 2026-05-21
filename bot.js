@@ -27658,11 +27658,28 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const { buildPnlDailyMessage } = require('./lib/pnl-daily-message');
     const runPnlDaily = async () => {
       try {
+        // 2026-05-21: skip se admin já disparou manualmente hoje via /admin/pnl-daily-now.
+        // Settings flag persistente cross-process bot↔server. Evita duplicata DM.
+        try {
+          const brtNow = new Date(Date.now() - 3 * 60 * 60 * 1000);
+          const today = brtNow.toISOString().slice(0, 10);
+          const flag = db.prepare(`SELECT value FROM settings WHERE key = 'pnl_daily_last_fire_day'`).get();
+          if (flag?.value === today) {
+            log('INFO', 'PNL-DAILY', `skip auto-fire: já enviado hoje (${today}) via manual`);
+            return;
+          }
+        } catch (_) { /* defensive — segue fluxo normal */ }
         const { msg, stats } = buildPnlDailyMessage(db, { skipToday: false });
         const token = (process.env.TIPS_UNIFIED_TOKEN || '').trim()
           || (typeof resolveTipsToken === 'function' ? resolveTipsToken('') : null)
           || resolveAlertsToken();
         if (token) await sendAdminDMs(token, msg, { parse_mode: 'Markdown' }, 'pnl-daily-tips-summary');
+        // Atualiza flag também no auto-fire (caso manual seja chamado depois).
+        try {
+          const brtNow = new Date(Date.now() - 3 * 60 * 60 * 1000);
+          const today = brtNow.toISOString().slice(0, 10);
+          db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`).run('pnl_daily_last_fire_day', today);
+        } catch (_) {}
         log('INFO', 'PNL-DAILY', `Report enviado · today ${stats.today_profit.toFixed(2)}u (n=${stats.today_n}, 7d=${stats.past7d_days}d, 30d=${stats.sum30d_n}, total=${stats.sumAll_n})`);
       } catch (e) { log('WARN', 'PNL-DAILY', `erro: ${e.message}`); }
     };

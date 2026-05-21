@@ -15950,6 +15950,16 @@ setInterval(load, 60000);
         const sent = results.filter(r => r.ok).length;
         const failed = results.length - sent;
 
+        // 2026-05-21: persiste flag pra bot.js cron skipar auto-fire do dia.
+        // Quando admin dispara manualmente OK, bot.js auto-fire às 21h BRT
+        // detecta via settings.pnl_daily_last_fire_day=today e skip.
+        if (sent > 0) {
+          try {
+            db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+              .run('pnl_daily_last_fire_day', today);
+          } catch (e) { log('DEBUG', 'PNL-DAILY-FLAG', `err: ${e.message}`); }
+        }
+
         sendJson(res, { ok: true, today, stats, skip_today: skipToday, skip_summary: skipSummary, sent, failed, targets: results, telegram_preview: msg });
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     })();
