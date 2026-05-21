@@ -27674,7 +27674,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     _lastEsportsCalibRefitDay = today;
     const adminKey = (process.env.ADMIN_KEY || '').trim();
     if (!adminKey) { log('WARN', 'ESPORTS-CALIB-REFIT', 'ADMIN_KEY ausente — pulando'); return; }
-    const sports = String(process.env.ESPORTS_CALIB_REFIT_SPORTS || 'lol,cs2,dota2,valorant')
+    // 2026-05-21 audit: CS shadow tips stored como sport='cs' (mig 074
+    // consolidou cs2→cs em tips table). Cron antes passava 'cs2' → endpoint
+    // queria sport='cs2' WHERE clause → 0 tips → "no markets fitted".
+    // Fix: default agora 'cs' (alias defaultMarkets em server.js adiciona suporte).
+    const sports = String(process.env.ESPORTS_CALIB_REFIT_SPORTS || 'lol,cs,dota2,valorant')
       .split(',').map(s => s.trim()).filter(Boolean);
     const trainDays = parseInt(process.env.ESPORTS_CALIB_TRAIN_DAYS ?? '45', 10);
     const evalDays = parseInt(process.env.ESPORTS_CALIB_EVAL_DAYS ?? '14', 10);

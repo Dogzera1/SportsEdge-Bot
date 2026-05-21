@@ -21160,7 +21160,13 @@ load();
       const defaultMarkets = {
         tennis:   ['handicapGames', 'totalGames'],
         lol:      ['handicap', 'total'],
+        // 2026-05-21 audit: CS shadow tips stored as sport='cs' (mig 074), não 'cs2'.
+        // Antes só 'cs2' key existia → /admin/mt-refit-calib?sport=cs retornava
+        // "no markets fitted" mesmo com n=80 settled disponível. Alias resolve.
+        cs:       ['handicap', 'total'],
         cs2:      ['handicap', 'total'],
+        // Defensive alias dota→dota2 (caso futuras tips storage mudem).
+        dota:     ['handicap', 'total'],
         dota2:    ['handicap', 'total'],
         valorant: ['handicap', 'total'],
         football: ['totals'],
