@@ -3260,6 +3260,35 @@ const migrations = [
       } catch (e) { console.log(`[mig 122] result_meta_json: ${e.message}`); }
     },
   },
+  {
+    id: '123_tips_pinnacle_auto_bet',
+    up(db) {
+      // 2026-05-21: Pinnacle auto-bet tracking columns.
+      // Habilita rastreamento de tips que foram apostadas automaticamente
+      // via lib/pinnacle-auto-bet (DRY-RUN default em commit inicial).
+      //
+      // Colunas adicionadas (todas nullable, default NULL):
+      //   pinnacle_bet_id       TEXT — ticket ID returned by Pinnacle (post-execution)
+      //   pinnacle_bet_status   TEXT — 'placed' | 'failed' | 'cancelled' | 'settled_win' | 'settled_loss'
+      //   pinnacle_actual_odd   REAL — odd real obtida (pode diferir do expectedOdd)
+      //   pinnacle_bet_at       TEXT — timestamp ISO da execução
+      //
+      // Idempotent: PRAGMA table_info check antes ADD COLUMN.
+      try {
+        const cols = db.prepare(`PRAGMA table_info(tips)`).all().map(c => c.name);
+        const required = ['pinnacle_bet_id', 'pinnacle_bet_status', 'pinnacle_actual_odd', 'pinnacle_bet_at'];
+        let added = 0;
+        for (const col of required) {
+          if (!cols.includes(col)) {
+            const type = col === 'pinnacle_actual_odd' ? 'REAL' : 'TEXT';
+            db.exec(`ALTER TABLE tips ADD COLUMN ${col} ${type}`);
+            added++;
+          }
+        }
+        console.log(`[mig 123] tips.pinnacle_* columns added: ${added} new (${required.length} total)`);
+      } catch (e) { console.log(`[mig 123] pinnacle_*: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

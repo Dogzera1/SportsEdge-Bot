@@ -10991,6 +10991,66 @@ setInterval(load, 10000);
     return;
   }
 
+  // GET /admin/pinnacle-auto-bet-status?key=<KEY>
+  // 2026-05-21: status do auto-bet Pinnacle — envs, contadores, tips executadas.
+  if (p === '/admin/pinnacle-auto-bet-status' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const daily = db.prepare(`
+        SELECT COUNT(*) AS n, COALESCE(SUM(stake_reais), 0) AS totalBrl
+        FROM tips WHERE pinnacle_bet_id IS NOT NULL AND date(sent_at) = ?
+      `).get(today) || { n: 0, totalBrl: 0 };
+      const enabled = /^(1|true|yes)$/i.test(String(process.env.PINNACLE_AUTO_BET_ENABLED ?? ''));
+      const dry = !/^(0|false|no)$/i.test(String(process.env.PINNACLE_AUTO_BET_DRY ?? 'true'));
+      sendJson(res, {
+        ok: true,
+        config: {
+          enabled,
+          dry_run: dry,
+          require_confirm: !/^(0|false|no)$/i.test(String(process.env.PINNACLE_AUTO_BET_REQUIRE_CONFIRM ?? 'true')),
+          max_stake_brl: parseFloat(process.env.PINNACLE_MAX_STAKE_BRL || '20'),
+          daily_cap_brl: parseFloat(process.env.PINNACLE_DAILY_CAP_BRL || '100'),
+          daily_cap_count: parseInt(process.env.PINNACLE_DAILY_CAP_COUNT || '10', 10),
+          hourly_cap_count: parseInt(process.env.PINNACLE_HOURLY_CAP_COUNT || '3', 10),
+          min_ev_pct: parseFloat(process.env.PINNACLE_MIN_EV_PCT || '5'),
+          phase: enabled && !dry ? 'phase_2_real (NOT IMPLEMENTED — real bets blocked)' : 'phase_1_dry_run',
+        },
+        daily_usage: {
+          bets_count: daily.n,
+          stake_total_brl: +(daily.totalBrl || 0).toFixed(2),
+        },
+        warnings: [
+          !enabled ? 'PINNACLE_AUTO_BET_ENABLED=false (master kill switch active)' : null,
+          dry ? 'DRY mode: logs payloads, no real bets' : null,
+          enabled && !dry ? '⚠️ ENABLED + !DRY — real betting attempts blocked at lib level (Phase 2 não pronto)' : null,
+        ].filter(Boolean),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/pinnacle-bet-confirm?tip_id=N&ticket_id=X&actual_odd=Y&status=placed&key=<KEY>
+  // 2026-05-21: marca tip como aposta executada externally (manual workflow).
+  // Phase 2 Playwright chamará markBetExecuted programaticamente; este endpoint cobre manual.
+  if (p === '/admin/pinnacle-bet-confirm' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const tipId = parseInt(parsed.query.tip_id || '', 10);
+    const ticketId = String(parsed.query.ticket_id || '').trim();
+    const actualOdd = parseFloat(parsed.query.actual_odd || '');
+    const status = String(parsed.query.status || 'placed').trim();
+    if (!Number.isFinite(tipId) || tipId <= 0) { sendJson(res, { error: 'tip_id obrigatório' }, 400); return; }
+    if (!ticketId) { sendJson(res, { error: 'ticket_id obrigatório' }, 400); return; }
+    try {
+      const { markBetExecuted } = require('./lib/pinnacle-auto-bet');
+      const ok = markBetExecuted(db, tipId, { ticket_id: ticketId, actual_odd: actualOdd, status });
+      if (!ok) { sendJson(res, { error: 'markBetExecuted failed' }, 500); return; }
+      const tip = db.prepare(`SELECT id, pinnacle_bet_id, pinnacle_bet_status, pinnacle_actual_odd, pinnacle_bet_at FROM tips WHERE id = ?`).get(tipId);
+      sendJson(res, { ok: true, tip });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/cs-permap-manual?match_id=cs2_ps_X&maps=16-12,8-16,14-16&key=<KEY>
   // 2026-05-21: manual ingestion de per-map rounds quando HLTV/PS detailed unavailable.
   // Format maps=N1-N2,N3-N4,... (CSV de "team1Rounds-team2Rounds" per map em order).
