@@ -15345,6 +15345,57 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/pnl-volume-debug: breakdown por dia BRT + sport + ml/mt
+  // Investiga jumps de volume. GET /admin/pnl-volume-debug?days=10&key=<KEY>
+  if (p === '/admin/pnl-volume-debug' && req.method === 'GET') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '10', 10) || 10));
+    try {
+      const mlRows = db.prepare(`
+        SELECT DATE(settled_at, '-3 hours') AS d, sport, market_type,
+               COUNT(*) AS n, ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS profit
+          FROM tips
+         WHERE COALESCE(is_shadow, 0) = 0
+           AND COALESCE(archived, 0) = 0
+           AND result IN ('win', 'loss', 'void')
+           AND DATE(settled_at, '-3 hours') >= DATE('now', '-3 hours', '-' || ? || ' days')
+         GROUP BY DATE(settled_at, '-3 hours'), sport, COALESCE(market_type, 'ML')
+         ORDER BY d DESC, n DESC
+      `).all(days);
+      const mtRows = db.prepare(`
+        SELECT DATE(settled_at, '-3 hours') AS d, sport, market AS market_type,
+               COUNT(*) AS n, ROUND(SUM(COALESCE(profit_units, 0)), 2) AS profit
+          FROM market_tips_shadow
+         WHERE result IN ('win', 'loss', 'void')
+           AND admin_dm_sent_at IS NOT NULL
+           AND DATE(settled_at, '-3 hours') >= DATE('now', '-3 hours', '-' || ? || ' days')
+         GROUP BY DATE(settled_at, '-3 hours'), sport, market
+         ORDER BY d DESC, n DESC
+      `).all(days);
+      // Agrega: dia → sport → {ml: {market: n}, mt: {market: n}}
+      const byDay = {};
+      for (const r of mlRows) {
+        byDay[r.d] = byDay[r.d] || { ml_total: 0, mt_total: 0, by_sport: {} };
+        const s = r.sport || '?';
+        byDay[r.d].by_sport[s] = byDay[r.d].by_sport[s] || { ml: 0, mt: 0, breakdown: [] };
+        byDay[r.d].by_sport[s].ml += r.n;
+        byDay[r.d].ml_total += r.n;
+        byDay[r.d].by_sport[s].breakdown.push({ kind: 'ML', market: r.market_type || 'ML', n: r.n, profit: r.profit });
+      }
+      for (const r of mtRows) {
+        byDay[r.d] = byDay[r.d] || { ml_total: 0, mt_total: 0, by_sport: {} };
+        const s = r.sport || '?';
+        byDay[r.d].by_sport[s] = byDay[r.d].by_sport[s] || { ml: 0, mt: 0, breakdown: [] };
+        byDay[r.d].by_sport[s].mt += r.n;
+        byDay[r.d].mt_total += r.n;
+        byDay[r.d].by_sport[s].breakdown.push({ kind: 'MT', market: r.market_type, n: r.n, profit: r.profit });
+      }
+      sendJson(res, { ok: true, days, by_day: byDay });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/alerts: lista alerts persistidos (analytics_alerts).
   // GET /admin/alerts?status=open&days=7&key=<ADMIN_KEY>
   if (p === '/admin/alerts' && (req.method === 'GET' || req.method === 'POST')) {
