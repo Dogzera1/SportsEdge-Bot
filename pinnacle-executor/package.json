@@ -1,0 +1,17 @@
+{
+  "name": "pinnacle-executor",
+  "version": "1.0.0",
+  "description": "HTTP executor service for SportsEdge bot — places bets on Pinnacle via Playwright",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "postinstall": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

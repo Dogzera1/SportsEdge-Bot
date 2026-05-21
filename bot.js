@@ -28,6 +28,7 @@ const { getSportUnitValue } = require('./lib/sport-unit');
 // 2026-05-06: hoist requires usados em hot paths pra module scope.
 // Antes vários sites em bot.js faziam `require(...)` per call, custo cumulativo
 // em poll cycles (200 matches × N sports). Module cache lookup é ~1-3μs cada.
+const { fireAutoBetHook } = require('./lib/pinnacle-auto-bet');
 const _gatesRuntimeState = require('./lib/gates-runtime-state');
 const _mtAutoPromote = require('./lib/mt-auto-promote');
 const _mtMarketPromote = require('./lib/mt-market-promote');
@@ -3892,29 +3893,8 @@ async function runAutoAnalysis() {
             // 2026-05-21 (mig 121): rastreia DM dispatch success → updates tips.dm_dispatched_at.
             // Detecta Telegram outage: tip real sem dm marker = bankroll virtual diverge real.
             if (_dmOkLolLs) _markDmDispatched(rec.tipId);
-            // 2026-05-21 (mig 123 Phase 1): Pinnacle auto-bet hook — dry-run default.
-            // tryAutoBet aplica 7 gates (kill switch, dry, stake cap, EV min, caps).
-            // Phase 1 retorna would_bet payload sem executar; Phase 2 (Playwright) executa.
-            // Fire-and-forget — não bloqueia tip flow.
-            (async () => {
-              try {
-                const { tryAutoBet } = require('./lib/pinnacle-auto-bet');
-                const _tipRow = db.prepare(`SELECT id, stake_reais FROM tips WHERE id = ?`).get(rec.tipId);
-                const stakeBrl = parseFloat(_tipRow?.stake_reais) || 0;
-                await tryAutoBet(db, {
-                  tip: { id: rec.tipId },
-                  eventId: match.id,
-                  marketId: 'ML',
-                  side: _pickSideLs,
-                  line: null,
-                  stakeBrl,
-                  expectedOdd: parseFloat(tipOdd),
-                  evPct: parseFloat(tipEV),
-                  sport: 'lol',
-                  league: match.league,
-                });
-              } catch (_) { /* hook não bloqueia tip flow */ }
-            })();
+            // 2026-05-21 (mig 123): Pinnacle auto-bet hook fire-and-forget cross-sport.
+            fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: _pickSideLs, expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'lol', league: match.league });
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           // 2026-04-28: também marca matchKeyBase pra cross-state dedup pre↔live.
@@ -4020,6 +4000,7 @@ async function runAutoAnalysis() {
                     try { await sendDM(resolveTipsToken('esports'), userId, hMsg); _dmOkLolHa = true; } catch(_) {}
                   }
                   if (_dmOkLolHa) _markDmDispatched(recHa.tipId);
+                  fireAutoBetHook(db, { tipId: recHa.tipId, eventId: match.id, marketId: 'HANDICAP', side: isT1Fav ? 't1' : 't2', expectedOdd: hOdd, evPct: hEV, sport: 'lol', league: match.league });
                 }
                 break;
               }
@@ -4381,6 +4362,7 @@ async function runAutoAnalysis() {
                 catch(e) { if (e.message?.includes('403')) _safeUnsub(userId); }
               }
               if (_dmOkLolUp) _markDmDispatched(recUp.tipId);
+              fireAutoBetHook(db, { tipId: recUp.tipId, eventId: match.id, marketId: 'ML', side: _pickSideUp, expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'lol', league: match.league });
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
             log('INFO', 'AUTO-TIP', `Esports upcoming: ${tipTeam} @ ${tipOdd}`);
@@ -17671,6 +17653,7 @@ Máximo 200 palavras.`;
             try { await sendDM(token, uid, msg, _betBtnDota || undefined); _dmOkDota = true; } catch (_) {}
           }
           if (_dmOkDota) _markDmDispatched(rec.tipId);
+          fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: isT1bet ? 't1' : 't2', expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'dota2', league: match.league });
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
@@ -17908,6 +17891,7 @@ async function analyzeDotaMapTip(match, token) {
         try { await sendDM(token, uid, msg); _dmOkDotaMap = true; } catch (_) {}
       }
       if (_dmOkDotaMap) _markDmDispatched(rec.tipId);
+      fireAutoBetHook(db, { tipId: rec.tipId, eventId: String(match.id) + '_MAP' + mapN, marketId: 'MAP_WINNER', side: pickDir, expectedOdd: pickOdd, evPct: pickEv, sport: 'dota2', league: match.league });
     }
     log('INFO', 'AUTO-DOTA-MAP', `TIP MAPA ${mapN}: ${pickTeam} @ ${pickOdd} (EV ${pickEv.toFixed(1)}%, conf ${pred.confidence})`);
     analyzedDota.set(mapKey, { ts: now, tipSent: true });
@@ -18709,6 +18693,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           try { await sendDM(token, userId, tipMsg, _betBtnMma || undefined); _dmOkMma = true; } catch(_) {}
         }
         if (_dmOkMma) _markDmDispatched(rec.tipId);
+        fireAutoBetHook(db, { tipId: rec.tipId, eventId: fight.id, marketId: 'ML', side: _pickSideMma, expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'mma', league: recEventName });
         analyzedMma.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
@@ -20360,6 +20345,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); _dmOkTen = true; } catch(_) {}
           }
           if (_dmOkTen) _markDmDispatched(rec.tipId);
+          fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: pickIsT1 ? 't1' : 't2', expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'tennis', league: match.league });
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
         const shadowReason = _tennisMlShadow
@@ -21813,6 +21799,7 @@ Máximo 200 palavras.`;
           try { await sendDM(token, userId, tipMsg, _betBtnFb || undefined); _dmOkFb = true; } catch(_) {}
         }
         if (_dmOkFb) _markDmDispatched(recFb.tipId);
+        fireAutoBetHook(db, { tipId: recFb.tipId, eventId: recordMatchId || match.id, marketId: _recordMarketType, side: _pickSideFb, expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'football', league: match.league });
         analyzedFootball.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
@@ -22083,6 +22070,7 @@ async function pollTableTennis(runOnce = false) {
           try { await sendDM(token, userId, msg, _betBtnTt || undefined); _dmOkTt = true; } catch (_) {}
         }
         if (_dmOkTt) _markDmDispatched(rec.tipId);
+        fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: direction, expectedOdd: pickOdd, evPct, sport: 'tabletennis', league: match.league });
         log('INFO', 'AUTO-TT', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
       }
@@ -23110,6 +23098,7 @@ Máximo 200 palavras.`;
           try { await sendDM(token, userId, msg, _betBtnCs || undefined); _dmOkCs = true; } catch (_) {}
         }
         if (_dmOkCs) _markDmDispatched(rec.tipId);
+        fireAutoBetHook(db, { tipId: rec.tipId, eventId: String(match.id) + csMapTag, marketId: _csPerMapEnabled ? `MAP${csMapNum}_WINNER` : 'ML', side: direction, expectedOdd: pickOdd, evPct, sport: 'cs', league: match.league });
         log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         // CLV delayed capture — match CS termina em ~30-40min, capture odds T+3min
         scheduleLiveClvCapture('cs', match, pickTeam, match.id, pickOdd);
@@ -23933,6 +23922,7 @@ Máximo 180 palavras.`;
           try { await sendDM(token, userId, msg, _betBtnVal || undefined); _dmOkVal = true; } catch (_) {}
         }
         if (_dmOkVal) _markDmDispatched(rec.tipId);
+        fireAutoBetHook(db, { tipId: rec.tipId, eventId: String(match.id) + valMapTag, marketId: _valPerMapEnabled ? `MAP${valMapNum}_WINNER` : 'ML', side: direction, expectedOdd: pickOdd, evPct, sport: 'valorant', league: match.league });
         log('INFO', 'AUTO-VAL', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         scheduleLiveClvCapture('valorant', match, pickTeam, match.id, pickOdd);
         await new Promise(r => setTimeout(r, 3000));
@@ -24283,6 +24273,7 @@ async function runAutoDarts() {
             try { await sendDM(dartsConfig.token, userId, tipMsg, _betBtnDarts || undefined); _dmOkDarts = true; } catch(_) {}
           }
           if (_dmOkDarts) _markDmDispatched(rec.tipId);
+          fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: ml.direction, expectedOdd: pickOdd, evPct, sport: 'darts', league: match.league });
           log('INFO', 'AUTO-DARTS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -24550,6 +24541,7 @@ async function runAutoSnooker() {
             try { await sendDM(snookerConfig.token, userId, tipMsg, _betBtnSn || undefined); _dmOkSn = true; } catch(_) {}
           }
           if (_dmOkSn) _markDmDispatched(rec.tipId);
+          fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: ml.direction, expectedOdd: pickOdd, evPct, sport: 'snooker', league: match.league });
           log('INFO', 'AUTO-SNOOKER', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -24983,6 +24975,7 @@ async function runAutoBasket() {
           try { await sendDM(basketConfig.token, userId, tipMsg); _dmOkBk = true; } catch (_) {}
         }
         if (_dmOkBk) _markDmDispatched(rec.tipId);
+        fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: direction, expectedOdd: pickOdd, evPct, sport: 'basket', league: match.league || 'NBA' });
       }
     }
     if (!_drainedBasket && _hadLiveBasket) _livePhaseExit('basket');
