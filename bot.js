@@ -25249,6 +25249,29 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('auto_shadow', checkAutoShadow), AUTO_SHADOW_CHECK_INTERVAL_MS);
   setTimeout(_wrapCron('auto_shadow', checkAutoShadow), 5 * 60 * 1000); // primeiro check 5min pós-boot (DB já tá warm)
 
+  // 2026-05-21 Plan B HLTV: bulk sync /results pages 1x/dia → populate hltv_*
+  // rows em match_results. cs-per-map-ingest depois usa hltv_* rows (matchId
+  // direto) + propaga meta cross-rows team+date. Default ON.
+  if (!/^(0|false|no)$/i.test(String(process.env.HLTV_RESULTS_SYNC_AUTO ?? 'true'))) {
+    let _hltvResultsLastDay = null;
+    const _runHltvResultsSync = async () => {
+      const hourUtc = parseInt(process.env.HLTV_RESULTS_SYNC_HOUR_UTC || '3', 10);
+      const now = new Date();
+      const today = now.toISOString().slice(0, 10);
+      if (_hltvResultsLastDay === today) return;
+      if (now.getUTCHours() !== hourUtc) return;
+      _hltvResultsLastDay = today;
+      try {
+        const { syncHltvResults } = require('./lib/hltv-results-sync');
+        const maxPages = parseInt(process.env.HLTV_RESULTS_SYNC_PAGES || '5', 10) || 5;
+        const r = await syncHltvResults(db, { maxPages, delayMs: 2500 });
+        log('INFO', 'HLTV-RESULTS-SYNC', `daily: fetched=${r.fetched} inserted=${r.inserted} pages=${r.pages} blocked=${r.blocked} errors=${r.errors.length}`);
+      } catch (e) { log('WARN', 'HLTV-RESULTS-SYNC', `${e.message}`); }
+    };
+    setInterval(_wrapCron('hltv_results_sync', _runHltvResultsSync), 15 * 60 * 1000);
+    setTimeout(_wrapCron('hltv_results_sync', _runHltvResultsSync), 8 * 60 * 1000);
+  }
+
   // 2026-05-21: CS per-map rounds ingestion cron — habilita settle automático de
   // handicap_rounds_mapN + total_rounds_mapN markets (lib/cs-per-map-ingest +
   // mig 122 result_meta_json). Default ON (opt-out via CS_PERMAP_INGEST_AUTO=false).

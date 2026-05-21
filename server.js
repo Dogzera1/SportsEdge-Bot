@@ -10950,6 +10950,26 @@ setInterval(load, 10000);
     return;
   }
 
+  // POST /admin/sync-hltv-results?maxPages=5&delayMs=2500&startOffset=0&key=<ADMIN_KEY>
+  // 2026-05-21 Plan B: bulk sync HLTV /results pages → match_results.match_id='hltv_*'.
+  // Habilita downstream cs-per-map-ingest pra encontrar HLTV rows com matchId direto.
+  // Idempotent (ON CONFLICT match_id+game). Manual + cron 1x/dia (3h UTC default).
+  if (p === '/admin/sync-hltv-results' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const maxPages = Math.max(1, Math.min(50, parseInt(parsed.query.maxPages || '3', 10) || 3));
+    const delayMs = Math.max(500, parseInt(parsed.query.delayMs || '2500', 10) || 2500);
+    const startOffset = Math.max(0, parseInt(parsed.query.startOffset || '0', 10) || 0);
+    (async () => {
+      try {
+        const { syncHltvResults } = require('./lib/hltv-results-sync');
+        const r = await syncHltvResults(db, { maxPages, delayMs, startOffset });
+        sendJson(res, { ok: true, maxPages, ...r });
+      } catch (e) { sendJson(res, { error: e.message }, 500); }
+    })();
+    return;
+  }
+
   // POST /admin/sync-cs-per-map-rounds?days=14&limit=50&dry=1&key=<ADMIN_KEY>
   // 2026-05-21: ingestion HLTV per-map round scores → match_results.result_meta_json.
   // Habilita settle handicap_rounds_mapN + total_rounds_mapN markets (CS/Val).
