@@ -20748,6 +20748,81 @@ load();
     return;
   }
 
+  // POST /admin/mark-dm-dispatched body { tipId }
+  // 2026-05-21 (mig 121): bot.js _markDmDispatched chama após pelo menos 1
+  // sendDM success no loop subscribedUsers. Best-effort observability — falha
+  // não pode abortar tip flow. Sem auth strict (loopback only via _isIpInAllowlist).
+  if (p === '/admin/mark-dm-dispatched' && req.method === 'POST') {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
+      try {
+        const { tipId } = safeParse(body, {});
+        const id = parseInt(tipId, 10);
+        if (!Number.isFinite(id) || id <= 0) {
+          badRequest(res, 'tipId inválido');
+          return;
+        }
+        const info = db.prepare(`UPDATE tips SET dm_dispatched_at = ? WHERE id = ? AND dm_dispatched_at IS NULL`)
+          .run(Date.now(), id);
+        sendJson(res, { ok: true, tipId: id, updated: info.changes });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    }, 1024); // small body
+    return;
+  }
+
+  // GET /admin/dm-dispatch-audit?days=1&key=<KEY>
+  // 2026-05-21 (mig 121): lista tips real recentes sem dm_dispatched_at marker.
+  // Útil pra detectar Telegram outage: tip foi gravada is_shadow=0 (real),
+  // bankroll virtual deduzido, mas user nunca recebeu DM → aposta NÃO colocada.
+  // Janela default 1d, max 7d. Filtra: real (is_shadow=0) + sent_at > 5min ago
+  // (dá tempo do bot chamar _markDmDispatched antes de flagar).
+  if (p === '/admin/dm-dispatch-audit' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.min(7, Math.max(1, parseInt(parsed.query.days, 10) || 1));
+      const cutoffStart = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+      const cutoffEnd = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const rows = db.prepare(`
+        SELECT id, sport, market_type, tip_participant, odds, ev, stake, confidence,
+               sent_at, is_live, dm_dispatched_at,
+               participant1 AS p1, participant2 AS p2
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 0
+          AND COALESCE(archived, 0) = 0
+          AND sent_at >= ?
+          AND sent_at < ?
+          AND dm_dispatched_at IS NULL
+        ORDER BY sent_at DESC
+        LIMIT 200
+      `).all(cutoffStart, cutoffEnd);
+      const total = db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 0
+          AND COALESCE(archived, 0) = 0
+          AND sent_at >= ?
+      `).get(cutoffStart)?.n || 0;
+      const bySport = {};
+      for (const r of rows) {
+        const s = r.sport || 'unknown';
+        bySport[s] = (bySport[s] || 0) + 1;
+      }
+      sendJson(res, {
+        ok: true,
+        window_days: days,
+        cutoff_start: cutoffStart,
+        cutoff_end: cutoffEnd,
+        total_real_tips_in_window: total,
+        missing_dm_count: rows.length,
+        missing_pct: total > 0 ? +(rows.length / total * 100).toFixed(2) : 0,
+        by_sport: bySport,
+        sample: rows.slice(0, 50),
+        note: 'tips real (is_shadow=0) com sent_at >5min mas dm_dispatched_at IS NULL. Pode indicar Telegram outage OR caller bug. Wire helper bot.js _markDmDispatched pendente extensão cross-sport (atualmente só LoL ML wire — outros sports retornam aqui false-positive).',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/basket-series-info?match_ids=basket_espn_X,basket_espn_Y[,...]
   // 2026-05-12: lookup batch ESPN summary pra mapear match_id → playoff round + Game N.
   // Usado pelo dashboard ML Shadow render pra mostrar contexto série em tips basket

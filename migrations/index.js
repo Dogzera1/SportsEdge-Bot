@@ -3165,6 +3165,68 @@ const migrations = [
       } catch (e) { console.log(`[mig 119] failed: ${e.message}`); }
     },
   },
+  {
+    id: '120_tips_unique_active_is_shadow',
+    up(db) {
+      // 2026-05-21 audit adversarial #3 (P0): idx_tips_unique_active criado mig 096
+      // + refined mig 102 não incluía COALESCE(is_shadow, 0) no scope UNIQUE.
+      // Race condition: shadow tip logged (is_shadow=1) → real tip same key
+      // (is_shadow=0) → UNIQUE collision → server retorna 409 'race_dedup_unique'
+      // → real tip BLOQUEADA pelo shadow precedente. Sports com SHADOW=true + true_real
+      // rotation (basket, MMA history, futuro promotes) têm janela vulnerável.
+      //
+      // P2 principle: shadow é research universe SEPARADO de real (dispatch). Eles
+      // não devem colidir em UNIQUE — são contextos diferentes mesmo no mesmo match.
+      //
+      // Fix: drop+recreate adicionando COALESCE(is_shadow, 0) ao scope. Agora:
+      //   real (is_shadow=0) + shadow (is_shadow=1) coexistem no mesmo match
+      //   real-vs-real ainda bloqueado (UNIQUE)
+      //   shadow-vs-shadow ainda bloqueado (UNIQUE) — exceto SHADOW_DEDUP_FORCE_SPORTS
+      //   (basket) que tem dedup adicional em server.js:26308 pra promoção limpa.
+      try {
+        db.exec(`DROP INDEX IF EXISTS idx_tips_unique_active`);
+        db.exec(`
+          CREATE UNIQUE INDEX idx_tips_unique_active
+          ON tips(match_id, sport, COALESCE(market_type, 'ML'), tip_participant, COALESCE(is_shadow, 0))
+          WHERE COALESCE(archived, 0) = 0
+            AND match_id IS NOT NULL
+            AND (result IS NULL OR result NOT IN ('void','push'))
+        `);
+        console.log('[mig 120] re-created idx_tips_unique_active including is_shadow');
+      } catch (e) { console.log(`[mig 120] unique idx is_shadow: ${e.message}`); }
+    },
+  },
+  {
+    id: '121_tips_dm_dispatched_at',
+    up(db) {
+      // 2026-05-21 audit adversarial #5 (P1): Telegram 403/429/timeout swallowed
+      // silently em 11+ sport DM paths via `sendDM(...).catch(_=>{})`. Resultado:
+      // bot grava tip como real em DB (bankroll virtual deduzido), mas user nunca
+      // recebeu DM → aposta NÃO colocada na casa → bot acha que perdeu/ganhou
+      // stake fantasma. Distorce bankroll real, leak guard, kelly auto-tune.
+      //
+      // Coluna dm_dispatched_at (epoch ms NULL):
+      //   NULL = DM ainda não disparado OR dispatch falhou
+      //   N    = DM dispatched at timestamp N (epoch ms)
+      //
+      // Wire em código: cada sendDM success path → UPDATE tips SET dm_dispatched_at=NOW()
+      // WHERE id=tipId (best-effort, não-bloqueante). Helper _markDmDispatched(tipId) em
+      // bot.js + endpoint /admin/mark-dm-dispatched server-side.
+      //
+      // Monitoring: /admin/dm-dispatch-audit endpoint lista tips real recentes
+      // (sent_at >5min, <24h, is_shadow=0) com dm_dispatched_at IS NULL.
+      try {
+        const cols = db.prepare(`PRAGMA table_info(tips)`).all();
+        const hasCol = cols.some(c => c.name === 'dm_dispatched_at');
+        if (!hasCol) {
+          db.exec(`ALTER TABLE tips ADD COLUMN dm_dispatched_at INTEGER`);
+          console.log('[mig 121] added tips.dm_dispatched_at column');
+        } else {
+          console.log('[mig 121] tips.dm_dispatched_at already exists, skipping');
+        }
+      } catch (e) { console.log(`[mig 121] dm_dispatched_at: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

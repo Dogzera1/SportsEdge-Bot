@@ -3856,9 +3856,13 @@ async function runAutoAnalysis() {
           if (_isShadowDispatch(rec, 'lol')) {
             log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
           } else {
+            let _dmOkLolLs = false;
             for (const [userId, prefs] of subscribedUsers) {
               if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
-              try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtn || undefined); }
+              try {
+                await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtn || undefined);
+                _dmOkLolLs = true;
+              }
               catch(e) {
                 if (e.message?.includes('403')) {
                   if (_safeUnsub(userId)) {
@@ -3872,6 +3876,9 @@ async function runAutoAnalysis() {
                 }
               }
             }
+            // 2026-05-21 (mig 121): rastreia DM dispatch success → updates tips.dm_dispatched_at.
+            // Detecta Telegram outage: tip real sem dm marker = bankroll virtual diverge real.
+            if (_dmOkLolLs) _markDmDispatched(rec.tipId);
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           // 2026-04-28: também marca matchKeyBase pra cross-state dedup pre↔live.
@@ -5670,6 +5677,18 @@ for (const b of ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 
 function isBucketShadowed(sport) {
   if (SPORTS[sport]?.shadowMode) return true;
   return _splitBucketShadow.has(sport);
+}
+
+// 2026-05-21 (audit P1): rastreia se Telegram DM dispatch teve sucesso (mig 121).
+// Telegram 403/429/timeout swallowed em 11+ sport paths via sendDM().catch(_=>{}).
+// Sem isso, bot acha que dispatched, user nunca recebeu DM → bankroll virtual
+// diverge real. Wire: chamar await _markDmDispatched(tipId) APÓS pelo menos
+// 1 sendDM success no loop subscribedUsers. Fire-and-forget OK (best-effort
+// observability, não bloqueia).
+function _markDmDispatched(tipId) {
+  if (!tipId) return Promise.resolve(null);
+  return serverPost('/admin/mark-dm-dispatched', { tipId }, 'observability')
+    .catch(() => null); // best-effort: falha em DB write não pode abortar tip flow
 }
 
 // 2026-05-06: Helper unificado pra dispatch DM gate. Antes só checava
