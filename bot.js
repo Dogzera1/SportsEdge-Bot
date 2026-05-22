@@ -17300,6 +17300,12 @@ async function _pollDotaInner(runOnce = false) {
         ? `\nESTADO DA SÉRIE (AO VIVO): ${match.team1} ${match.score1||0} x ${match.score2||0} ${match.team2} | Formato: ${match.format || 'Bo?'}\n⚠️ Partida ao vivo — odds refletem o estado atual da série. Só tip se edge for claro e odds forem favoráveis.${dotaHasLiveStats ? '\n\nSTATS AO VIVO:' + dotaLiveContext : ''}`
         : '';
 
+      // 2026-05-22 audit: refit pattern P5 cross-sport (tennis primeiro, agora dota).
+      // REGRA ABSOLUTA evita hallucinated P_IA. Memory: project_ai_audit_2026_05_22.
+      const _dotaP1Lo = Math.max(1, Math.round(parseFloat(modelP1) - 5));
+      const _dotaP1Hi = Math.min(99, Math.round(parseFloat(modelP1) + 5));
+      const _dotaP2Lo = Math.max(1, Math.round(parseFloat(modelP2) - 5));
+      const _dotaP2Hi = Math.min(99, Math.round(parseFloat(modelP2) + 5));
       const prompt = `Você é um analista especializado em Dota 2 esports. Analise esta partida e identifique edge real se existir.
 
 PARTIDA: ${match.team1} vs ${match.team2}
@@ -17313,6 +17319,16 @@ ${fairLabel}: ${match.team1}=${modelP1}% | ${match.team2}=${modelP2}%
 FORMA RECENTE (DB interno, últimos 45 dias):
 ${formSection}
 ${h2hSection}
+
+═══ REGRA ABSOLUTA DE P (não negociável) ═══
+O modelo (Elo/Forma/H2H) já calculou ÂNCORA: ${match.team1}=${modelP1}% | ${match.team2}=${modelP2}%.
+Sua P DEVE estar dentro de [modelP − 5pp, modelP + 5pp]:
+• ${match.team1}: P ∈ [${_dotaP1Lo}%, ${_dotaP1Hi}%]
+• ${match.team2}: P ∈ [${_dotaP2Lo}%, ${_dotaP2Hi}%]
+Se você acredita P real está FORA desse range → você está duvidando do modelo.
+   → Retorne SEM_EDGE. NUNCA force P inflado para criar edge fictício.
+Modelo source-of-truth já incorpora forma+H2H. Seu valor é COMENTAR/CONFIRMAR.
+⚠️ EV > 40% = P inflado. Recalcule dentro do range ou SEM_EDGE.
 
 REGRAS DE CONVICÇÃO (não negociáveis):
 • ALTA (EV ≥ +12%): exige ≥3 sinais do checklist confirmando
@@ -18342,7 +18358,18 @@ ${hasModelDataMma
 - Se não conhece nenhum lutador ou edge < 8pp: SEM_EDGE.`}
 
 Máximo 220 palavras. Seja direto e fundamentado.`
-          : `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
+          : (() => {
+            // 2026-05-22 audit: refit pattern P5 cross-sport.
+            // MMA modelo é APENAS record histórico (não tem grappling/striking
+            // breakdown) — IA legitimamente adiciona análise técnica. Range mais
+            // largo (±10pp vs ±5pp tennis/dota) reflete isso. Memory: project_ai_audit_2026_05_22.
+            const _mP1 = parseFloat(modelP1Mma);
+            const _mP2 = parseFloat(modelP2Mma);
+            const _mmaP1Lo = Math.max(1, Math.round(_mP1 - 10));
+            const _mmaP1Hi = Math.min(99, Math.round(_mP1 + 10));
+            const _mmaP2Lo = Math.max(1, Math.round(_mP2 - 10));
+            const _mmaP2Hi = Math.min(99, Math.round(_mP2 + 10));
+            return `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
 LUTA: ${fight.team1} vs ${fight.team2}
 Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}${ufcStatsSection}
@@ -18351,7 +18378,15 @@ ODDS (${o.bookmaker || 'EU'}):
 ${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
 Margem bookie: ${marginPct}% ${parseFloat(marginPct) > 7 ? '⚠️ (alta — book pouco confiável)' : ''}
 ${fairOddsRef}
-AVISO: ${hasModelDataMma ? `modelo base usa record histórico como prior — sua estimativa deve superar a P do modelo em ≥8pp para ter edge real.` : `fair odds calculadas via de-juice (sem record ESPN) — use apenas como referência mínima; para edge real, sua estimativa deve superar ≥8pp.`}
+
+═══ REGRA ABSOLUTA DE P (não negociável) ═══
+Modelo (record histórico) calculou prior: ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}%.
+Sua P DEVE estar dentro de [modelP − 10pp, modelP + 10pp]:
+• ${fight.team1}: P ∈ [${_mmaP1Lo}%, ${_mmaP1Hi}%]
+• ${fight.team2}: P ∈ [${_mmaP2Lo}%, ${_mmaP2Hi}%]
+MMA range é mais largo (±10pp) pois modelo é só record — IA adiciona análise técnica/grappling/striking. Mesmo assim NÃO ultrapasse o range.
+Se acredita P real fora do range → SEM_EDGE (nunca force P inflado).
+⚠️ EV > 40% indica P fora do range. Recalcule ou SEM_EDGE.
 ${newsSectionMma ? `\n${newsSectionMma}\n` : ''}
 
 REGRAS DE CONVICÇÃO (não negociáveis):
@@ -18387,6 +18422,7 @@ ${hasModelDataMma
 - Se não conhece nenhum lutador ou edge é < 8pp: SEM_EDGE.`}
 
 Máximo 220 palavras. Seja direto e fundamentado.`;
+          })();
 
         const espnTag = espn ? ` (ESPN card: ${weightClass}, ${rounds}R)` : hasEspnRecord ? ` (ESPN athlete: ${rec1||'?'} | ${rec2||'?'})` : ' (sem dados ESPN)';
         log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espnTag}`);
@@ -21299,6 +21335,14 @@ MODELO QUANTITATIVO (pré-análise):
 
         const newsSection = await fetchMatchNews('football', match.team1, match.team2).catch(() => '');
 
+        // 2026-05-22 audit: refit pattern P5 cross-sport. Football é 3-way
+        // (Casa/Empate/Fora), aplica REGRA ABSOLUTA em cada um. Memory: project_ai_audit_2026_05_22.
+        const _fbPHLo = Math.max(1, Math.round(parseFloat(mlScore.modelH) - 5));
+        const _fbPHHi = Math.min(99, Math.round(parseFloat(mlScore.modelH) + 5));
+        const _fbPDLo = Math.max(1, Math.round(parseFloat(mlScore.modelD) - 5));
+        const _fbPDHi = Math.min(99, Math.round(parseFloat(mlScore.modelD) + 5));
+        const _fbPALo = Math.max(1, Math.round(parseFloat(mlScore.modelA) - 5));
+        const _fbPAHi = Math.min(99, Math.round(parseFloat(mlScore.modelA) + 5));
         const prompt = `Você é um analista especializado em futebol de ligas secundárias (Série B/C Brasil, Sul-America, League One/Two, 3. Liga). Analise com rigor — prefira SEM_EDGE a inventar edge.
 
 PARTIDA: ${match.team1} (casa) vs ${match.team2} (fora)
@@ -21310,6 +21354,16 @@ Casa: ${oH} → de-juiced: ${mktH}% | Empate: ${oD} → ${mktD}% | Fora: ${oA} �
 Margem bookie: ${marginPct}%
 ${hasRealData && contextBlock ? '' : `Fair odds (de-juice, sem dados quantitativos): Casa=${mktH}% | Empate=${mktD}% | Fora=${mktA}% — use como referência mínima; sua estimativa deve superar ≥8pp para ter edge real.\n`}Totais: ${ou25Line}
 ${contextBlock}${newsSection ? `\n${newsSection}\n` : ''}
+═══ REGRA ABSOLUTA DE P (não negociável) ═══
+Modelo Poisson/quantitativo calculou ÂNCORA: Casa=${mlScore.modelH}% | Empate=${mlScore.modelD}% | Fora=${mlScore.modelA}%.
+Sua P para CADA seleção DEVE estar dentro de [modelP − 5pp, modelP + 5pp]:
+• Casa: P ∈ [${_fbPHLo}%, ${_fbPHHi}%]
+• Empate: P ∈ [${_fbPDLo}%, ${_fbPDHi}%]
+• Fora: P ∈ [${_fbPALo}%, ${_fbPAHi}%]
+Modelo já incorpora xG, home advantage, form. Seu valor é COMENTAR — não substituir P.
+Se acredita P real fora do range → SEM_EDGE. NUNCA force P inflado.
+⚠️ EV > 30% em sharp markets = P inflado. Recalcule ou SEM_EDGE.
+
 REGRAS DE CONVICÇÃO (não negociáveis):
 • ALTA (EV ≥ +${EV_THRESHOLD}%, conf ≥8): exige ≥3 sinais do checklist + dados quantitativos disponíveis
 • MÉDIA (EV ≥ +${EV_THRESHOLD}%, conf ≥7): exige ≥2 sinais
@@ -22910,6 +22964,11 @@ async function pollCs(runOnce = false) {
             : _csEloSample < 30
             ? 'Sample Elo médio (15-29j) — sinal médio'
             : 'Sample Elo robusto (≥30j)';
+          // 2026-05-22 audit: refit pattern P5 cross-sport. CS modelP é decimal (0-1).
+          const _csP1Lo = Math.max(1, Math.round(modelP1 * 100 - 5));
+          const _csP1Hi = Math.min(99, Math.round(modelP1 * 100 + 5));
+          const _csP2Lo = Math.max(1, Math.round(modelP2 * 100 - 5));
+          const _csP2Hi = Math.min(99, Math.round(modelP2 * 100 + 5));
           const prompt = `Você é um analista especializado em CS2 esports. Seja conservador — prefira SEM_EDGE a apostar em margem duvidosa.
 
 PARTIDA: ${match.team1} vs ${match.team2} (${match.league}) ${match.status === 'live' ? '[AO VIVO]' : '[PRÉ-JOGO]'}
@@ -22927,6 +22986,15 @@ ${formStr}
 ${h2hStr}${liveStr}
 
 Pick proposta pelo modelo: ${pickTeam} @ ${pickOdd} (P=${(pickP*100).toFixed(1)}%, EV=${evPct.toFixed(1)}%)
+
+═══ REGRA ABSOLUTA DE P (não negociável) ═══
+Modelo Elo+form+H2H calculou ÂNCORA: ${match.team1}=${(modelP1*100).toFixed(1)}% | ${match.team2}=${(modelP2*100).toFixed(1)}%.
+Sua P DEVE estar dentro de [modelP − 5pp, modelP + 5pp]:
+• ${match.team1}: P ∈ [${_csP1Lo}%, ${_csP1Hi}%]
+• ${match.team2}: P ∈ [${_csP2Lo}%, ${_csP2Hi}%]
+Modelo já incorpora Elo, form, H2H, sample-size. Seu valor é COMENTAR/CONFIRMAR.
+Se acredita P real fora do range → SEM_EDGE. NUNCA force P inflado.
+⚠️ EV > 40% = P inflado. Recalcule ou SEM_EDGE.
 
 REGRAS OBRIGATÓRIAS:
 • ALTA (EV ≥ +10%): exige ≥3 sinais independentes do checklist confirmando
@@ -23722,6 +23790,11 @@ async function pollValorant(runOnce = false) {
         // (research) | VALORANT_AI_REAL=true (promove). Economy gates aplicam.
         if (/^(1|true|yes)$/i.test(String(process.env.VALORANT_AI_SHADOW || '')) ||
             /^(1|true|yes)$/i.test(String(process.env.VALORANT_AI_REAL || ''))) {
+          // 2026-05-22 audit: refit pattern P5 cross-sport. Val modelP é decimal.
+          const _valP1Lo = Math.max(1, Math.round(modelP1 * 100 - 5));
+          const _valP1Hi = Math.min(99, Math.round(modelP1 * 100 + 5));
+          const _valP2Lo = Math.max(1, Math.round(modelP2 * 100 - 5));
+          const _valP2Hi = Math.min(99, Math.round(modelP2 * 100 + 5));
           const _valPrompt = `Você é um analista especializado em Valorant esports. Analise este match e identifique edge real se existir.
 
 MATCH: ${match.team1} vs ${match.team2}
@@ -23732,6 +23805,15 @@ ${match.team1}: ${o1} | ${match.team2}: ${o2}
 Modelo Elo: ${match.team1}=${(modelP1*100).toFixed(1)}% | ${match.team2}=${(modelP2*100).toFixed(1)}%
 Sample Elo: ${match.team1}=${elo?.eloMatches1 ?? '?'}j | ${match.team2}=${elo?.eloMatches2 ?? '?'}j
 Edge ML: ${mlScore.toFixed(1)}pp | Pick modelo: ${pickTeam} @ ${pickOdd}
+
+═══ REGRA ABSOLUTA DE P (não negociável) ═══
+Modelo Elo calculou ÂNCORA: ${match.team1}=${(modelP1*100).toFixed(1)}% | ${match.team2}=${(modelP2*100).toFixed(1)}%.
+Sua P DEVE estar dentro de [modelP − 5pp, modelP + 5pp]:
+• ${match.team1}: P ∈ [${_valP1Lo}%, ${_valP1Hi}%]
+• ${match.team2}: P ∈ [${_valP2Lo}%, ${_valP2Hi}%]
+Modelo já incorpora Elo + sample size. Seu valor é COMENTAR/CONFIRMAR.
+Se acredita P real fora do range → SEM_EDGE. NUNCA force P inflado.
+⚠️ EV > 40% = P inflado. Recalcule ou SEM_EDGE.
 
 REGRAS DE CONVICÇÃO (não negociáveis):
 • ALTA (EV ≥ +10%, conf ≥8): exige ≥3 sinais do checklist + sample ambos ≥10j
