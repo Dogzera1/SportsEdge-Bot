@@ -21949,8 +21949,10 @@ load();
     if (!requireAdmin(req, res)) return;
     try {
       const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
-      const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '100', 10) || 100));
-      const conds = [`sent_at >= datetime('now', '-' || ? || ' days')`, `(archived IS NULL OR archived = 0)`];
+      const limit = Math.max(1, Math.min(3000, parseInt(parsed.query.limit || '100', 10) || 100));
+      const includeArchived = parsed.query.include_archived === '1' || parsed.query.include_archived === 'true';
+      const conds = [`sent_at >= datetime('now', '-' || ? || ' days')`];
+      if (!includeArchived) conds.push(`(archived IS NULL OR archived = 0)`);
       const params = [days];
       if (parsed.query.sport && parsed.query.sport !== '__overall__') {
         const sportSet = (typeof resolveSportSet === 'function')
