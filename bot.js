@@ -20232,7 +20232,11 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
             // 2026-04-28: cap reduzido pra 18pp em tier 2/3 (Challenger/ITF/W125)
             // após audit ML shadow ROI -32% (audit memory: divergence 25pp deixava
             // passar overshoots em segments low-quality).
-            const _maxDivTennisDefault = _tennisTopTier ? '20' : '18';
+            // 2026-05-22 (audit gates hoje): sharp_divergence net -1.16 tennis em 30d
+            // (12 blocked, hit 68% — bloqueava winners). Defaults relaxados 20→22 e
+            // 18→20. User env TENNIS_MAX_DIVERGENCE_PP override vence (precisa remove
+            // env Railway pra valer default novo).
+            const _maxDivTennisDefault = _tennisTopTier ? '22' : '20';
             const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? _maxDivTennisDefault);
             const _div = _sharpDivergenceGate({
               oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivTennis,
