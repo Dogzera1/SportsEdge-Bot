@@ -13206,6 +13206,26 @@ setInterval(load, 60000);
   // GET /admin/hg-neg-readiness?days=60&minN=50&minRoi=10&minIcLowerHit=0.50&key=<KEY>
   // 2026-05-09: check on-demand do readiness HG- tennis (mesmo do cron 24h).
   // Retorna armed=true quando sample suficiente + ROI/IC95 atingem threshold.
+  // GET /admin/cross-significance?sport=tennis,lol&days=30&include_archived=1&min_n=20&key=
+  // CSA (Cross-Significance Analyzer) — Fase 1 MVP. Analisa shadow×real per
+  // (sport×market×{dir}×{side}×{tier?}) com Wilson IC95 hit + normal IC95 ROI.
+  // Classifica: EDGE | LEAK | WATCH | INCONC | NA.
+  // P2 compliant: read-only, sem auto-action. Suggestion text apenas (DM via cron Fase 2).
+  if (p === '/admin/cross-significance') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { runCrossSignificance } = require('./lib/cross-significance');
+      const sportsRaw = String(parsed.query.sport || 'tennis,lol').trim();
+      const sports = sportsRaw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean).slice(0, 12);
+      const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      const minN = Math.max(5, Math.min(100, parseInt(parsed.query.min_n || '20', 10) || 20));
+      const includeArchived = parsed.query.include_archived !== '0' && parsed.query.include_archived !== 'false';
+      const r = runCrossSignificance(db, { sports, days, minN, includeArchived });
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/hg-neg-readiness') {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
