@@ -10332,7 +10332,7 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       log('WARN', TAG, `stake clamped ${_stakeRaw}→${tipStake} (AI fora do range 0.5-3u)`);
     }
     const tipConfRaw = String(tipResult[5] || 'MEDIA').toUpperCase();
-    const tipConf = tipConfRaw.startsWith('ALT') ? CONF.ALTA
+    let tipConf = tipConfRaw.startsWith('ALT') ? CONF.ALTA
       : tipConfRaw.startsWith('BAI') ? CONF.BAIXA : CONF.MEDIA;
     if (!tipTeam || !Number.isFinite(tipOdd) || tipOdd < 1.01) {
       try { _metrics.incr('ai_shadow_invalid', { sport }); } catch (_) {}
@@ -10395,6 +10395,46 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       return;
     }
     const modelPPick = pickSide === 't1' ? mlResult.modelP1 : mlResult.modelP2;
+    // 2026-05-22 audit: P5 cross-sport closure — portar _validateTipPvsModel
+    // de LoL path direto pra _runAiShadow genérico. Antes só LoL validava
+    // P_IA vs modelP; tennis/cs/dota/val/mma/football passavam direto.
+    // Memory: project_ai_audit_2026_05_22.
+    //
+    // tipP recalculado de tipEvNum + tipOdd: EV = P × odd - 1 → P = (1+EV)/odd
+    // (tipEvNum vem de _parseTipMl que já recalcula EV de P_AI quando IA
+    // forneceu P direto — inverso é robusto).
+    //
+    // Defaults por sport (sport-aware via env hierarchy):
+    //   <SPORT>_AI_P_MAX_DIVERGENCE_PP > AI_P_MAX_DIVERGENCE_PP > 15 (esports/tennis/football),
+    //   MMA usa 20 (modelo é só record histórico, IA legitimamente desvia mais).
+    // Opt-out: AI_P_VALIDATION_DISABLED=true (preserva A/B test pré-refit).
+    if (!/^(1|true|yes)$/i.test(String(process.env.AI_P_VALIDATION_DISABLED || ''))
+        && Number.isFinite(modelPPick) && Number.isFinite(tipOdd) && tipOdd > 1
+        && Number.isFinite(tipEvNum)) {
+      const _tipP = (1 + tipEvNum / 100) / tipOdd; // inverso do EV recalc
+      const _diffPp = Math.abs(_tipP - modelPPick) * 100;
+      const _defaultMax = sport === 'mma' ? 20 : 15;
+      const _maxPp = parseFloat(
+        process.env[`${sportU}_AI_P_MAX_DIVERGENCE_PP`]
+        ?? process.env.AI_P_MAX_DIVERGENCE_PP
+        ?? String(_defaultMax)
+      );
+      if (Number.isFinite(_maxPp) && _maxPp > 0 && _diffPp > _maxPp) {
+        try { _metrics.incr('ai_shadow_p_divergent', { sport }); } catch (_) {}
+        log('WARN', TAG, `skip P divergente: AI=${(_tipP*100).toFixed(1)}% vs modelo=${(modelPPick*100).toFixed(1)}% diff=${_diffPp.toFixed(1)}pp > max=${_maxPp}pp [${match.team1} vs ${match.team2}]`);
+        return;
+      }
+      // Soft downgrade: 8pp < diff <= maxPp → baixa conf um nível (LoL pattern _downgradeConf)
+      const _softTol = parseFloat(process.env.AI_P_SOFT_DOWNGRADE_PP ?? '8');
+      if (Number.isFinite(_softTol) && _softTol > 0 && _diffPp > _softTol) {
+        try { _metrics.incr('ai_shadow_p_downgrade', { sport }); } catch (_) {}
+        const _prevConf = tipConf;
+        tipConf = (tipConf === CONF.ALTA) ? CONF.MEDIA
+          : (tipConf === CONF.MEDIA) ? CONF.BAIXA
+          : CONF.BAIXA;
+        log('INFO', TAG, `P divergente soft: AI=${(_tipP*100).toFixed(1)}% vs modelo=${(modelPPick*100).toFixed(1)}% diff=${_diffPp.toFixed(1)}pp — downgrade conf ${_prevConf}→${tipConf}`);
+      }
+    }
     // <SPORT>_AI_REAL=true promove path AI shadow pra real tips.
     // Default OFF — set explícito reativa real emit + DM dispatch.
     const _aiRealEnv = process.env[`${sportU}_AI_REAL`];
