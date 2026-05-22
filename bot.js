@@ -10439,6 +10439,24 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     // Default OFF — set explícito reativa real emit + DM dispatch.
     const _aiRealEnv = process.env[`${sportU}_AI_REAL`];
     const _aiReal = /^(1|true|yes)$/i.test(String(_aiRealEnv ?? ''));
+    // 2026-05-22 audit: EV cap defensivo NO PATH REAL ONLY. P2-safe — shadow
+    // continua puro, cap só ativa quando AI_REAL=true (decisão sintoma com
+    // real evidence justified). Default 40 (lol/cs/dota/val/football),
+    // 50 mma (variance maior). Override <SPORT>_AI_REAL_MAX_EV. Set 0/-1 = off.
+    // Memory: project_ai_audit_2026_05_22.
+    if (_aiReal && Number.isFinite(tipEvNum)) {
+      const _evCapDefault = sport === 'mma' ? 50 : 40;
+      const _evCap = parseFloat(
+        process.env[`${sportU}_AI_REAL_MAX_EV`]
+        ?? process.env.AI_REAL_MAX_EV
+        ?? String(_evCapDefault)
+      );
+      if (Number.isFinite(_evCap) && _evCap > 0 && tipEvNum > _evCap) {
+        try { _metrics.incr('ai_real_ev_capped', { sport }); } catch (_) {}
+        log('WARN', TAG, `skip real emit EV=${tipEvNum.toFixed(1)}% > cap=${_evCap}% [${match.team1} vs ${match.team2}] (${sportU}_AI_REAL_MAX_EV ou AI_REAL_MAX_EV)`);
+        return;
+      }
+    }
     const _emissionTag = _aiReal ? `${sport}_ai_real` : `${sport}_ai_shadow`;
     const _reasonTag = _aiReal ? `AI ML ${displayName} real (DeepSeek)` : `AI shadow POC (${sportU}_AI_SHADOW)`;
     const tipResp = await serverPost('/record-tip', {
