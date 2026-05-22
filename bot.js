@@ -28471,6 +28471,58 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runAiShadowAuditDaily().catch(e => log('ERROR', 'AI-AUDIT', e.message)), 60 * 60 * 1000);
   setTimeout(() => runAiShadowAuditDaily().catch(() => {}), 45 * 60 * 1000);
 
+  // 2026-05-22: CSA Fase 2 — cron daily roda Cross-Significance Analyzer (lib/cross-significance.js).
+  // Memory project_csa_session_2026_05_22 documentou Fase 1 MVP deployed (endpoint /admin/cross-significance).
+  // Fase 2: cron 24h + DM admin alerts NEW_EDGE/NEW_LEAK/TO_ARM_CLOSE. P2-compliant (read-only sugestão).
+  // Dedup in-memory: alerts same-as-last-cycle suprimidos (in-memory Set; perdido em restart, acceptable).
+  let _lastCsaMs = 0;
+  let _lastCsaAlertKeys = new Set();
+  async function runCsaDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.CSA_AUTO ?? 'true'))) return;
+    const intervalH = Math.max(6, Math.min(72, parseInt(process.env.CSA_INTERVAL_H || '24', 10) || 24));
+    const intervalMs = intervalH * 60 * 60 * 1000;
+    if (Date.now() - _lastCsaMs < intervalMs) return;
+    _lastCsaMs = Date.now();
+    try {
+      const { runCrossSignificance } = require('./lib/cross-significance');
+      const sportsCsv = String(process.env.CSA_SPORTS || 'tennis,lol').trim();
+      const sports = sportsCsv.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+      const days = Math.max(7, Math.min(180, parseInt(process.env.CSA_DAYS || '30', 10) || 30));
+      const minN = Math.max(10, parseInt(process.env.CSA_MIN_N || '20', 10) || 20);
+      const r = runCrossSignificance(db, { sports, days, includeArchived: true, minN });
+      log('INFO', 'CSA', `sports=${sports.join(',')} alerts=${r.alerts.length} cfg.days=${days} cfg.minN=${minN}`);
+      if (!r.alerts.length) { _lastCsaAlertKeys = new Set(); return; }
+      // Dedup vs último ciclo
+      const newKeys = new Set();
+      const newAlerts = [];
+      for (const a of r.alerts) {
+        const key = `${a.sport}|${a.market || ''}|${a.bucket || ''}|${a.type}`;
+        newKeys.add(key);
+        if (!_lastCsaAlertKeys.has(key)) newAlerts.push(a);
+      }
+      _lastCsaAlertKeys = newKeys;
+      if (!newAlerts.length) {
+        log('INFO', 'CSA', `0 alerts novos (todos repetidos do ciclo anterior)`);
+        return;
+      }
+      for (const a of newAlerts) {
+        log('WARN', 'CSA', `${a.type} ${a.sport}/${a.market} ${a.bucket}: n=${a.n} ROI=${a.roi}% sig=${a.sig}`);
+      }
+      if (ADMIN_IDS.size && !_isCycleMuted('csa-daily')) {
+        const lines = newAlerts.slice(0, 10).map(a => {
+          const emoji = a.type === 'NEW_EDGE' ? '⭐' : a.type === 'NEW_LEAK' ? '🩸' : a.type === 'TO_ARM_CLOSE' ? '🎯' : '👀';
+          return `${emoji} *${a.type}* ${a.sport}/${a.market} \`${a.bucket || 'agg'}\`: n=${a.n} ROI=${a.roi >= 0 ? '+' : ''}${a.roi}% [${a.roi_ic95_lo}, ${a.roi_ic95_hi}] sig=${a.sig}${a.suggestion ? '\n  ➜ ' + a.suggestion : ''}`;
+        });
+        const more = newAlerts.length > 10 ? `\n\n_+${newAlerts.length - 10} alerts adicionais — ver /admin/cross-significance_` : '';
+        const msg = `📊 *CSA — Cross-Significance Daily*\n\nSports: ${sports.join(', ')} | Janela: ${days}d | minN: ${minN}\nAlerts novos: ${newAlerts.length}/${r.alerts.length} (suprimidos repetidos)\n\n${lines.join('\n\n')}${more}\n\nP2-compliant — sugestão somente. Decisão humana.`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'CSA', e.message); }
+  }
+  setInterval(() => runCsaDaily().catch(e => log('ERROR', 'CSA', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runCsaDaily().catch(() => {}), 50 * 60 * 1000);
+
   // 2026-05-10: MT Promote Preflight Cron — daily check pra detectar disables
   // stale (auto-disable triggered com sample velho/pequeno, agora contradito por
   // shadow recente maior). DM admin com lista de stales + recommended_action.
