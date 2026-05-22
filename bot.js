@@ -10400,9 +10400,12 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     // P_IA vs modelP; tennis/cs/dota/val/mma/football passavam direto.
     // Memory: project_ai_audit_2026_05_22.
     //
-    // tipP recalculado de tipEvNum + tipOdd: EV = P × odd - 1 → P = (1+EV)/odd
-    // (tipEvNum vem de _parseTipMl que já recalcula EV de P_AI quando IA
-    // forneceu P direto — inverso é robusto).
+    // 2026-05-22 (audit follow-up): extrai P STATED direto do text via regex
+    // (paridade _validateTipPvsModel bot.js:348). Antes back-computava P de
+    // tipEvNum (inverso do EV) — quando IA tinha P-EV inconsistency
+    // (ex: stated P=50% mas EV=30% em odd=2.5 → implied P=52%), validador
+    // usava o implied, não o stated. Defense-in-depth incompleta.
+    // Fallback pra implied quando regex não acha P (caso AI omitiu P direto).
     //
     // Defaults por sport (sport-aware via env hierarchy):
     //   <SPORT>_AI_P_MAX_DIVERGENCE_PP > AI_P_MAX_DIVERGENCE_PP > 15 (esports/tennis/football),
@@ -10411,7 +10414,13 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     if (!/^(1|true|yes)$/i.test(String(process.env.AI_P_VALIDATION_DISABLED || ''))
         && Number.isFinite(modelPPick) && Number.isFinite(tipOdd) && tipOdd > 1
         && Number.isFinite(tipEvNum)) {
-      const _tipP = (1 + tipEvNum / 100) / tipOdd; // inverso do EV recalc
+      // Prefer P stated direto do text (paridade LoL). Fallback pro implied
+      // quando IA omite P (raro mas possível em formato variante).
+      const _pStatedMatch = String(text || '').match(/\|\s*P:\s*([0-9.]+)\s*%?/i);
+      const _tipPStated = _pStatedMatch ? parseFloat(_pStatedMatch[1]) / 100 : null;
+      const _tipPImplied = (1 + tipEvNum / 100) / tipOdd;
+      const _tipP = (Number.isFinite(_tipPStated) && _tipPStated > 0 && _tipPStated < 1)
+        ? _tipPStated : _tipPImplied;
       const _diffPp = Math.abs(_tipP - modelPPick) * 100;
       const _defaultMax = sport === 'mma' ? 20 : 15;
       const _maxPp = parseFloat(
@@ -28496,6 +28505,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       log('INFO', 'CSA', `sports=${sports.join(',')} alerts=${r.alerts.length} cfg.days=${days} cfg.minN=${minN}`);
       // 2026-05-22: Fase 2 FULL — persist em cross_significance_snapshots (mig 124).
       // Pulamos buckets vazios (n=0) pra reduzir noise.
+      // 2026-05-22 audit perf: db.transaction batches all INSERTs em 1 commit
+      // (antes commit-per-row = fsync per row, 5-10x overhead em WAL+NORMAL sync).
       try {
         const insertSnap = db.prepare(`
           INSERT INTO cross_significance_snapshots (
@@ -28506,27 +28517,30 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         `);
         let nWritten = 0;
         const ts = r.ts;
-        for (const [sportKey, bySportMarkets] of Object.entries(r.by_sport || {})) {
-          for (const [market, marketBuckets] of Object.entries(bySportMarkets || {})) {
-            for (const [scope, scopeData] of Object.entries(marketBuckets || {})) {
-              // scope='agg' é um único entry; outros (by_side/by_dir/by_dir_side/by_tier) são maps.
-              const entries = scope === 'agg' ? { agg: scopeData } : (scopeData || {});
-              for (const [bucketKey, entry] of Object.entries(entries)) {
-                if (!entry || !entry.n) continue;
-                insertSnap.run(
-                  ts, sportKey, market, scope, bucketKey, entry.n,
-                  entry.hit ?? null, entry.roi ?? null,
-                  entry.hit_ic95_lo ?? null, entry.hit_ic95_hi ?? null,
-                  entry.roi_ic95_lo ?? null, entry.roi_ic95_hi ?? null,
-                  entry.sig ?? null,
-                  entry.real_n ?? null, entry.shadow_n ?? null,
-                );
-                nWritten++;
+        const persistAll = db.transaction(() => {
+          for (const [sportKey, bySportMarkets] of Object.entries(r.by_sport || {})) {
+            for (const [market, marketBuckets] of Object.entries(bySportMarkets || {})) {
+              for (const [scope, scopeData] of Object.entries(marketBuckets || {})) {
+                // scope='agg' é um único entry; outros (by_side/by_dir/by_dir_side/by_tier) são maps.
+                const entries = scope === 'agg' ? { agg: scopeData } : (scopeData || {});
+                for (const [bucketKey, entry] of Object.entries(entries)) {
+                  if (!entry || !entry.n) continue;
+                  insertSnap.run(
+                    ts, sportKey, market, scope, bucketKey, entry.n,
+                    entry.hit ?? null, entry.roi ?? null,
+                    entry.hit_ic95_lo ?? null, entry.hit_ic95_hi ?? null,
+                    entry.roi_ic95_lo ?? null, entry.roi_ic95_hi ?? null,
+                    entry.sig ?? null,
+                    entry.real_n ?? null, entry.shadow_n ?? null,
+                  );
+                  nWritten++;
+                }
               }
             }
           }
-        }
-        log('INFO', 'CSA', `snapshot persisted: ${nWritten} rows`);
+        });
+        persistAll();
+        log('INFO', 'CSA', `snapshot persisted: ${nWritten} rows (tx batched)`);
         // Retention 90d cleanup inline (cron já roda 24h, leve)
         const retentionDays = Math.max(30, Math.min(365, parseInt(process.env.CSA_RETENTION_DAYS || '90', 10) || 90));
         db.prepare(`DELETE FROM cross_significance_snapshots WHERE snapshot_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
