@@ -3330,6 +3330,22 @@ const migrations = [
       } catch (e) { console.log(`[mig 124] csa snapshots: ${e.message}`); }
     },
   },
+  {
+    id: '125_market_tips_shadow_clv_history',
+    up(db) {
+      // 2026-05-22: Multi-window CLV capture (T-30/-15/-5/-1min antes do kickoff).
+      // Memory project_pendencies_session_2026_05_17_2026_05_18 P6 — atual cron
+      // CLV (2-3min) captura odd repetida e `close_odd` é overwrite com último.
+      // Esta coluna preserva HISTORICO completo das captures pra audit drift line.
+      //
+      // clv_history TEXT JSON: array of { ts, odd, mins_to_match } máx 10 entries
+      // (cap memory). Lib clv-capture decide quando append (delta odd >= 0.01).
+      //
+      // Idempotent ADD COLUMN.
+      if (!tableExists(db, 'market_tips_shadow')) return;
+      addColumnIfMissing(db, 'market_tips_shadow', 'clv_history', 'clv_history TEXT');
+    },
+  },
 ];
 
 function applyMigrations(db) {
