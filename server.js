@@ -13244,6 +13244,90 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-22: /admin/learning-activity — timeline cross-source de ações de
+  // aprendizado aplicadas (learned_corrections, mt promote/revert, mt disable,
+  // threshold adjustments, league blocks). Memory: project_ai_audit_2026_05_22.
+  // P2-safe: read-only, agrega tabelas que ja registram timestamps.
+  if (p === '/admin/learning-activity' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      const sport = String(parsed.query.sport || '').trim().toLowerCase();
+      const sportFilter = sport ? 'AND sport = ?' : '';
+      const sportParam = sport ? [sport] : [];
+
+      const learned = db.prepare(`
+        SELECT 'learned_correction' AS type, sport, applied_at AS ts,
+          json_object('market', market, 'league_pattern', league_pattern,
+            'correction_type', correction_type, 'factor', factor,
+            'source', source, 'status', status, 'expires_at', expires_at) AS details
+        FROM learned_corrections
+        WHERE applied_at >= datetime('now', '-' || ? || ' days') ${sportFilter}
+      `).all(days, ...sportParam);
+
+      const promotes = db.prepare(`
+        SELECT 'mt_promote' AS type, sport,
+          COALESCE(reverted_at, promoted_at) AS ts,
+          json_object('market', market, 'enabled', enabled, 'source', source,
+            'reason', reason, 'promoted_at', promoted_at, 'reverted_at', reverted_at) AS details
+        FROM mt_market_promote_state
+        WHERE COALESCE(reverted_at, promoted_at) >= datetime('now', '-' || ? || ' days')
+          ${sportFilter}
+      `).all(days, ...sportParam);
+
+      const disables = db.prepare(`
+        SELECT 'mt_disable' AS type, sport, updated_at AS ts,
+          json_object('market', market, 'disabled', disabled, 'source', source,
+            'reason', reason, 'clv_pct', clv_pct, 'roi_pct', roi_pct) AS details
+        FROM market_tips_runtime_state
+        WHERE updated_at >= datetime('now', '-' || ? || ' days') ${sportFilter}
+      `).all(days, ...sportParam);
+
+      const thresholds = db.prepare(`
+        SELECT 'threshold_adj' AS type, sport, applied_at AS ts,
+          json_object('key', key, 'prev_value', prev_value, 'new_value', new_value,
+            'reason', reason, 'auto', auto) AS details
+        FROM threshold_adjustments
+        WHERE applied_at >= datetime('now', '-' || ? || ' days') ${sportFilter}
+      `).all(days, ...sportParam);
+
+      const leagues = db.prepare(`
+        SELECT 'league_block' AS type, sport,
+          COALESCE(unblocked_at, blocked_at) AS ts,
+          json_object('league', league, 'reason', reason,
+            'blocked_at', blocked_at, 'unblocked_at', unblocked_at, 'auto', auto) AS details
+        FROM league_blocks
+        WHERE COALESCE(unblocked_at, blocked_at) >= datetime('now', '-' || ? || ' days')
+          ${sportFilter}
+      `).all(days, ...sportParam);
+
+      const all = [...learned, ...promotes, ...disables, ...thresholds, ...leagues]
+        .map(r => ({ ...r, details: (() => { try { return JSON.parse(r.details || '{}'); } catch (_) { return r.details; } })() }))
+        .sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+
+      const summary = { total: all.length, by_type: {}, by_sport: {} };
+      for (const r of all) {
+        summary.by_type[r.type] = (summary.by_type[r.type] || 0) + 1;
+        if (r.sport) summary.by_sport[r.sport] = (summary.by_sport[r.sport] || 0) + 1;
+      }
+
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        days, sport: sport || 'all',
+        sources: ['learned_corrections', 'mt_market_promote_state',
+                  'market_tips_runtime_state', 'threshold_adjustments', 'league_blocks'],
+        note: 'P2-safe read-only timeline. Cross-reference: shadow_vs_real_drift e ai_shadow_audit DMs ficam em log Railway (não em DB).',
+        summary,
+        timeline: all,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/admin/gate-attribution-snapshot' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
