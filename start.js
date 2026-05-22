@@ -223,7 +223,15 @@ console.log(`[LAUNCHER] heap caps: bot=${BOT_HEAP_MB}MB server=${SERVER_HEAP_MB}
 
 function spawnChild(name, file) {
   // Captura stdout/stderr via pipe pra espelhar no Railway console E ingerir no buffer do server.
-  const child = spawn('node', [`--max-old-space-size=${BOT_HEAP_MB}`, file], {
+  // 2026-05-22 audit log memory leak (CRON-MEM +110MB rss per cron consistente, heap só +9-54MB):
+  // --expose-gc habilita global.gc() em hot paths pra forçar V8 mark-sweep + retornar non-heap
+  // ao OS. Workaround pra fragmentação glibc + V8 LargeObject space retido após Sofa JSON parse.
+  // Opt-out via env DISABLE_EXPOSE_GC=true.
+  const exposeGc = !/^(1|true|yes)$/i.test(String(process.env.DISABLE_EXPOSE_GC || ''));
+  const flags = [`--max-old-space-size=${BOT_HEAP_MB}`];
+  if (exposeGc) flags.unshift('--expose-gc');
+  flags.push(file);
+  const child = spawn('node', flags, {
     stdio: ['inherit', 'pipe', 'pipe'],
     env: process.env
   });
@@ -281,7 +289,12 @@ function spawnServerWithPortRetry() {
   serverStartTs = Date.now();
   // Sempre passa PORT+SERVER_PORT para o child (evita usar valor "antigo")
   const env = { ...process.env, PORT: String(PORT), SERVER_PORT: String(PORT) };
-  const srv = spawn('node', [`--max-old-space-size=${SERVER_HEAP_MB}`, 'server.js'], { stdio: 'inherit', env });
+  // 2026-05-22: --expose-gc mirror em server.js (server.js:37915 já chama global.gc() fallback).
+  const exposeGc = !/^(1|true|yes)$/i.test(String(process.env.DISABLE_EXPOSE_GC || ''));
+  const srvFlags = [`--max-old-space-size=${SERVER_HEAP_MB}`];
+  if (exposeGc) srvFlags.unshift('--expose-gc');
+  srvFlags.push('server.js');
+  const srv = spawn('node', srvFlags, { stdio: 'inherit', env });
 
   // 2026-05-06: bot spawn delay 3s→10s. Antes, com server crashing+port-retry,
   // bot subia em 3s com env stale (PORT/SERVER_PORT do parent já mutado mid-flight),

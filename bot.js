@@ -1164,6 +1164,24 @@ function _checkMemDelta(name, memBefore, durationMs) {
       const rssNowMb = +(memAfter.rss / 1024 / 1024).toFixed(0);
       log('WARN', 'CRON-MEM', `${name} Δheap=+${deltaHeapMb}MB Δrss=+${deltaRssMb}MB | heap=${heapNowMb}MB rss=${rssNowMb}MB | ${durationMs}ms`);
       try { require('./lib/metrics').incr('cron_mem_spike', { name }); } catch (_) {}
+      // 2026-05-22 audit log: leak suspect — Δrss=+108MB CONSISTENTE per cron mas
+      // Δheap só +9-54MB → 50-100MB non-heap (V8 LargeObject space, Buffer chunks,
+      // libc malloc fragmentation pós Sofa JSON parse 2-5MB bodies).
+      // Force GC se disponível (--expose-gc passado em start.js). Log pós-GC pra
+      // medir efeito real do mark-sweep. Opt-out via FORCE_GC_AFTER_CRON_MEM=false.
+      if (typeof global.gc === 'function'
+          && !/^(0|false|no)$/i.test(String(process.env.FORCE_GC_AFTER_CRON_MEM ?? 'true'))) {
+        try {
+          global.gc();
+          const memPost = process.memoryUsage();
+          const heapPostMb = +(memPost.heapUsed / 1024 / 1024).toFixed(0);
+          const rssPostMb = +(memPost.rss / 1024 / 1024).toFixed(0);
+          const heapFreedMb = heapNowMb - heapPostMb;
+          const rssFreedMb = rssNowMb - rssPostMb;
+          log('INFO', 'CRON-MEM-GC', `${name} pós-GC heap=${heapPostMb}MB (-${heapFreedMb}MB) rss=${rssPostMb}MB (-${rssFreedMb}MB)`);
+          try { require('./lib/metrics').incr('cron_gc_forced', { name }); } catch (_) {}
+        } catch (gcErr) { /* gc disabled — env opt-out trivial */ }
+      }
     }
   } catch (_) {}
 }
