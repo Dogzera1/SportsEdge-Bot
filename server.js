@@ -13328,6 +13328,62 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-22 CSA Fase 2 FULL: history endpoint pra timeline persistida.
+  // Mig 124 cross_significance_snapshots populada via cron runCsaDaily.
+  if (p === '/admin/cross-significance-history' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      const sport = String(parsed.query.sport || '').trim().toLowerCase();
+      const market = String(parsed.query.market || '').trim();
+      const scope = String(parsed.query.scope || '').trim().toLowerCase();
+      const bucket = String(parsed.query.bucket || '').trim();
+
+      const filters = [`snapshot_at >= datetime('now', '-' || ? || ' days')`];
+      const params = [days];
+      if (sport) { filters.push('sport = ?'); params.push(sport); }
+      if (market) { filters.push('market = ?'); params.push(market); }
+      if (scope) { filters.push('scope = ?'); params.push(scope); }
+      if (bucket) { filters.push('bucket_key = ?'); params.push(bucket); }
+
+      const rows = db.prepare(`
+        SELECT snapshot_at, sport, market, scope, bucket_key, n,
+               hit_pct, roi_pct, hit_ic95_lo, hit_ic95_hi, roi_ic95_lo, roi_ic95_hi,
+               sig, real_n, shadow_n
+        FROM cross_significance_snapshots
+        WHERE ${filters.join(' AND ')}
+        ORDER BY snapshot_at DESC, sport, market, scope, bucket_key
+        LIMIT 5000
+      `).all(...params);
+
+      // Group as series: bucket → array of snapshots
+      const series = {};
+      for (const r of rows) {
+        const key = `${r.sport}|${r.market}|${r.scope}|${r.bucket_key}`;
+        (series[key] = series[key] || []).push({
+          ts: r.snapshot_at, n: r.n,
+          hit: r.hit_pct, roi: r.roi_pct,
+          hit_ic95: [r.hit_ic95_lo, r.hit_ic95_hi],
+          roi_ic95: [r.roi_ic95_lo, r.roi_ic95_hi],
+          sig: r.sig, real_n: r.real_n, shadow_n: r.shadow_n,
+        });
+      }
+
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        days, sport: sport || 'all', market: market || 'all', scope: scope || 'all', bucket: bucket || 'all',
+        n_rows: rows.length,
+        n_series: Object.keys(series).length,
+        series,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/admin/gate-attribution-snapshot' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }

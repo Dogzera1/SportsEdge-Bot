@@ -28491,6 +28491,45 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const minN = Math.max(10, parseInt(process.env.CSA_MIN_N || '20', 10) || 20);
       const r = runCrossSignificance(db, { sports, days, includeArchived: true, minN });
       log('INFO', 'CSA', `sports=${sports.join(',')} alerts=${r.alerts.length} cfg.days=${days} cfg.minN=${minN}`);
+      // 2026-05-22: Fase 2 FULL — persist em cross_significance_snapshots (mig 124).
+      // Pulamos buckets vazios (n=0) pra reduzir noise.
+      try {
+        const insertSnap = db.prepare(`
+          INSERT INTO cross_significance_snapshots (
+            snapshot_at, sport, market, scope, bucket_key, n,
+            hit_pct, roi_pct, hit_ic95_lo, hit_ic95_hi, roi_ic95_lo, roi_ic95_hi,
+            sig, real_n, shadow_n
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        let nWritten = 0;
+        const ts = r.ts;
+        for (const [sportKey, bySportMarkets] of Object.entries(r.by_sport || {})) {
+          for (const [market, marketBuckets] of Object.entries(bySportMarkets || {})) {
+            for (const [scope, scopeData] of Object.entries(marketBuckets || {})) {
+              // scope='agg' é um único entry; outros (by_side/by_dir/by_dir_side/by_tier) são maps.
+              const entries = scope === 'agg' ? { agg: scopeData } : (scopeData || {});
+              for (const [bucketKey, entry] of Object.entries(entries)) {
+                if (!entry || !entry.n) continue;
+                insertSnap.run(
+                  ts, sportKey, market, scope, bucketKey, entry.n,
+                  entry.hit ?? null, entry.roi ?? null,
+                  entry.hit_ic95_lo ?? null, entry.hit_ic95_hi ?? null,
+                  entry.roi_ic95_lo ?? null, entry.roi_ic95_hi ?? null,
+                  entry.sig ?? null,
+                  entry.real_n ?? null, entry.shadow_n ?? null,
+                );
+                nWritten++;
+              }
+            }
+          }
+        }
+        log('INFO', 'CSA', `snapshot persisted: ${nWritten} rows`);
+        // Retention 90d cleanup inline (cron já roda 24h, leve)
+        const retentionDays = Math.max(30, Math.min(365, parseInt(process.env.CSA_RETENTION_DAYS || '90', 10) || 90));
+        db.prepare(`DELETE FROM cross_significance_snapshots WHERE snapshot_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
+      } catch (persistErr) {
+        log('WARN', 'CSA', `persist err: ${persistErr.message}`);
+      }
       if (!r.alerts.length) { _lastCsaAlertKeys = new Set(); return; }
       // Dedup vs último ciclo
       const newKeys = new Set();

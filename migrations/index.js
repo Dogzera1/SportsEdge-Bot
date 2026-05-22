@@ -3289,6 +3289,47 @@ const migrations = [
       } catch (e) { console.log(`[mig 123] pinnacle_*: ${e.message}`); }
     },
   },
+  {
+    id: '124_cross_significance_snapshots',
+    up(db) {
+      // 2026-05-22: CSA Fase 2 FULL — persist snapshots por ciclo daily.
+      // Memory project_csa_session_2026_05_22 Fase 2 (commits 87d1161 daily cron
+      // + 9ebdcf4 in-memory dedup) — agora persiste timeline pra history endpoint.
+      //
+      // 1 row per (sport, market, scope, bucket_key, snapshot_at).
+      // scope: 'agg' | 'by_side' | 'by_dir' | 'by_dir_side' | 'by_tier'
+      // bucket_key: ex 'agg' / 'home' / 'NEG' / 'NEG_away' / 'slam' (depends on scope)
+      //
+      // Retention: 90d via mig dedicada futura OR cron cleanup.
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS cross_significance_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_at TEXT NOT NULL,
+            sport TEXT NOT NULL,
+            market TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            bucket_key TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            hit_pct REAL,
+            roi_pct REAL,
+            hit_ic95_lo REAL,
+            hit_ic95_hi REAL,
+            roi_ic95_lo REAL,
+            roi_ic95_hi REAL,
+            sig TEXT,
+            real_n INTEGER,
+            shadow_n INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_csa_snap_sport_market_scope_bucket_ts
+            ON cross_significance_snapshots(sport, market, scope, bucket_key, snapshot_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_csa_snap_ts
+            ON cross_significance_snapshots(snapshot_at DESC);
+        `);
+        console.log(`[mig 124] cross_significance_snapshots table ready`);
+      } catch (e) { console.log(`[mig 124] csa snapshots: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
