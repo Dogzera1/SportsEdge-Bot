@@ -23601,6 +23601,24 @@ async function pollValorant(runOnce = false) {
           } catch (e) { reportBug('VAL-TRAINED', e); }
         }
 
+        // 2026-05-22 audit shadow learning: Valorant Elo+trained modelP1 calib gap
+        // -17.4pp em shadow 30d (n=85). Refit /admin/mt-refit-calib não disponível
+        // (sem Markov MT model). Workaround: shrink modelP em direção a impliedP
+        // (sharp anchor Pinnacle). VALORANT_PROB_SHRINK env: 0=full shrink (=implied),
+        // 1.0=no shrink (default, comportamento atual), 0.85=15% shrink (sugestão).
+        // P5 cross-sport: pattern aplicável a outros sports com Elo determinístico
+        // sem isotonic post-fit. Não toca sports com Markov calib (tennis OK pós refit).
+        const _valShrink = parseFloat(process.env.VALORANT_PROB_SHRINK ?? '1.0');
+        if (Number.isFinite(_valShrink) && _valShrink >= 0 && _valShrink < 1.0
+            && Number.isFinite(impliedP1) && impliedP1 > 0 && impliedP1 < 1) {
+          const _modelP1Before = modelP1;
+          modelP1 = impliedP1 + (modelP1 - impliedP1) * _valShrink;
+          modelP2 = 1 - modelP1;
+          if (Math.abs(_modelP1Before - modelP1) > 0.005) {
+            log('DEBUG', 'VAL-SHRINK', `${match.team1} vs ${match.team2}: modelP1 ${(_modelP1Before*100).toFixed(1)}%→${(modelP1*100).toFixed(1)}% (shrink=${_valShrink} toward impliedP1=${(impliedP1*100).toFixed(1)}%)`);
+          }
+        }
+
         // Market scanner Valorant (log-only default) — handicap + totais de mapas.
         // Modelo Val é marginal (lift 3.7% vs Elo) → EV min default 5% (era 4% em LoL/CS).
         if (process.env.VAL_MARKET_SCAN !== 'false' && modelP1 > 0) {
