@@ -10911,7 +10911,7 @@ async function autoAnalyzeMatch(token, match) {
                 bestOf: bo,
                 setsA: match.score1,
                 setsB: match.score2,
-                momentum: 0.03, // calibrado pra LoL (project_lol_series_model memory)
+                momentum: 0.10, // 2026-05-22 refit (878 séries, χ²=96.32) — era 0.03 Apr-fit
                 iters: 8000,
               });
               // 2026-04-28: cap delta máximo pra evitar live override violento.
@@ -10988,9 +10988,12 @@ async function autoAnalyzeMatch(token, match) {
               const _lolMomentumEnvKey = `LOL_MOMENTUM_${_lolTier.toUpperCase()}`;
               const _lolMomentumTier = parseFloat(process.env[_lolMomentumEnvKey]);
               const _lolMomentumGlobal = parseFloat(process.env.LOL_MOMENTUM);
+              // 2026-05-22 refit: 0.03 (Apr 662 séries) → 0.10 (May 878 séries, sample 7542)
+              // best fit=0.15 LRT χ²=96.32 p<0.001. 0.10 é midpoint conservador.
+              // Tier2/3 sem env override agora usam 0.10 (era 0.03 underfit).
               const _lolMomentum = Number.isFinite(_lolMomentumTier) ? _lolMomentumTier
                 : Number.isFinite(_lolMomentumGlobal) ? _lolMomentumGlobal
-                : 0.03; // default fitted Apr-2026 (662 séries)
+                : 0.10; // default refitted May-2026 (878 séries OOS, χ²=96.32)
               // 2026-05-12: live-aware pricing quando isLiveLoL E score parcial.
               // Mesmo pattern do CS (lib cs-live-pricing é sport-agnostic, reusable).
               // Score 0-0 cai em lol-markets (legacy pre-game behavior).
