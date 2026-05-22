@@ -28485,7 +28485,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     _lastCsaMs = Date.now();
     try {
       const { runCrossSignificance } = require('./lib/cross-significance');
-      const sportsCsv = String(process.env.CSA_SPORTS || 'tennis,lol').trim();
+      const sportsCsv = String(process.env.CSA_SPORTS || 'tennis,lol,cs,dota2,valorant,football,basket,mma').trim();
       const sports = sportsCsv.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
       const days = Math.max(7, Math.min(180, parseInt(process.env.CSA_DAYS || '30', 10) || 30));
       const minN = Math.max(10, parseInt(process.env.CSA_MIN_N || '20', 10) || 20);
