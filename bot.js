@@ -10949,11 +10949,14 @@ async function autoAnalyzeMatch(token, match) {
               // Re-fit recomendado: node scripts/calibrate-lol-momentum.js (re-fita c/
               // dados recent — current 662 sample expandiu pra ~1000+ Apr-May).
               // Output: momentum candidato + LRT significance.
+              // 2026-05-22: delegate pra lib/league-tier canonical (P3+P4 unification).
+              // Antes regex inline (LCK prefix-anchored) tinha bug: "LCK Challengers League"
+              // matchava /^LCK/ ANTES de checar Challengers → classificava feeder como tier1.
+              // Lib fix em 2026-05-21 adicionou precedência challengers tier 2 (commit 251d250).
+              // Mantém naming env compatível: tier1/tier2/OTHER (lib retorna tier3 → mapeia other).
               const _lolTier = (() => {
-                const lg = String(match.league || '').trim();
-                if (/^(LCK|LPL|LCS|LEC|Worlds|MSI|Esports World Cup|EWC|First Stand)/i.test(lg)) return 'tier1';
-                if (/Challengers|Academy|NACL|LFL|CBLOL|Prime League|TCL|LCP|Ultraliga|Arabian|Hitpoint|Ebl|Lit|Lrn|Lrs|Les|Liga Portuguesa|GLL|Hellenic/i.test(lg)) return 'tier2';
-                return 'other';
+                const t = _leagueTierLib.getLeagueTier('lol', match.league || '');
+                return t === 1 ? 'tier1' : t === 2 ? 'tier2' : 'other';
               })();
               const _lolMomentumEnvKey = `LOL_MOMENTUM_${_lolTier.toUpperCase()}`;
               const _lolMomentumTier = parseFloat(process.env[_lolMomentumEnvKey]);
