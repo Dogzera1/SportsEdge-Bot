@@ -32892,8 +32892,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     // do universo shadow ou real, nunca cross-universe.
     const dedupShadowFilter = includeShadow ? '' : ' AND COALESCE(tdx.is_shadow, 0) = 0';
     const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0)${dedupShadowFilter} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    // 2026-05-22 audit P4: expose emission_source via json_extract pra dashboard
+    // diferenciar tips AI-emitted vs deterministic. Hoje fica em tip_context_json
+    // mas dashboard/tools precisam coluna top-level. Memory: project_ai_audit_2026_05_22.
     let query = `
-      SELECT t.*
+      SELECT t.*,
+        json_extract(t.tip_context_json, '$.emission_source') AS emission_source
       FROM tips t
       WHERE t.sport IN ${sportInSql}
       AND ${dedupSql}
@@ -32920,7 +32924,14 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     // Default: exclui market tips (OVER/UNDER, 1X2_D, HANDICAP, MAPx_WINNER etc). Dashboard
     // mostra só ML — tips de mercado vivem em market_tips_shadow. Override via
     // ?include_markets=1 pra consultas específicas.
-    const includeMarkets = String(parsed.query.include_markets || '').trim() === '1';
+    // 2026-05-22 audit P4: sports que SÓ emitem MT (tennis hoje) ficavam com
+    // /tips-history retornando [] enganosamente. Default include_markets=1 quando
+    // sport=tennis preserva display correto. Override explícito via ?include_markets=0.
+    // Memory: project_ai_audit_2026_05_22.
+    const _imRaw = String(parsed.query.include_markets || '').trim();
+    const _mtFirstSports = new Set(['tennis']); // expandir se outros sports virarem MT-only
+    const includeMarkets = _imRaw === '1'
+      || (_imRaw === '' && _mtFirstSports.has(String(sport).toLowerCase()));
     if (!includeMarkets) {
       query += " AND (t.market_type IS NULL OR t.market_type = 'ML')";
     }
