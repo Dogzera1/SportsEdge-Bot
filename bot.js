@@ -28433,6 +28433,44 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runShadowVsRealDriftDaily().catch(e => log('ERROR', 'SHADOW-DRIFT', e.message)), 60 * 60 * 1000);
   setTimeout(() => runShadowVsRealDriftDaily().catch(() => {}), 40 * 60 * 1000);
 
+  // 2026-05-22: AI shadow audit cron — early warning pra AI tips degradando.
+  // Memory project_ai_audit_2026_05_22 documentou tennis AI ROI -24.6% / avgEV
+  // 49% (hallucinated). Refit prompt + P validation aplicados, mas sem
+  // feedback automático. Este cron monitora per sport, DM admin se degradar.
+  // P2-compliant: DM-only, no action. Opt-out: AI_SHADOW_AUDIT_AUTO=false.
+  let _lastAiShadowAuditMs = 0;
+  async function runAiShadowAuditDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.AI_SHADOW_AUDIT_AUTO ?? 'true'))) return;
+    const intervalH = Math.max(6, Math.min(72, parseInt(process.env.AI_SHADOW_AUDIT_INTERVAL_H || '24', 10) || 24));
+    const intervalMs = intervalH * 60 * 60 * 1000;
+    if (Date.now() - _lastAiShadowAuditMs < intervalMs) return;
+    _lastAiShadowAuditMs = Date.now();
+    try {
+      const { runAiShadowAudit } = require('./lib/ai-shadow-audit-cron');
+      const r = runAiShadowAudit(db);
+      log('INFO', 'AI-AUDIT',
+        `breakdown=${r.breakdown.length} alerts=${r.alerts.length} cfg=${JSON.stringify(r.cfg)}`);
+      if (!r.alerts.length) return;
+      for (const a of r.alerts) {
+        log('WARN', 'AI-AUDIT',
+          `${a.sport}: n=${a.n_settled} ROI=${a.roi_pct}% avgEV=${a.avg_ev}% — ${a.reasons.join('; ')}`);
+      }
+      if (ADMIN_IDS.size && !_isCycleMuted('ai-shadow-audit')) {
+        const lines = r.alerts.map(a => {
+          const roi = a.roi_pct != null ? `${a.roi_pct >= 0 ? '+' : ''}${a.roi_pct}%` : '?';
+          const hit = a.hit_rate_pct != null ? `${a.hit_rate_pct}%` : '?';
+          const ev = a.avg_ev != null ? `${a.avg_ev}%` : '?';
+          return `🤖 *${a.sport}*: n=${a.n_settled} ROI=${roi} hit=${hit} avgEV=${ev}\n  ➜ ${a.reasons.join(' | ')}`;
+        });
+        const msg = `🤖 *AI SHADOW AUDIT — degradação detectada*\n\nTips AI (shadow + real) com sinais de leak ou hallucinated EV. P2-compliant — apenas info.\n\n${lines.join('\n\n')}\n\nInvestigar causa: prompt refit necessário? gates ajuste? <SPORT>_AI_SHADOW=false temp?\nKnobs: AI_AUDIT_ROI_FLOOR (${r.cfg.roiFloor}), AI_AUDIT_EV_CEILING (${r.cfg.evCeiling}), AI_AUDIT_MIN_N (${r.cfg.minN}).`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'AI-AUDIT', e.message); }
+  }
+  setInterval(() => runAiShadowAuditDaily().catch(e => log('ERROR', 'AI-AUDIT', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runAiShadowAuditDaily().catch(() => {}), 45 * 60 * 1000);
+
   // 2026-05-10: MT Promote Preflight Cron — daily check pra detectar disables
   // stale (auto-disable triggered com sample velho/pequeno, agora contradito por
   // shadow recente maior). DM admin com lista de stales + recommended_action.
