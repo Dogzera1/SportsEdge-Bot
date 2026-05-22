@@ -13328,6 +13328,69 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-22 mig 125 complementar: endpoint pra visualizar clv_history per tip.
+  // Decodifica JSON array { ts, odd, mins_to_match } populado pelo cron CLV.
+  if (p === '/admin/clv-history' && req.method === 'GET') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const tipId = parseInt(parsed.query.tipId || parsed.query.tip_id || '0', 10);
+      if (!tipId) { sendJson(res, { ok: false, error: 'tipId obrigatório' }, 400); return; }
+      const row = db.prepare(`
+        SELECT id, sport, market, side, line, team1, team2, league,
+               odd, close_odd, clv_pct, close_captured_at, created_at,
+               match_start_at, clv_history, result
+        FROM market_tips_shadow
+        WHERE id = ?
+      `).get(tipId);
+      if (!row) { sendJson(res, { ok: false, error: 'tip not found' }, 404); return; }
+      let history = [];
+      if (row.clv_history) {
+        try { history = JSON.parse(row.clv_history) || []; } catch (_) { /* malformed */ }
+      }
+      const openOdd = Number(row.odd);
+      // Annotate each entry com delta_pct vs open + bucket window (T-30/15/5/1)
+      const annotated = (Array.isArray(history) ? history : []).map(h => {
+        const odd = Number(h.odd);
+        const deltaPct = openOdd > 0 ? ((openOdd / odd - 1) * 100) : null;
+        const mins = h.mins_to_match;
+        let window = null;
+        if (Number.isFinite(mins)) {
+          if (mins >= 30) window = 'T-30+';
+          else if (mins >= 15) window = 'T-30/15';
+          else if (mins >= 5) window = 'T-15/5';
+          else if (mins >= 1) window = 'T-5/1';
+          else if (mins >= -60) window = 'T-1/in_play';
+          else window = 'post';
+        }
+        return {
+          ts: h.ts, odd, mins_to_match: mins, window,
+          clv_pct: deltaPct != null ? +deltaPct.toFixed(2) : null,
+        };
+      });
+      sendJson(res, {
+        ok: true,
+        tip: {
+          id: row.id, sport: row.sport, market: row.market, side: row.side, line: row.line,
+          team1: row.team1, team2: row.team2, league: row.league,
+          created_at: row.created_at, match_start_at: row.match_start_at,
+          result: row.result,
+        },
+        odds: {
+          open: openOdd,
+          close: Number(row.close_odd) || null,
+          clv_pct_final: row.clv_pct,
+          close_captured_at: row.close_captured_at,
+        },
+        history_count: annotated.length,
+        history: annotated,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // 2026-05-22 CSA Fase 2 FULL: history endpoint pra timeline persistida.
   // Mig 124 cross_significance_snapshots populada via cron runCsaDaily.
   if (p === '/admin/cross-significance-history' && (req.method === 'GET' || req.method === 'POST')) {
