@@ -13211,11 +13211,13 @@ setInterval(load, 60000);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { runHgNegReadiness } = require('./lib/hg-neg-readiness');
+      const includeArchived = parsed.query.include_archived === '1' || parsed.query.include_archived === 'true';
       const r = runHgNegReadiness(db, {
         days: parseInt(parsed.query.days || '60', 10),
         minN: parseInt(parsed.query.minN || '50', 10),
         minRoi: parseFloat(parsed.query.minRoi || '10'),
         minIcLowerHit: parseFloat(parsed.query.minIcLowerHit || '0.50'),
+        includeArchived,
       });
       sendJson(res, { ok: true, ts: new Date().toISOString(), ...r });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }

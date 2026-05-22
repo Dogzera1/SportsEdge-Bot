@@ -6116,7 +6116,36 @@ function _getTierKellyMultiplier(sport, league) {
   return _KELLY_TIER_MULT_DEFAULTS[sp]?.[tier] ?? 1.0;
 }
 
-function getKellyFraction(sport, conf, market = null, league = null) {
+// 2026-05-22: HG dir×side mult granular (KELLY_<SPORT>_HG_<DIR>_<SIDE>).
+// Real-only por construção: getKellyFraction só é chamado em path real
+// (shadow loga stake notional sem passar por aqui). Hierarchy:
+//   1. KELLY_<SPORT>_HG_<DIR>_<SIDE>  ex: KELLY_TENNIS_HG_NEG_AWAY=1.30
+//   2. KELLY_<SPORT>_HG_<DIR>         ex: KELLY_TENNIS_HG_POS=0.70
+//   3. 1.0 (no-op)
+// dir: 'NEG' (linha negativa, favorito) | 'POS' (linha positiva, underdog)
+// side: 'HOME' | 'AWAY'
+// Aplicado SOBRE baseFraction*tierMult (preserva todos os overrides existentes).
+function _resolveHgDirSideMult(spEnv, market, side, lineDir) {
+  if (!market || String(market).toUpperCase() !== 'HANDICAP_GAMES') return 1.0;
+  const d = String(lineDir || '').toUpperCase();
+  const s = String(side || '').toUpperCase();
+  if (d !== 'NEG' && d !== 'POS') return 1.0;
+  if (s === 'HOME' || s === 'AWAY') {
+    const specific = process.env[`KELLY_${spEnv}_HG_${d}_${s}`];
+    if (specific != null && specific !== '') {
+      const v = parseFloat(specific);
+      if (Number.isFinite(v) && v > 0 && v <= 2) return v;
+    }
+  }
+  const dirOnly = process.env[`KELLY_${spEnv}_HG_${d}`];
+  if (dirOnly != null && dirOnly !== '') {
+    const v = parseFloat(dirOnly);
+    if (Number.isFinite(v) && v > 0 && v <= 2) return v;
+  }
+  return 1.0;
+}
+
+function getKellyFraction(sport, conf, market = null, league = null, side = null, lineDir = null) {
   const key = _normalizeConfKey(conf);
   const sp = String(sport || '').toLowerCase();
   const spEnv = sp.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -6177,9 +6206,10 @@ function getKellyFraction(sport, conf, market = null, league = null) {
   // tier1 receives 1.1-1.3x boost; tier3 0.3-0.7x reduction. Opt-out via
   // KELLY_TIER_MULT_DISABLED=true (default ON).
   const tierMultDisabled = /^(1|true|yes)$/i.test(String(process.env.KELLY_TIER_MULT_DISABLED || ''));
-  if (tierMultDisabled || !league) return baseFraction;
+  const hgDirSideMult = _resolveHgDirSideMult(spEnv, market, side, lineDir);
+  if (tierMultDisabled || !league) return baseFraction * hgDirSideMult;
   const tierMult = _getTierKellyMultiplier(sp, league);
-  return baseFraction * tierMult;
+  return baseFraction * tierMult * hgDirSideMult;
 }
 
 // EV threshold default per sport — sports com lift baixo exigem edge maior pra compensar
@@ -19566,7 +19596,11 @@ async function pollTennis(runOnce = false) {
                         // ROI +43% n=24 hit 75%. Edge robusto sustenta Kelly maior.
                         // Fração 0.10 (BAIXA) → 0.15 (~50% bump) só em segmento ouro.
                         // Tier detection inline (mesmo regex do gate non-Slam).
-                        const _kellyBaseFrac = getKellyFraction('tennis', 'BAIXA', null, match.league);
+                        // 2026-05-22: passa side + lineDir pra granularidade KELLY_TENNIS_HG_<DIR>_<SIDE>.
+                        // Sample 25d (com archived): NEG away n=24 ROI+47.9% IC95 lo +1.7% (edge real);
+                        // POS dog n=159 ROI-5.2% (real breakeven, shadow -11.9% IC95 hi -4.5% leak confirmed).
+                        const _hgLineDir = (Number.isFinite(t.line) && t.line < 0) ? 'NEG' : (Number.isFinite(t.line) && t.line > 0 ? 'POS' : null);
+                        const _kellyBaseFrac = getKellyFraction('tennis', 'BAIXA', t.market, match.league, t.side, _hgLineDir);
                         const _isHgGoldSegment = (() => {
                           if (String(t.market).toLowerCase() !== 'handicapgames') return false;
                           const lg = String(match.league || '');
