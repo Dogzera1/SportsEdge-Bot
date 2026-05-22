@@ -44,9 +44,25 @@ for sp in sports_filter:
 ai_tips = []
 for t in all_tips:
     reason = str(t.get('tip_reason') or '')
-    if 'AI shadow POC' in reason or reason.startswith('AI ML ') or 'DeepSeek' in reason:
-        t['_ai_kind'] = 'real' if reason.startswith('AI ML ') else 'shadow'
-        ai_tips.append(t)
+    em = str(t.get('emission_source') or '')
+    # 2026-05-22: filter ampliado — CS/Dota/Val usam format inline "| IA:" em vez de
+    # "AI shadow POC (...)". Audit anterior subestimou CS AI volume (2 → 37 em 90d).
+    is_ai = (
+        'AI shadow POC' in reason
+        or reason.startswith('AI ML ')
+        or 'DeepSeek' in reason
+        or '| IA' in reason            # "Elo: ... | IA: model-override"
+        or 'IA shadow' in reason.lower()
+        or '_ai_' in em.lower()
+    )
+    if not is_ai: continue
+    if '_ai_real' in em.lower(): kind = 'real'
+    elif '_ai_shadow' in em.lower(): kind = 'shadow'
+    elif reason.startswith('AI ML '): kind = 'real'
+    elif t.get('is_shadow') == 0: kind = 'real'
+    else: kind = 'shadow'
+    t['_ai_kind'] = kind
+    ai_tips.append(t)
 
 print(f"\n=== AI tips audit — sports={','.join(sports_filter)} window={days}d ===")
 print(f"AI tips total: {len(ai_tips)}\n")
