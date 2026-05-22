@@ -19921,6 +19921,16 @@ ANÁLISE IN-PLAY (PARTIDA AO VIVO):
 - Se placar é equilibrado e odds são próximas: SEM_EDGE (mercado eficiente in-play).
 ` : '';
 
+        // 2026-05-22 audit: AI tennis shadow ROI -24.6% / avgEV 49.2% com casos
+        // extremos (Ben Shelton @7.29 EV=468%). Causa: AI inventava P livre,
+        // sistema recalculava EV de P×odd-1. Refit prompt: REGRA ABSOLUTA P_IA
+        // ∈ [modelP-5, modelP+5] + RED FLAGS hard (EV>30 + tier não-top sem
+        // dados = SEM_EDGE obrigatório). Memory: investigação tennis AI 22/05.
+        const _p1Lo = Math.max(1, Math.round(parseFloat(modelP1Tennis) - 5));
+        const _p1Hi = Math.min(99, Math.round(parseFloat(modelP1Tennis) + 5));
+        const _p2Lo = Math.max(1, Math.round(parseFloat(modelP2Tennis) - 5));
+        const _p2Hi = Math.min(99, Math.round(parseFloat(modelP2Tennis) + 5));
+        const _nonTopNoData = !_tennisTopTier && !hasRealData;
         const prompt = `Você é um analista especializado em tênis profissional. Seja MUITO conservador — prefira SEM_EDGE a apostar em margem duvidosa. Só dê tip quando o edge for claro e robusto.
 
 PARTIDA: ${match.team1} vs ${match.team2}
@@ -19934,38 +19944,46 @@ ${fairOddsLineTennis}
 ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
 ${dataSection ? `DADOS REAIS (ESPN/DB):\n${dataSection}\n` : 'AVISO: sem dados ESPN/DB disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}${liveInstructions}
-REGRAS DE CONVICÇÃO (não negociáveis):
-• ALTA (EV ≥ +8%, confiança ≥8): exige ≥3 sinais do checklist + sample H2H ≥3 jogos
-• MÉDIA (EV ≥ +6%, confiança ≥7): exige ≥2 sinais
-• BAIXA (EV ≥ +8%, confiança ≥6): apenas 1 sinal — stake reduzido
-• Dados ESPN/DB ausentes → máximo MÉDIA
-• Margem bookie ${marginPct}% ${parseFloat(marginPct) > 7 ? '⚠️ (alta — book pouco confiável)' : ''}
+═══ REGRA ABSOLUTA DE P (não negociável) ═══
+O modelo (Elo/Markov) já calculou ÂNCORA: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%.
+Sua P DEVE estar dentro de [modelP − 5pp, modelP + 5pp]:
+• ${match.team1}: P ∈ [${_p1Lo}%, ${_p1Hi}%]
+• ${match.team2}: P ∈ [${_p2Lo}%, ${_p2Hi}%]
+Se você acredita P real está FORA desse range → você está duvidando do modelo.
+   → Retorne SEM_EDGE. NUNCA force tip com P inflado para criar edge fictício.
+O modelo source-of-truth JÁ incorpora: H2H histórico, ranking ATP/WTA, surface stats, recent form, fatigue, age. Seu valor é COMENTAR/CONFIRMAR — não substituir P do modelo.
 
-INSTRUÇÕES:
-1. Analise: ranking ATP/WTA, superfície (peso ALTO — clay/grass specialists), H2H direto, forma recente (últimos 5 jogos), estilo de jogo vs superfície, contexto do torneio (Slam/Masters/250/Challenger).
-2. O modelo Elo calculou: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}% (${fairLabelTennis}).
-   - Use o modelo como ÂNCORA. Só desvie se tiver motivo CONCRETO (H2H dominante, lesão confirmada, forma terrível recente, especialista em superfície, retorno pós-lesão).
-   - Sem motivo concreto para desviar → SEM_EDGE.
+═══ RED FLAGS — abortar (SEM_EDGE obrigatório) ═══
+${_nonTopNoData ? '🚨 Tier ' + (isChallengerOrItf ? 'Challenger/ITF' : isQualifier ? 'Qualifier' : 'não-top') + ' SEM dados ESPN/DB → SEM_EDGE obrigatório (sample insuficiente para over-confidence).' : ''}
+• Se EV calculado > 30% → seu P está fora do range. Recalcule ou SEM_EDGE.
+• Se odd > 4.0 e você considera underdog favorito → reflita. Modelo já ajustou.
+• Margem bookie ${marginPct}% ${parseFloat(marginPct) > 7 ? '⚠️ ALTA — book pouco confiável, máximo BAIXA conf' : ''}
+
+REGRAS DE CONVICÇÃO (após validar P no range):
+• ALTA (EV ≥ +8%, confiança ≥8): exige ≥3 sinais do checklist + H2H ≥3 jogos + tier Slam/Masters
+• MÉDIA (EV ≥ +6%, confiança ≥7): exige ≥2 sinais
+• BAIXA (EV ≥ +4%, confiança ≥6): apenas 1 sinal — stake reduzido
+• Dados ESPN/DB ausentes → máximo MÉDIA
+• Tier Challenger/ITF/Qualifier → máximo BAIXA
 
 CHECKLIST DE SINAIS (marque os confirmados):
 [ ] Ranking ATP/WTA diff >20 posições (favorito real)
 [ ] Surface specialist confirmado (clay/grass/hard expertise)
 [ ] H2H favorável (≥60% wr, ≥3 jogos)
 [ ] Forma últimos 5 jogos clara (4V+ ou 4D-)
-[ ] Tier torneio adequado (Slam/Masters >250/Challenger — variance maior em Challenger)
+[ ] Tier torneio Slam/Masters (variance menor)
 [ ] Sem lesão recente / sem retorno pós-pausa longa
 [ ] Modelo + book direção alinhadas (divergência <8pp)
 
-CÁLCULO DE EV — OBRIGATÓRIO:
+CÁLCULO DE EV — INFORMATIVO (sistema recalcula server-side):
   EV% = (P/100 × odd − 1) × 100
-  Exemplo: P=60%, odd=1.80 → EV = (0.60 × 1.80 − 1) × 100 = +8%
-⚠️ EV > 30% provavelmente erro (modelo Markov já corrige) — revise.
+  Exemplo: P=60%, odd=1.80 → EV = +8%
 
 DECISÃO:
-- P × odd ≥ 1.05 E confiança ≥ 7 E ≥1 sinal: TIP_ML:[jogador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
-- Caso contrário: SEM_EDGE
+- P dentro do range + edge ≥ 5pp + ≥1 sinal: TIP_ML:[jogador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = inteiro 0-100; sistema calcula EV)
+- Caso contrário (P fora range, sem sinal, red flag): SEM_EDGE
 
-Máximo 200 palavras. Raciocínio breve antes da decisão.`;
+Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE quando aplicável.`;
 
         log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${usingEloModel ? ' [Elo]' : (hasRealData ? ' [ESPN/DB+]' : '')}`);
         analyzedTennis.set(key, Object.assign({}, prev || {}, { ts: now, [isLivePhase ? 'tsLive' : 'tsPre']: now }));

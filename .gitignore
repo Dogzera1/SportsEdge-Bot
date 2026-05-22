@@ -17,6 +17,9 @@ mma betting/
 .tmp_*.json
 tmp_*.json
 tmp_*.txt
+tmp_audit/
+check_*.js
+query_db.js
 *.log
 tmp_server.log
 hist*.json
