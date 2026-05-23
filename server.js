@@ -20,7 +20,7 @@ catch (e) { console.error('[MODEL-PERSIST] boot sync err:', e.message); }
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { ML_MARKETS, ML_MARKETS_LIST, isMlMarket } = require('./lib/constants');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog, getPollHeartbeats, getCronHeartbeats, markCronHeartbeat } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog, getPollHeartbeats, getCronHeartbeats, markCronHeartbeat, logSourceSilent } = require('./lib/utils');
 const dashboard = require('./lib/dashboard');
 const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
@@ -5157,6 +5157,9 @@ const server = http.createServer(async (req, res) => {
       }
       // Path 2: fallback por team names — varre getSchedule zh-CN + en-US procurando match
       if (!addedFromMatchId && qt1 && qt2) {
+        if (matchId && /^\d+$/.test(matchId)) {
+          try { logSourceSilent('lol', 'riot-livestats', `Path 1 (matchId=${matchId}) retornou 0 games — caindo pra Path 2 team-name fallback (${qt1} vs ${qt2})`); } catch (_) {}
+        }
         const schedules = await Promise.all([
           httpGet(`${LOL_BASE}/getSchedule?hl=zh-CN`, LOL_HEADERS).catch(() => ({ body: '{}' })),
           httpGet(`${LOL_BASE}/getSchedule?hl=en-US`, LOL_HEADERS).catch(() => ({ body: '{}' })),
@@ -5187,6 +5190,9 @@ const server = http.createServer(async (req, res) => {
             }
           }
         }
+      }
+      if (games.length === 0 && (matchId || (qt1 && qt2))) {
+        try { logSourceSilent('lol', 'live-gameids', `/live-gameids retornou 0 games — Path 1 + Path 2 sem hit (matchId=${matchId || '-'} teams=${qt1 || '-'} vs ${qt2 || '-'}). Riot getSchedule/getEventDetails sem dados.`); } catch (_) {}
       }
       sendJson(res, games);
     } catch(e) {
@@ -6848,6 +6854,9 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { log('WARN', 'AGGREGATOR-CS', `enrich err: ${e.message}`); }
       log('INFO', 'CS', `/cs-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
+      if (pinMatches.length === 0 && liveFromPs.length > 0) {
+        try { logSourceSilent('cs', 'pinnacle', `Pinnacle CS retornou 0 odds com ${liveFromPs.length} live PS — outage upstream OU rate-limit. /cs-matches sem anchor sharp.`); } catch (_) {}
+      }
       _csMatchesResp = { data: combined, ts: Date.now(), inflight: null };
       _resolveCsInflight(combined);
       sendJson(res, combined);
@@ -6934,6 +6943,9 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { log('WARN', 'AGGREGATOR-VAL', `enrich err: ${e.message}`); }
       log('INFO', 'VALORANT', `/valorant-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
+      if (pinMatches.length === 0 && liveFromPs.length > 0) {
+        try { logSourceSilent('valorant', 'pinnacle', `Pinnacle Valorant retornou 0 odds com ${liveFromPs.length} live PS — outage upstream OU rate-limit. /valorant-matches sem anchor sharp.`); } catch (_) {}
+      }
       _valorantMatchesResp = { data: combined, ts: Date.now(), inflight: null };
       _resolveValInflight(combined);
       sendJson(res, combined);

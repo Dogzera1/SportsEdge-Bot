@@ -20,7 +20,7 @@ try { require('./lib/model-persistence').syncFromPersistentToLib(); }
 catch (e) { console.error('[MODEL-PERSIST] boot sync err:', e.message); }
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap, isLeagueRealOverride } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats, checkLiveOddsDrift } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, logSourceSilent, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats, checkLiveOddsDrift } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop, checkBookmakerSpread } = require('./lib/line-shopping');
@@ -17053,6 +17053,9 @@ async function _pollDotaInner(runOnce = false) {
         const sourceIsRT = String(od?._source || '').includes('steam-rt');
         const ageHint = sourceIsRT ? '~15s' : (od?.hasPlayerStats ? '~30s' : '~3min anti-cheat');
         log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!od?.hasLiveStats} playerStats=${!!od?.hasPlayerStats} agg=${!!od?.hasAggregateStats} source=${od?._source || '?'} delayEst=${ageHint}${od?.error?` err=${od.error}`:''}`);
+        if (_dotaHasSteamRT && od?.hasLiveStats && !sourceIsRT) {
+          try { logSourceSilent('dota', 'steam-rt', `STEAM_WEBAPI_KEY set mas fallback OpenDota agg ativo (source=${od?._source || '?'}) — Steam RT endpoint sem dados pra ${match.team1} vs ${match.team2}`); } catch (_) {}
+        }
         if (isPsMatch) log('INFO', 'LIVE-STATS', `Dota PandaScore ${match.id}: hasLiveStats=${!!ps?.hasLiveStats} game=${ps?.gameNumber||'?'} status=${ps?.gameStatus||'?'}`);
 
         // Gate stale: se sem Steam RT E gameTime ainda no early game (<8min) E partida live há tempo,
@@ -17121,7 +17124,8 @@ async function _pollDotaInner(runOnce = false) {
       // Gate: partida live sem nenhuma fonte de stats (OpenDota + Steam RT + PandaScore).
       // Sem feed real, só Elo/H2H → IA vira coin-flip. Default ON (DOTA_LIVE_REQUIRE_STATS=true).
       if (isLive && !dotaHasLiveStats && /^(1|true|yes)$/i.test(String(process.env.DOTA_LIVE_REQUIRE_STATS ?? 'true'))) {
-        log('INFO', 'AUTO-DOTA', `Sem stats live (OpenDota/Steam RT/PS) — pulando: ${match.team1} vs ${match.team2}`);
+        const _odFlag = !!od?.hasLiveStats, _srtFlag = !!sourceIsRT, _psFlag = !!ps?.hasLiveStats;
+        log('INFO', 'AUTO-DOTA', `Sem stats live (od=${_odFlag} srt=${_srtFlag} ps=${_psFlag} isPsMatch=${isPsMatch}) — pulando: ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         _dotaCycleSkips.no_stats++;
         continue;
@@ -22569,6 +22573,7 @@ async function pollCs(runOnce = false) {
           const found = await hltv.getHltvMatchId(match.team1, match.team2, match.time).catch(() => null);
           if (!found?.matchId) {
             try { _metrics.incr('cs_scoreboard', { status: 'no_match' }); } catch (_) {}
+            try { logSourceSilent('cs', 'hltv', `match_id não resolvido para ${match.team1} vs ${match.team2} (live) — HLTV_PROXY_BASE off OU match não indexado`); } catch (_) {}
           } else if (found.live === false) {
             // HLTV diz que match não está live (pause entre maps/warmup/finished)
             // mesmo PS marcando live. Skip scoreboard fetch — economiza ~1s req
