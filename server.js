@@ -28092,10 +28092,18 @@ load();
         // drift (Brooksby +6.5 → +7.5 também bloqueado — user policy).
         // Real-only: shadow research universe pode re-emitir livre (P2).
         try {
-          if (!_bypassFiltersForShadow && /::mt::/.test(String(matchId || ''))) {
+          // 2026-05-23 debug — log entry conditions sempre que MT tip arrives
+          const _isMtTipDebug = /::mt::/.test(String(matchId || ''));
+          if (_isMtTipDebug) {
+            log('INFO', 'DEDUP-DEBUG',
+              `${sport} matchId=${String(matchId).slice(0,80)} bypass=${_bypassFiltersForShadow} marketN_=${marketN_} isShadow=${_isShadowTip}`);
+          }
+          if (!_bypassFiltersForShadow && _isMtTipDebug) {
             const _baseMid = String(matchId).split('::mt::')[0];
             const _sideRaw = String(matchId).match(/::mt::[^:]+::([^:]+)/);
             const _sideForDedup = _sideRaw ? _sideRaw[1] : null;
+            log('INFO', 'DEDUP-DEBUG',
+              `parsed: baseMid=${_baseMid} sideForDedup=${_sideForDedup}`);
             if (_baseMid && _sideForDedup) {
               // 2026-05-23 (#19 Brooksby line-drift policy): opt-in env permite
               // re-emit quando line mudou (ex: Brooksby +6.5 → +7.5 — mercado
@@ -28121,6 +28129,8 @@ load();
                     AND sent_at > datetime('now', '-14 days')
                   ORDER BY id DESC LIMIT 1`
               ).get(sport, _likePattern, marketN_);
+              log('INFO', 'DEDUP-DEBUG',
+                `query result for ${sport}/${marketN_}: pattern='${_likePattern}' → ${_matchDupe ? `MATCH id=${_matchDupe.id}` : 'NO MATCH'}`);
               if (_matchDupe) {
                 log('INFO', 'DEDUP',
                   `${sport} MT same match+side pending: existing id=${_matchDupe.id} (${_matchDupe.tip_participant}, sent=${_matchDupe.sent_at}) — skip new emit ${tipParticipant}`);
@@ -28129,7 +28139,7 @@ load();
               }
             }
           }
-        } catch (e) { log('DEBUG', 'DEDUP', `MT match-level err: ${e.message}`); }
+        } catch (e) { log('WARN', 'DEDUP-DEBUG', `MT match-level err: ${e.message} stack=${(e.stack||'').slice(0,200)}`); }
 
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
         // Shadow puro bypass: shadow registra tudo pra estudo (mesmo voided).
