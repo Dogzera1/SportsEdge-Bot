@@ -28636,6 +28636,34 @@ load();
             _stakeReaisPre = parseFloat((stakeUnits * unitValue).toFixed(2));
           }
         } catch(_) {}
+        // 2026-05-23 LAST-LINE-OF-DEFENSE dedup: imediatamente antes do INSERT.
+        // Fix A (linha ~28094) e existingCross (28009) deveriam ter caught
+        // duplicates, mas tip 4176 (Selekhmeteva +6.5) escapou ambos em prod
+        // — root cause não diagnosticado. Esta query final usa EXACT key
+        // (sport+match_id+market_type+tip_participant+is_shadow) — mesma
+        // unique scope de idx_tips_unique_active (mig 120). Real-only.
+        try {
+          const _finalIsShadow = _isShadowTip ? 1 : 0;
+          if (_finalIsShadow === 0) {
+            const _finalDupe = db.prepare(
+              `SELECT id, sent_at FROM tips
+                WHERE sport = ? AND match_id = ?
+                  AND upper(COALESCE(market_type, 'ML')) = ?
+                  AND tip_participant = ?
+                  AND COALESCE(is_shadow, 0) = 0
+                  AND (archived IS NULL OR archived = 0)
+                  AND (result IS NULL OR result NOT IN ('void','push'))
+                LIMIT 1`
+            ).get(sport, String(matchId), marketN_, tipParticipant);
+            if (_finalDupe) {
+              try { require('./lib/metrics').incr('mt_dedup_final_caught', { sport }); } catch (_) {}
+              log('WARN', 'DEDUP-FINAL',
+                `LAST-LINE blocked: existing id=${_finalDupe.id} sent=${_finalDupe.sent_at} mid=${String(matchId).slice(0,60)} pick=${tipParticipant} — earlier dedups MISSED (bug)`);
+              _emitSkip('final_dedup_exact_key');
+              return;
+            }
+          }
+        } catch (e) { log('WARN', 'DEDUP-FINAL', `err: ${e.message}`); }
         const result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
