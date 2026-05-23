@@ -28079,6 +28079,45 @@ load();
           }
         }
 
+        // 2026-05-23: MT future-fixture dedup gap. recentDupe acima cobre 24h
+        // via sent_at. MT tips pra fixtures 36-72h futuro re-emitidas quando
+        // line muda (tip_participant inclui line → idx_tips_unique_active escapa).
+        // Caso real: id=4065 Tjen +4.5 (21/05 18:56) + id=4170 IDÊNTICO (23/05
+        // 08:26) — 38h apart, mig 120 idx_tips_unique_active deveria ter
+        // bloqueado mas pode ter falhado silently em prod (try/catch swallow).
+        //
+        // Match-level dedup: extrai base do match_id MT pattern
+        // '<base>::mt::<market>::<side>[::ln<X>]' e procura tips pendentes pra
+        // mesmo (base, market, side) em janela 14d. Cobre exact-dup AND line
+        // drift (Brooksby +6.5 → +7.5 também bloqueado — user policy).
+        // Real-only: shadow research universe pode re-emitir livre (P2).
+        try {
+          if (!_bypassFiltersForShadow && /::mt::/.test(String(matchId || ''))) {
+            const _baseMid = String(matchId).split('::mt::')[0];
+            const _sideRaw = String(matchId).match(/::mt::[^:]+::([^:]+)/);
+            const _sideForDedup = _sideRaw ? _sideRaw[1] : null;
+            if (_baseMid && _sideForDedup) {
+              const _matchDupe = db.prepare(
+                `SELECT id, tip_participant, result, sent_at FROM tips
+                  WHERE sport = ?
+                    AND COALESCE(is_shadow, 0) = 0
+                    AND (archived IS NULL OR archived = 0)
+                    AND match_id LIKE ?
+                    AND upper(COALESCE(market_type, 'ML')) = ?
+                    AND (result IS NULL OR result NOT IN ('void','push'))
+                    AND sent_at > datetime('now', '-14 days')
+                  ORDER BY id DESC LIMIT 1`
+              ).get(sport, `${_baseMid}::mt::%::${_sideForDedup}%`, marketN_);
+              if (_matchDupe) {
+                log('INFO', 'DEDUP',
+                  `${sport} MT same match+side pending: existing id=${_matchDupe.id} (${_matchDupe.tip_participant}, sent=${_matchDupe.sent_at}) — skip new emit ${tipParticipant}`);
+                _emitSkip('mt_same_match_side_pending');
+                return;
+              }
+            }
+          }
+        } catch (e) { log('DEBUG', 'DEDUP', `MT match-level err: ${e.message}`); }
+
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
         // Shadow puro bypass: shadow registra tudo pra estudo (mesmo voided).
         const isVoided = !_bypassFiltersForShadow ? stmts.isVoidedMatch.get(sport, String(matchId)) : null;
