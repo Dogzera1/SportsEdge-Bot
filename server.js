@@ -28095,16 +28095,19 @@ load();
           // 2026-05-23 debug — log entry conditions sempre que MT tip arrives
           const _isMtTipDebug = /::mt::/.test(String(matchId || ''));
           if (_isMtTipDebug) {
+            try { require('./lib/metrics').incr('mt_dedup_check_entered', { sport }); } catch (_) {}
             log('INFO', 'DEDUP-DEBUG',
               `${sport} matchId=${String(matchId).slice(0,80)} bypass=${_bypassFiltersForShadow} marketN_=${marketN_} isShadow=${_isShadowTip}`);
           }
           if (!_bypassFiltersForShadow && _isMtTipDebug) {
+            try { require('./lib/metrics').incr('mt_dedup_passed_bypass_check', { sport }); } catch (_) {}
             const _baseMid = String(matchId).split('::mt::')[0];
             const _sideRaw = String(matchId).match(/::mt::[^:]+::([^:]+)/);
             const _sideForDedup = _sideRaw ? _sideRaw[1] : null;
             log('INFO', 'DEDUP-DEBUG',
               `parsed: baseMid=${_baseMid} sideForDedup=${_sideForDedup}`);
             if (_baseMid && _sideForDedup) {
+              try { require('./lib/metrics').incr('mt_dedup_query_attempted', { sport }); } catch (_) {}
               // 2026-05-23 (#19 Brooksby line-drift policy): opt-in env permite
               // re-emit quando line mudou (ex: Brooksby +6.5 → +7.5 — mercado
               // moveu, nova oportunidade). Default OFF preserva dedup estrito.
@@ -28129,6 +28132,7 @@ load();
                     AND sent_at > datetime('now', '-14 days')
                   ORDER BY id DESC LIMIT 1`
               ).get(sport, _likePattern, marketN_);
+              try { require('./lib/metrics').incr(_matchDupe ? 'mt_dedup_match_found' : 'mt_dedup_no_match', { sport }); } catch (_) {}
               log('INFO', 'DEDUP-DEBUG',
                 `query result for ${sport}/${marketN_}: pattern='${_likePattern}' → ${_matchDupe ? `MATCH id=${_matchDupe.id}` : 'NO MATCH'}`);
               if (_matchDupe) {
