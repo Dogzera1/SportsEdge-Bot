@@ -1077,7 +1077,7 @@ setInterval(() => {
     const now = Date.now();
     if (now - _pinnacleKeyDmedAt < 6 * 60 * 60 * 1000) return;
     _pinnacleKeyDmedAt = now;
-    const dmText = `🔑 *PINNACLE KEY EXPIRED/INVALID*\n\nStatus: \`${detected.status}\`\nAge: ${detected.age_s}s\n\nPipeline odds esports/tennis/football PARADO. Atualizar \`PINNACLE_API_KEY\` no Railway.`;
+    const dmText = `🔑 *PINNACLE KEY EXPIRED/INVALID*\n\nStatus: \`${detected.status}\`\nAge: ${detected.age_s}s\n\nPipeline odds esports/tennis/football/mma/darts PARADO.\n\n*Rotation procedure:*\n1. pinnacle.com → DevTools → Network → filter "arcadia"\n2. Copiar header \`X-API-Key\` de qualquer request\n3. Railway → service → vars → \`PINNACLE_API_KEY\` = nova key\n4. Restart bot service`;
     const token = (typeof resolveAlertsToken === 'function') ? resolveAlertsToken() : null;
     if (token) {
       sendAdminDMs(token, dmText, { parse_mode: 'Markdown' }, 'pinnacle-key-expired').catch(e => {
@@ -3803,7 +3803,7 @@ async function runAutoAnalysis() {
             // Per-map ML override: market_type MAP{N}_WINNER + shadow gate
             market_type: _perMapEnabled ? `MAP${liveMapa}_WINNER` : undefined,
             tipReason: _perMapEnabled
-              ? `LOL ML per-map (live map ${liveMapa}, lol-map-model)`
+              ? `LOL ML per-map (live map ${liveMapa}, lol-map-model)${result.tipReason ? ' | ' + String(result.tipReason).slice(0, 80) : ''}`
               : (result.tipReason || null),
             lineShopOdds: result.o || null,
             pickSide: _pickSideLs,
@@ -17783,10 +17783,12 @@ Máximo 200 palavras.`;
           modelPPick: modelPForKelly,
           modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
           gates_evaluated: _mlGatesDota,
-          tipReason: _dotaPerMapEnabled
-            ? `Dota2 ML per-map (live map ${dotaMapNum})`
-            : (() => {
+          tipReason: (() => {
             const _ia = iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
+            if (_dotaPerMapEnabled) {
+              const _iaSuffix = _ia ? ` | IA: ${_ia.slice(0, 80)}` : '';
+              return `Dota2 ML per-map (live map ${dotaMapNum})${_iaSuffix}`;
+            }
             const _forceDet = /^(1|true|yes)$/i.test(String(process.env.DOTA_FORCE_DETERMINISTIC_REASON || ''));
             if (_ia && !_forceDet) return _ia;
             try {
