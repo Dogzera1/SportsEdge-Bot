@@ -1117,8 +1117,8 @@ async function _sofaWatchdogTick() {
     }
   } catch (_) {}
 }
-setInterval(_sofaWatchdogTick, 60 * 60 * 1000).unref();
-setTimeout(_sofaWatchdogTick, 10 * 60 * 1000).unref();
+setInterval(_wrapCron('sofa_watchdog', _sofaWatchdogTick), 60 * 60 * 1000).unref();
+setTimeout(_wrapCron('sofa_watchdog', _sofaWatchdogTick), 10 * 60 * 1000).unref();
 
 // ── Metrics bridge bot.js → server.js ──
 // Counters/gauges/timings registrados no bot.js (pollers, sweep, etc) ficam
