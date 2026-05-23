@@ -23592,6 +23592,10 @@ async function pollValorant(runOnce = false) {
         // nem lado (CT/Atk) nem score de rounds. VLR preenche esses gaps via scraping.
         let vlrLive = null;
         if (isLiveVal) {
+          // 2026-05-23 diag: confirm iter chega na branch live. Espelha LoL "Live analyze start"
+          // log (bot.js:3530 region). Se este log NÃO aparecer mas Cycle done sim → gate
+          // silent antes do isLiveVal block matou iter (cooldown / odds range / stale / etc).
+          log('INFO', 'AUTO-VAL', `Live analyze start: ${match.team1} vs ${match.team2} (${match.league}) odds=${match.odds?.t1}/${match.odds?.t2}`);
           // 2026-05-23 audit: bare catch escondia TODA falha (breaker open, HTTP fail,
           // regex stale, team name mismatch). G2 vs NRG VCT Americas live confirmado em
           // vlr.gg/matches mas vlrLive=null em prod → 0 visibility. Capture reason +
