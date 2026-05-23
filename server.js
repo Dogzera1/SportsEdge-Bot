@@ -10135,6 +10135,106 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-23 (audit zombie sweep): scan cross-sport tips zumbi (archived=1
+  // + result=null) — restos do auto-archive bug (server.js:17105 — fixed
+  // 87ffd50). Mostra siblings + can_restore flag (false se conflict ativo
+  // bloqueado por idx_tips_unique_active). Bulk restore via response.
+  // GET /admin/zombie-scan?days=14&sport=tennis&apply_restore=0&key=<KEY>
+  if (p === '/admin/zombie-scan') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '14', 10) || 14));
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).trim() : null;
+    const applyRestore = parsed.query.apply_restore === '1' || parsed.query.apply_restore === 'true';
+    try {
+      const sportCond = sportFilter ? 'AND sport = ?' : '';
+      const sportParams = sportFilter ? [sportFilter] : [];
+      const zombies = db.prepare(`
+        SELECT id, sport, match_id, market_type, tip_participant, odds, ev, stake,
+               is_shadow, sent_at, archived, result
+          FROM tips
+         WHERE archived = 1
+           AND result IS NULL
+           AND datetime(sent_at) >= datetime('now', '-' || ? || ' days')
+           ${sportCond}
+         ORDER BY sent_at DESC
+         LIMIT 500
+      `).all(String(days), ...sportParams);
+
+      // Para cada zombie, check se sibling ativo conflict bloqueia restore
+      const result = [];
+      const restorable = [];
+      for (const z of zombies) {
+        const conflict = db.prepare(`
+          SELECT id, archived, result FROM tips
+           WHERE sport = ? AND match_id = ?
+             AND upper(COALESCE(market_type, 'ML')) = ?
+             AND tip_participant = ?
+             AND COALESCE(is_shadow, 0) = COALESCE(?, 0)
+             AND id != ?
+             AND (archived IS NULL OR archived = 0)
+             AND (result IS NULL OR result NOT IN ('void','push'))
+           LIMIT 1
+        `).get(z.sport, z.match_id, String(z.market_type || 'ML').toUpperCase(), z.tip_participant, z.is_shadow || 0, z.id);
+        const canRestore = !conflict;
+        if (canRestore) restorable.push(z.id);
+        result.push({
+          id: z.id, sport: z.sport, market_type: z.market_type,
+          tip_participant: z.tip_participant, sent_at: z.sent_at,
+          is_shadow: z.is_shadow,
+          can_restore: canRestore,
+          conflict_id: conflict?.id || null,
+        });
+      }
+
+      // By sport summary
+      const bySport = {};
+      result.forEach(r => {
+        const k = `${r.sport}/${r.market_type}`;
+        if (!bySport[k]) bySport[k] = { total: 0, restorable: 0 };
+        bySport[k].total++;
+        if (r.can_restore) bySport[k].restorable++;
+      });
+
+      let restoredCount = 0;
+      if (applyRestore && restorable.length) {
+        const stmt = db.prepare(`UPDATE tips SET archived = 0 WHERE id = ?`);
+        const auditStmt = db.prepare(`
+          INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+          VALUES (?, ?, NULL, NULL, NULL, NULL, 'admin', 'zombie_sweep_restore', '/admin/zombie-scan')
+        `);
+        const tx = db.transaction(() => {
+          for (const id of restorable) {
+            try {
+              stmt.run(id);
+              const z = zombies.find(x => x.id === id);
+              if (z) { try { auditStmt.run(id, z.sport); } catch (_) {} }
+              restoredCount++;
+            } catch (_) { /* UNIQUE constraint pode ainda blocking */ }
+          }
+        });
+        tx();
+      }
+
+      sendJson(res, {
+        ok: true,
+        days, sport_filter: sportFilter, apply_restore: applyRestore,
+        total_zombies: zombies.length,
+        restorable_count: restorable.length,
+        blocked_by_conflict: zombies.length - restorable.length,
+        restored: restoredCount,
+        by_sport_market: bySport,
+        zombies: result,
+        hint: applyRestore
+          ? `${restoredCount} zombies restaurados (archived=0). Bloqueados por conflict: ${zombies.length - restorable.length}.`
+          : `dry-run. Para restaurar: apply_restore=1. Conflicts são tips ativas mesma key — idx_tips_unique_active bloqueia.`,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // 2026-05-05: trace step-by-step pra UMA tip — mostra EXATAMENTE o que o
   // matcher encontra. Usa quando /tennis-settle-debug retorna nearby_name_matches=0
   // mas dados claramente existem. Compara nomes processados pelo matcher.
