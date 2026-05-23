@@ -854,8 +854,12 @@ const LOL_LEAGUES = new Set([
   ...(process.env.LOL_EXTRA_LEAGUES || '').split(',').map(s => s.trim()).filter(Boolean),
 ]);
 
-// Slugs vistos mas não reconhecidos — logados para diagnóstico
+// Slugs vistos mas não reconhecidos — logados para diagnóstico.
+// 2026-05-23 leak fix Mem1: cap 500 com FIFO eviction. Set crescia unbounded
+// (PandaScore polls 30+ matches/cycle, slugs novos = +1 entry sem cleanup).
+// Cap protege contra spam de slug forjado + bound memory long-term.
 const unknownLolSlugs = new Set();
+const UNKNOWN_LOL_SLUGS_CAP = 500;
 
 // ── Odds APIs ──
 async function fetchOdds(sport) {
@@ -2654,6 +2658,11 @@ function mapLoLEvent(e, status) {
   if (!LOL_LEAGUES.has(slug)) {
     // Loga slug desconhecido uma vez para facilitar diagnóstico
     if (slug && !unknownLolSlugs.has(slug)) {
+      // FIFO eviction quando cap atingido (Mem1 leak fix).
+      if (unknownLolSlugs.size >= UNKNOWN_LOL_SLUGS_CAP) {
+        const oldest = unknownLolSlugs.values().next().value;
+        unknownLolSlugs.delete(oldest);
+      }
       unknownLolSlugs.add(slug);
       log('WARN', 'LOL-SLUG', `Liga ignorada: slug="${slug}" nome="${e.league?.name || ''}" — adicione ao LOL_EXTRA_LEAGUES no .env se quiser cobrir`);
     }

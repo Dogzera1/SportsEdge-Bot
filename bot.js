@@ -2507,8 +2507,13 @@ async function fetchClvMultiplier(sport, league) {
       return out;
     }
   } catch (_) {}
+  // 2026-05-23 leak fix M4: NÃO cachear fetch_error. Cache anterior persistia
+  // mult=1.0 (= sem cut Kelly) por TTL inteiro (10min) quando /clv-kelly-multiplier
+  // falhava transient (502/timeout). Em sport/league com mult=0.0 esperado (CLV
+  // severo), 10min de fetch_error = tips emitidas com FULL Kelly em mercado
+  // bloqueado. Return inline sem set → próxima call retry. Load extra é trivial
+  // (single GET local) vs custo de cut Kelly bypass.
   const fallback = { ts: now, mult: 1.0, reason: 'fetch_error', n: 0, avgClv: null };
-  _clvKellyCache.set(key, fallback);
   return fallback;
 }
 
