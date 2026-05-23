@@ -23592,18 +23592,41 @@ async function pollValorant(runOnce = false) {
         // nem lado (CT/Atk) nem score de rounds. VLR preenche esses gaps via scraping.
         let vlrLive = null;
         if (isLiveVal) {
+          // 2026-05-23 audit: bare catch escondia TODA falha (breaker open, HTTP fail,
+          // regex stale, team name mismatch). G2 vs NRG VCT Americas live confirmado em
+          // vlr.gg/matches mas vlrLive=null em prod → 0 visibility. Capture reason +
+          // WARN throttled 1h por (sport, reason). Mesmo padrão SOFA-MMA d12cb08.
+          let _vlrFailReason = null;
           try {
             const vlr = require('./lib/vlr');
-            const found = await vlr.findLiveMatch(match.team1, match.team2).catch(() => null);
-            if (found?.matchId) {
-              const stats = await vlr.getMatchStats(found.matchId).catch(() => null);
-              if (stats) vlrLive = vlr.summarizeLive(stats, match.team1, match.team2);
+            const found = await vlr.findLiveMatch(match.team1, match.team2).catch(e => { _vlrFailReason = `findLiveMatch err: ${e?.message || e}`; return null; });
+            if (!found) {
+              _vlrFailReason = _vlrFailReason || `findLiveMatch null (HTML/regex stale OR breaker open OR VLR_ENABLED=false OR names mismatch '${match.team1}'/'${match.team2}')`;
+            } else if (found.matchId) {
+              const stats = await vlr.getMatchStats(found.matchId).catch(e => { _vlrFailReason = `getMatchStats err: ${e?.message || e}`; return null; });
+              if (!stats) {
+                _vlrFailReason = _vlrFailReason || `getMatchStats null (matchId=${found.matchId})`;
+              } else {
+                vlrLive = vlr.summarizeLive(stats, match.team1, match.team2);
+                if (!vlrLive) _vlrFailReason = `summarizeLive null (matchId=${found.matchId}, games=${stats.games?.length||0})`;
+              }
               if (vlrLive) {
                 const conf = vlrLive.sideConfident ? '✓' : (vlrLive.overtime ? 'OT' : '~');
                 log('INFO', 'AUTO-VAL', `VLR[${conf}] ${match.team1} vs ${match.team2}: ${vlrLive.currentMap || '?'} R${vlrLive.currentRound} | ${vlrLive.t1.name} ${vlrLive.t1.score}(${vlrLive.t1.side}; CT${vlrLive.t1.ct}/A${vlrLive.t1.atk}) vs ${vlrLive.t2.name} ${vlrLive.t2.score}(${vlrLive.t2.side}; CT${vlrLive.t2.ct}/A${vlrLive.t2.atk})`);
               }
             }
-          } catch (_) {}
+          } catch (e) { _vlrFailReason = _vlrFailReason || `outer err: ${e?.message || e}`; }
+          if (!vlrLive && _vlrFailReason) {
+            try {
+              global._vlrFailLogged = global._vlrFailLogged || new Map();
+              const _key = `val:${_vlrFailReason.slice(0, 50)}`;
+              const _last = global._vlrFailLogged.get(_key) || 0;
+              if (Date.now() - _last > 60 * 60 * 1000) {
+                global._vlrFailLogged.set(_key, Date.now());
+                log('WARN', 'VLR', `${match.team1} vs ${match.team2}: ${_vlrFailReason}`);
+              }
+            } catch (_) {}
+          }
         }
         // Usa VLR.currentMap quando PandaScore entregou null (partida em andamento de game N)
         const mapHint = match.currentMap || vlrLive?.currentMap || null;
