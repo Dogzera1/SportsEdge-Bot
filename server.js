@@ -20666,15 +20666,45 @@ load();
   }
 
   // POST /admin/tip-archive?id=<tipId>&key=<KEY>          — arquiva tip específica
+  // POST /admin/tip-archive?ids=4063,4065&unarchive=1     — bulk RESTORE (2026-05-23)
   // POST /admin/tip-archive?sport=<sport>&team1=...&team2=...&key=<KEY>
   //                                                       — arquiva tip mais recente matching teams
   // 2026-05-11: manual archive pra remover tips canceladas/zumbi do dashboard.
+  // 2026-05-23: support unarchive=1 + ids=csv pra restaurar zombies do auto-archive
+  // bug (server.js:17105 bug — pre-game >48h era archivado antes do match jogar).
   // Retorna preview se dry_run=1, senão aplica direto.
   if (p === '/admin/tip-archive' && (req.method === 'POST' || req.method === 'GET')) {
     if (!requireAdmin(req, res)) return;
     try {
       const q = parsed.query;
       const dryRun = q.dry_run === '1' || q.dry_run === 'true';
+      const unarchive = q.unarchive === '1' || q.unarchive === 'true';
+      // 2026-05-23: bulk ids=csv mode (archive OR unarchive)
+      const idsCsv = q.ids ? String(q.ids).split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0) : null;
+      if (idsCsv && idsCsv.length) {
+        const ph = idsCsv.map(() => '?').join(',');
+        const rows = db.prepare(`SELECT id, sport, archived, result FROM tips WHERE id IN (${ph})`).all(...idsCsv);
+        if (dryRun) {
+          sendJson(res, { ok: true, dry_run: true, mode: unarchive ? 'unarchive' : 'archive', candidates: rows });
+          return;
+        }
+        const targetArchived = unarchive ? 0 : 1;
+        const stmt = db.prepare(`UPDATE tips SET archived = ? WHERE id = ?`);
+        const auditStmt = db.prepare(`
+          INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+          VALUES (?, ?, NULL, NULL, NULL, NULL, 'admin', ?, '/admin/tip-archive')
+        `);
+        let changed = 0;
+        for (const r of rows) {
+          const before = r.archived || 0;
+          if (before === targetArchived) continue;
+          stmt.run(targetArchived, r.id);
+          try { auditStmt.run(r.id, r.sport, unarchive ? 'manual_unarchive' : 'manual_archive'); } catch (_) {}
+          changed++;
+        }
+        sendJson(res, { ok: true, mode: unarchive ? 'unarchive' : 'archive', changed, requested: idsCsv.length });
+        return;
+      }
       let candidates = [];
       const id = parseInt(q.id, 10);
       if (Number.isFinite(id) && id > 0) {
