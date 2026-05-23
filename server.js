@@ -9798,6 +9798,128 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-23: source-side coverage diag pra football sync. Complemento de
+  // /admin/football-settle-diag (DB-side) — este verifica se as SOURCES
+  // (sofascore proxy + ESPN) estão retornando dados. Motivado por audit log
+  // mostrando "[FOOTBALL-SYNC] sofascore getFinished: 0 matches de 6d"
+  // sustentado, mascarado pelo fallback ESPN. Per-day breakdown sofa vs espn
+  // + proxy probe + DB coverage por source prefix.
+  // GET /admin/football-sync-diag?days=7&key=<KEY>
+  if (p === '/admin/football-sync-diag') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(14, parseInt(parsed.query.days || '7', 10) || 7));
+    (async () => {
+      const proxyBase = (process.env.SOFASCORE_PROXY_BASE || '').trim().replace(/\/+$/, '');
+      const directEnabled = /^(1|true|yes)$/i.test(String(process.env.SOFASCORE_DIRECT || ''));
+      const todayIso = new Date().toISOString().slice(0, 10);
+
+      let proxyProbe = null;
+      if (proxyBase) {
+        const t0 = Date.now();
+        try {
+          const headers = {
+            Accept: 'application/json,text/plain,*/*',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'ngrok-skip-browser-warning': 'true',
+          };
+          const r = await httpGet(`${proxyBase}/schedule/football/${todayIso}/`, headers);
+          let eventCount = null, payloadOk = false;
+          try {
+            const j = JSON.parse(r.body || '{}');
+            if (j && typeof j === 'object') {
+              payloadOk = true;
+              if (Array.isArray(j.events)) eventCount = j.events.length;
+              else if (j.tournamentTeamEvents) eventCount = Object.keys(j.tournamentTeamEvents).length;
+            }
+          } catch (_) {}
+          proxyProbe = { status: r.status, ms: Date.now() - t0, body_len: (r.body || '').length, payload_ok: payloadOk, event_count: eventCount };
+        } catch (e) {
+          proxyProbe = { status: 0, ms: Date.now() - t0, error: e.message };
+        }
+      }
+
+      const [sofaRes, espnRes] = await Promise.allSettled([
+        (async () => { const { getFinishedMatches } = require('./lib/sofascore-football'); return getFinishedMatches({ daysBack: days }); })(),
+        (async () => { const { getFinishedMatches } = require('./lib/espn-soccer'); return getFinishedMatches({ daysBack: days }); })(),
+      ]);
+
+      const bucketByDay = (arr) => {
+        const map = {};
+        for (const m of arr || []) {
+          const day = String(m.startIso || '').slice(0, 10) || 'unknown';
+          map[day] = (map[day] || 0) + 1;
+        }
+        return map;
+      };
+
+      const sofaMatches = sofaRes.status === 'fulfilled' ? (sofaRes.value || []) : [];
+      const espnMatches = espnRes.status === 'fulfilled' ? (espnRes.value || []) : [];
+      const sofaByDay = bucketByDay(sofaMatches);
+      const espnByDay = bucketByDay(espnMatches);
+
+      const allDays = new Set([...Object.keys(sofaByDay), ...Object.keys(espnByDay)]);
+      const perDay = [...allDays].sort().reverse().map(d => ({
+        day: d, sofa: sofaByDay[d] || 0, espn: espnByDay[d] || 0,
+        gap: (espnByDay[d] || 0) - (sofaByDay[d] || 0),
+      }));
+
+      let dbBySource = [];
+      try {
+        dbBySource = db.prepare(`
+          SELECT substr(match_id, 1, 5) AS prefix, COUNT(*) AS n, MAX(resolved_at) AS last
+            FROM match_results
+           WHERE game = 'football' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
+           GROUP BY substr(match_id, 1, 5)
+           ORDER BY n DESC
+        `).all(String(days));
+      } catch (_) {}
+
+      const sofaTotal = sofaMatches.length;
+      const espnTotal = espnMatches.length;
+      let diagnosis = null;
+      if (!proxyBase && !directEnabled) {
+        diagnosis = 'CONFIG: SOFASCORE_PROXY_BASE não setado E SOFASCORE_DIRECT=false. Sofa sync sempre 0. ESPN único source ativo.';
+      } else if (proxyProbe && proxyProbe.status !== 200) {
+        diagnosis = `PROXY DOWN: schedule/football/${todayIso} retornou status=${proxyProbe.status} em ${proxyProbe.ms}ms. Restart Public-Sofascore-API service OR check Cloudflare upstream block.`;
+      } else if (proxyProbe && proxyProbe.payload_ok && proxyProbe.event_count === 0) {
+        diagnosis = 'PROXY OK mas EMPTY: schedule retornou JSON válido com 0 events. Sofascore mudou shape/path OR data delay temporário. Comparar curl direto sofascore.com.';
+      } else if (sofaTotal === 0 && espnTotal > 0) {
+        diagnosis = `SOFA SILENT DEGRADED: ${days}d sofa=0 vs espn=${espnTotal}. Proxy responde mas getFinished filtra tudo — provável status.type/code mismatch (sofascore mudou enum) OR impersonate drift. Verificar collectEventsFromSchedulePayload + status check em lib/sofascore-football.js.`;
+      } else if (sofaTotal > 0 && espnTotal > 0 && sofaTotal < espnTotal * 0.3) {
+        diagnosis = `SOFA PARCIAL: ${sofaTotal} vs espn ${espnTotal} (${Math.round(sofaTotal * 100 / espnTotal)}% cobertura). Liga-specific gap — verificar tournament filter ou regiões cobertas.`;
+      } else {
+        diagnosis = 'OK: ambas sources retornando dados consistentes.';
+      }
+
+      sendJson(res, {
+        ok: true,
+        days,
+        env: {
+          SOFASCORE_PROXY_BASE_set: !!proxyBase,
+          SOFASCORE_PROXY_BASE_preview: proxyBase ? proxyBase.replace(/^(https?:\/\/[^/]+).*/, '$1') : null,
+          SOFASCORE_DIRECT: directEnabled,
+        },
+        proxy_probe_today: proxyProbe,
+        sofa: {
+          total: sofaTotal,
+          status: sofaRes.status,
+          error: sofaRes.status === 'rejected' ? String(sofaRes.reason?.message || sofaRes.reason) : null,
+        },
+        espn: {
+          total: espnTotal,
+          status: espnRes.status,
+          error: espnRes.status === 'rejected' ? String(espnRes.reason?.message || espnRes.reason) : null,
+        },
+        per_day: perDay,
+        db_coverage_by_source: dbBySource,
+        diagnosis,
+        related: ['/admin/football-settle-diag', '/admin/sofascore-proxy-health', '/sync-football-sofascore', '/sync-football-espn'],
+      });
+    })().catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+
   // 2026-05-05: trace step-by-step pra UMA tip — mostra EXATAMENTE o que o
   // matcher encontra. Usa quando /tennis-settle-debug retorna nearby_name_matches=0
   // mas dados claramente existem. Compara nomes processados pelo matcher.
