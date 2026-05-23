@@ -23530,7 +23530,12 @@ async function pollValorant(runOnce = false) {
       let _drainedVal = false;
       let _valNoOddsLive = 0, _valNoOddsTotal = 0;
 
+      let _iterIdx = -1;
       for (const match of relevant) {
+        _iterIdx++;
+        // 2026-05-23 diag: log iter entry pra capturar qual gate silent fecha iter 1 live.
+        // Throttled via DEBUG-eq INFO: só fires se _hasLiveVal=true (cycle COM live opportunity).
+        if (_hasLiveVal) log('INFO', 'AUTO-VAL', `iter[${_iterIdx}] enter: ${match.team1} vs ${match.team2} status=${match.status} score=${match.score1}-${match.score2}`);
         if (match.status !== 'live' && !_drainedVal) {
           if (_hasLiveVal) _livePhaseExit('valorant');
           await _waitOthersLiveDone('valorant');
@@ -23541,9 +23546,15 @@ async function pollValorant(runOnce = false) {
         const valMapTag = valMapNum > 0 ? `_MAP${valMapNum}` : '';
         const key = `valorant_${match.id}_${valMapNum}`;
         const prev = analyzedValorant.get(key);
-        if (prev?.tipSent) continue;
+        if (prev?.tipSent) {
+          if (_hasLiveVal && isLiveVal) log('INFO', 'AUTO-VAL', `iter[${_iterIdx}] skip: tipSent=true key=${key}`);
+          continue;
+        }
         const valCooldown = isLiveVal ? (3 * 60 * 1000) : (30 * 60 * 1000);
-        if (prev && (now - prev.ts < valCooldown)) continue;
+        if (prev && (now - prev.ts < valCooldown)) {
+          if (_hasLiveVal && isLiveVal) log('INFO', 'AUTO-VAL', `iter[${_iterIdx}] skip: cooldown ageMs=${now - prev.ts} < ${valCooldown}`);
+          continue;
+        }
 
         // Segment gate: skip segmentos onde backtest mostrou Brier > 0.25 (noise puro).
         const _segGate = esportsSegmentGate('valorant', match.league, match.format);
@@ -23571,11 +23582,15 @@ async function pollValorant(runOnce = false) {
         }
         const o1 = parseFloat(match.odds.t1);
         const o2 = parseFloat(match.odds.t2);
-        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
+        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) {
+          if (_hasLiveVal && isLiveVal) log('INFO', 'AUTO-VAL', `iter[${_iterIdx}] skip: invalid odds o1=${o1} o2=${o2}`);
+          continue;
+        }
 
         const bestOdd = Math.max(o1, o2);
         const worstOdd = Math.min(o1, o2);
         if (worstOdd < VAL_MIN_ODDS || bestOdd > VAL_MAX_ODDS + 10) {
+          if (_hasLiveVal && isLiveVal) log('INFO', 'AUTO-VAL', `iter[${_iterIdx}] skip: odd range worst=${worstOdd}<${VAL_MIN_ODDS} OR best=${bestOdd}>${VAL_MAX_ODDS + 10}`);
           analyzedValorant.set(key, { ts: now, tipSent: false });
           continue;
         }
