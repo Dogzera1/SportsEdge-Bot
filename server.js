@@ -7983,6 +7983,30 @@ const server = http.createServer(async (req, res) => {
     } catch (_) {}
 
     const status = !dbOk ? 'error' : (alerts.some(a => a.severity === 'critical') ? 'degraded' : (stale ? 'degraded' : 'ok'));
+    // 2026-05-23: DeepSeek budget visibility — antes só visível em /cost-summary.
+    // Mirror cálculo de server.js:36229 (inline em /claude path).
+    let _aiBudget = null;
+    try {
+      const _month = new Date().toISOString().slice(0, 7);
+      const _ptokRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_prompt_tokens' AND month = ?`).get(_month);
+      const _ctokRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_completion_tokens' AND month = ?`).get(_month);
+      const _callsRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek' AND month = ?`).get(_month);
+      const _ptok = _ptokRow?.count || 0;
+      const _ctok = _ctokRow?.count || 0;
+      const _calls = _callsRow?.count || 0;
+      let _costUSD = (_ptok / 1_000_000 * 0.14) + (_ctok / 1_000_000 * 0.28);
+      if (_costUSD === 0 && _calls > 0) _costUSD = _calls * 0.000168;
+      const _bcStr = process.env.AI_MONTHLY_BUDGET_USD;
+      const _budgetCap = _bcStr !== undefined ? parseFloat(_bcStr) : 10;
+      const _cap = Number.isFinite(_budgetCap) && _budgetCap > 0 ? _budgetCap : null;
+      _aiBudget = {
+        month: _month, calls: _calls,
+        cost_usd: +_costUSD.toFixed(4),
+        cap_usd: _cap,
+        used_pct: _cap ? +(_costUSD / _cap * 100).toFixed(1) : null,
+        blocked: _cap ? _costUSD >= _cap : false,
+      };
+    } catch (_) {}
     const _healthResponse = {
       status,
       db: dbOk ? 'connected' : 'error',
@@ -8002,6 +8026,7 @@ const server = http.createServer(async (req, res) => {
         },
         sxbet: { enabled: SXBET_ENABLED },
         apiFootball: { keyConfigured: !!(process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.APISPORTS_KEY) },
+        deepseekAi: _aiBudget,
       },
       alerts,
       botGauges,

@@ -23312,7 +23312,7 @@ Máximo 200 palavras.`;
             modelP1, modelP2, modelPPick: pickP,
             modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (_csFromOverride ? '+override' : '')),
             tipReason: _csPerMapEnabled
-              ? `CS ML per-map (live map ${csMapNum}, cs-map-model)`
+              ? `CS ML per-map (live map ${csMapNum}, cs-map-model)${aiTag}`
               : tipReason,
             isShadow: _csPerMapEnabled
               ? (_csPerMapShadow ? 1 : (csConfig.shadowMode ? 1 : 0))
