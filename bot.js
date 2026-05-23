@@ -1087,6 +1087,39 @@ setInterval(() => {
   } catch (_) {}
 }, 30 * 60 * 1000).unref();
 
+// 2026-05-23: Sofascore proxy watchdog. Memory references chrome131→chrome124
+// (2026-05-16) e atual safari260 — provider rotaciona impersonate periodicamente.
+// Audit log 2026-05-23 mostrou FOOTBALL-SYNC sofascore getFinished: 0 matches
+// 6d sustained — sintoma silently mascarado por ESPN fallback. Sem watchdog,
+// gap 6-24h até alguém grepar logs ou /admin/football-sync-diag.
+//
+// Reusa /admin/sofascore-proxy-health (já tem diagnosis classification:
+// CONFIG / FALHA / OK). Cron 1h probe, throttle 6h pra não spam.
+let _sofaWatchdogDmedAt = 0;
+async function _sofaWatchdogTick() {
+  try {
+    if (!process.env.SOFASCORE_PROXY_BASE) return;
+    const r = await serverGet('/admin/sofascore-proxy-health').catch(() => null);
+    if (!r) return;
+    const isDegraded = /FALHA|PROXY DOWN|CONFIG/i.test(String(r.diagnosis || ''));
+    if (!isDegraded) return;
+    const now = Date.now();
+    if (now - _sofaWatchdogDmedAt < 6 * 60 * 60 * 1000) return;
+    _sofaWatchdogDmedAt = now;
+    const proxyStatus = r.proxy?.status ?? 'unknown';
+    const proxyMs = r.proxy?.ms ?? '?';
+    const dmText = `🛰️ *SOFASCORE PROXY DEGRADED*\n\nDiagnosis: ${r.diagnosis}\nProxy status: \`${proxyStatus}\` (${proxyMs}ms)\n\nFeeds dependentes:\n• football (ESPN fallback OK)\n• tennis\n• mma\n• darts\n• tabletennis\n\n*Investigar:*\n1. Public-Sofascore-API service deploy status\n2. \`SOFASCORE_IMPERSONATE\` env — provider rotaciona periodicamente (chrome131→chrome124→safari260 histórico)\n3. \`/admin/sofascore-proxy-health\` pra detail\n4. \`/admin/football-sync-diag\` pra per-day breakdown`;
+    const token = (typeof resolveAlertsToken === 'function') ? resolveAlertsToken() : null;
+    if (token) {
+      sendAdminDMs(token, dmText, { parse_mode: 'Markdown' }, 'sofascore-degraded').catch(e => {
+        log('WARN', 'SOFA-WATCHDOG', `DM falhou: ${e.message}`);
+      });
+    }
+  } catch (_) {}
+}
+setInterval(_sofaWatchdogTick, 60 * 60 * 1000).unref();
+setTimeout(_sofaWatchdogTick, 10 * 60 * 1000).unref();
+
 // ── Metrics bridge bot.js → server.js ──
 // Counters/gauges/timings registrados no bot.js (pollers, sweep, etc) ficam
 // em processo SEPARADO do server.js. Sem este bridge, /health/metrics no
