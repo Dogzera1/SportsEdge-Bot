@@ -4861,13 +4861,23 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       // em escala correta no momento). Antes sempre recomputava via tier
       // atual — banca caiu 70%? profit_R em escala errada. Espelha pattern
       // de /settle (server.js:24669).
+      // 2026-05-23 (P1-6 audit): fallback ANTERIOR usava current_banca pra
+      // unit_value tier — se banca caiu entre emit/settle (ex: 100→60), tier
+      // virava R$0.80 (was R$1.00) → losses subcharged, wins underpaid. Now
+      // fallback usa INITIAL_BANCA (ratio=1.0 sempre = tier base R$1.00) —
+      // estimativa baseline conservadora quando stake_reais não persistido.
+      // Tips legacy pre-mig 026 sem stored stake_reais settle com magnitude
+      // consistente independente de bankroll fluctuation.
       const _storedStake = parseFloat(tip.stake_reais);
       const stakeR = (Number.isFinite(_storedStake) && _storedStake > 0)
         ? _storedStake
         : (() => {
             const { getSportUnitValue } = require('./lib/sport-unit');
             const bk = stmts.getBankroll.get(sport);
-            const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+            const initial = bk?.initial_banca || 100;
+            // ratio=1.0 → base tier (R$1.00 default). Não usa current_banca
+            // pra evitar subcharge/overcharge se bankroll fluctuated.
+            const uv = getSportUnitValue(initial, initial);
             const su = parseFloat(String(tip.stake || '1').replace('u','').replace(',','.')) || 1;
             return parseFloat((su * uv).toFixed(2));
           })();
@@ -8002,7 +8012,11 @@ const server = http.createServer(async (req, res) => {
       const _ctok = _ctokRow?.count || 0;
       const _calls = _callsRow?.count || 0;
       let _costUSD = (_ptok / 1_000_000 * 0.14) + (_ctok / 1_000_000 * 0.28);
-      if (_costUSD === 0 && _calls > 0) _costUSD = _calls * 0.000168;
+      // 2026-05-23 (P2-1 audit): fallback dsCalls * 0.000168 REMOVIDO. Post commit
+      // f649bea, `deepseek` counter inclui failed attempts (429s/empty). Fallback
+      // por call-count inflava custo c/ failures, podendo false-trigger
+      // AI_MONTHLY_BUDGET_USD cap. Custo agora token-only — sub-conta successful
+      // calls sem `usage` field (rare DeepSeek edge case) mas evita cap erroneo.
       const _bcStr = process.env.AI_MONTHLY_BUDGET_USD;
       const _budgetCap = _bcStr !== undefined ? parseFloat(_bcStr) : 10;
       const _cap = Number.isFinite(_budgetCap) && _budgetCap > 0 ? _budgetCap : null;
@@ -28253,8 +28267,13 @@ load();
               // Quando opt-in: match LIKE com line suffix (::lnXNN) exato → bloqueia
               // apenas exact-dup; line moveu = match_id LIKE não bate → escapa.
               // Quando opt-out (default): wildcard ::ln% bloqueia ambos exact+drift.
-              const _likePattern = _allowLineDrift
-                ? `${_baseMid}::mt::%::${_sideForDedup}::ln${String(matchId).match(/::ln([^:]+)/)?.[1] || '?'}%`
+              // 2026-05-23 (P1-10 audit): fix regex collapse — quando matchId NÃO
+              // tem ::ln suffix (ML/draw markets), `?.[1] || '?'` virava `::ln?%`
+              // e SQLite LIKE trata `?` como wildcard single-char → over+under-match.
+              // Now: se line absent, fallback pra wildcard pattern (same as opt-out).
+              const _lineSuffix = String(matchId).match(/::ln([^:]+)/)?.[1];
+              const _likePattern = (_allowLineDrift && _lineSuffix)
+                ? `${_baseMid}::mt::%::${_sideForDedup}::ln${_lineSuffix}%`
                 : `${_baseMid}::mt::%::${_sideForDedup}%`;
               // 2026-05-23 ZOMBIE FIX: incluir archived=1 + result=null (zombies).
               // Root cause tip 4176: auto-archive (admin/repair) archivou tip 4063
@@ -36615,10 +36634,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             const dsCalls = callsRow?.count || 0;
             // Custo conhecido a partir de tokens
             let costUSD = (ptok / 1_000_000 * 0.14) + (ctok / 1_000_000 * 0.28);
-            // Fallback: se tokens não registrados mas calls > 0, estima
-            if (costUSD === 0 && dsCalls > 0) {
-              costUSD = dsCalls * 0.000168;
-            }
+            // 2026-05-23 (P2-1 audit): fallback dsCalls * 0.000168 REMOVIDO.
+            // Post commit f649bea, `deepseek` counter inclui failed attempts
+            // (429/empty). Fallback inflava cost com failures → cap false-trigger
+            // após primeiro hit no mês. Cap agora token-only (real billing).
+            // /cost-summary (server.js:30360) ainda mostra estimate pra visibility.
             if (costUSD >= _budgetCap) {
               try { stmts.incrApiUsage.run('deepseek_blocked_by_budget_cap', month); } catch (_) {}
               log('WARN', 'AI', `Budget cap reached: $${costUSD.toFixed(4)} >= $${_budgetCap} (mês ${month}) — blocking /claude. Set AI_MONTHLY_BUDGET_USD=0 pra desativar cap.`);
