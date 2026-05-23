@@ -8695,9 +8695,16 @@ setInterval(load, 10000);
       return;
     }
     try {
+      // 2026-05-23 (P0-4 audit): resolveAlias para tips com match_id 'agg_*'
+      // (aggregator BR). Sem isso, /football-result settle falha em Tentativa 1
+      // (exact match) e degrada pra fuzzy ±4d que pode wrong-match.
+      // resolveAlias mantém pass-through para non-agg IDs.
+      const canonicalMid = matchId
+        ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, matchId, 'football'); } catch (_) { return matchId; } })()
+        : null;
       // 1) Tentativa por match_id exato (caso o ID já esteja indexado na DB)
-      let row = matchId
-        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = 'football' LIMIT 1").get(matchId)
+      let row = canonicalMid
+        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = 'football' LIMIT 1").get(canonicalMid)
         : null;
 
       // 2) Fuzzy por nome dos times + janela de ±4 dias em torno de sentAt
@@ -10028,6 +10035,85 @@ setInterval(load, 10000);
           MATCH_ID_ALIAS_DATE_WINDOW: process.env.MATCH_ID_ALIAS_DATE_WINDOW || '2 (default)',
         },
         hint: 'Alias com confidence ~0.80-0.85 vale double-check. Delete falso match: DELETE FROM match_id_aliases WHERE alias = ? AND game = ?.',
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
+  // 2026-05-23 (P1-1 audit): trace settlement audit history para tip específica.
+  // Investigar dedup escape (tip 4176): tip 4063 + 4176 identical match_id mas
+  // existingCross não fire pra tennis. Hipótese top: 4063 archived=1 momentaneamente
+  // → todas 3 dedup layers (recentDupe, existingCross, Fix A) filtram archived=0.
+  // Endpoint mostra tip_settlement_audit trail + current state + adjacent timeline.
+  // GET /admin/tip-audit?tipId=N&key=<KEY>
+  if (p === '/admin/tip-audit') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const tipId = parseInt(parsed.query.tipId || parsed.query.tip_id || '0', 10);
+    if (!tipId) { sendJson(res, { ok: false, error: 'tipId obrigatório' }, 400); return; }
+    try {
+      const tip = db.prepare(`SELECT * FROM tips WHERE id = ?`).get(tipId);
+      if (!tip) { sendJson(res, { ok: false, error: 'tip não encontrado' }, 404); return; }
+
+      // Audit trail from tip_settlement_audit
+      let audit = [];
+      try {
+        audit = db.prepare(`
+          SELECT id, tip_id, prev_result, new_result, prev_profit_reais, new_profit_reais,
+                 actor, reason, source, created_at
+            FROM tip_settlement_audit
+           WHERE tip_id = ?
+           ORDER BY created_at DESC
+        `).all(tipId);
+      } catch (e) { audit = [{ err: e.message }]; }
+
+      // Find sibling tips with same match_id (potential duplicates)
+      const siblings = db.prepare(`
+        SELECT id, sport, market_type, tip_participant, is_shadow, archived, result, sent_at, settled_at
+          FROM tips
+         WHERE match_id = ?
+         ORDER BY id DESC LIMIT 20
+      `).all(tip.match_id);
+
+      // Find tips emitted ±10min around this tip for context
+      const adjacent = db.prepare(`
+        SELECT id, sport, market_type, tip_participant, match_id, is_shadow, archived, result, sent_at
+          FROM tips
+         WHERE sport = ?
+           AND sent_at BETWEEN datetime(?, '-10 minutes') AND datetime(?, '+10 minutes')
+         ORDER BY sent_at ASC LIMIT 15
+      `).all(tip.sport, tip.sent_at, tip.sent_at);
+
+      // Check if alias resolver has entry for this match_id
+      let aliasEntry = null;
+      try {
+        aliasEntry = db.prepare(`
+          SELECT alias, canonical_match_id, confidence, resolved_by, created_at
+            FROM match_id_aliases
+           WHERE alias = ? OR canonical_match_id = ?
+        `).all(tip.match_id, tip.match_id);
+      } catch (_) { aliasEntry = []; }
+
+      sendJson(res, {
+        ok: true,
+        tip: {
+          id: tip.id, sport: tip.sport, match_id: tip.match_id,
+          market_type: tip.market_type, tip_participant: tip.tip_participant,
+          odds: tip.odds, ev: tip.ev, stake: tip.stake,
+          is_shadow: tip.is_shadow, archived: tip.archived, result: tip.result,
+          sent_at: tip.sent_at, settled_at: tip.settled_at,
+          profit_reais: tip.profit_reais,
+          emission_source: (() => { try { return tip.tip_context_json ? JSON.parse(tip.tip_context_json)?.emission_source : null; } catch (_) { return null; } })(),
+        },
+        audit_trail: audit,
+        sibling_tips_same_match_id: siblings,
+        adjacent_tips_same_sport_pm10min: adjacent,
+        alias_resolver_entries: aliasEntry,
+        hint: siblings.length > 1
+          ? `${siblings.length} tips compartilham match_id — verifique se são duplicates (mesma market+participant+is_shadow) OR variants legítimas (diff lines, hedge sides)`
+          : 'tip único pra este match_id',
       });
     } catch (e) {
       sendJson(res, { ok: false, error: e.message }, 500);
@@ -36074,6 +36160,21 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const r = await aiPost('deepseek', 'https://api.deepseek.com/v1/chat/completions', dsPayload, {
           'Authorization': `Bearer ${DEEPSEEK_KEY}`
         }, { timeoutMs: 30000, retry: { maxAttempts: 3 } });
+        // 2026-05-23 (P0-5 audit): tracking — OCR slip parsing escapava counter
+        // (Memory project_ai_tracking_bug). Cobre AI_MONTHLY_BUDGET_USD cap
+        // accuracy. Tokens em sucesso apenas (billing).
+        try {
+          const _month = new Date().toISOString().slice(0, 7);
+          stmts.incrApiUsage.run('deepseek', _month);
+          stmts.incrApiUsage.run('deepseek_ocr', _month);
+          const _rj = r ? safeParse(r.body, {}) : {};
+          const _ptok = _rj?.usage?.prompt_tokens || 0;
+          const _ctok = _rj?.usage?.completion_tokens || 0;
+          if (_ptok || _ctok) {
+            db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_prompt_tokens', _month, _ptok);
+            db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_completion_tokens', _month, _ctok);
+          }
+        } catch (_) { /* tracking best-effort */ }
 
         const j = safeParse(r && r.body, null);
         const content = String(j?.choices?.[0]?.message?.content || '').trim();
