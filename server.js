@@ -38850,35 +38850,40 @@ server.listen(PORT, '0.0.0.0', () => {
     const archiveOrphanNonML = () => {
       try {
         const ph = ML_MARKETS_LIST.map(() => '?').join(',');
-        // 2026-05-01: threshold 48h→36h. MAP{N}_WINNER non-sweep ficavam pingando
-        // SETTLE-GUARD WARN por 48h mesmo sem chance de resolução. 36h é alinhado
-        // com tennis ZOMBIE_THRESHOLD (36h). TOTAL_KILLS_MAP* mantém 48h pra dar
-        // chance de PandaScore retro-fetch (kills resolvable até final do torneio).
+        // 2026-05-23 (Bug 3 fix): threshold 36h → 168h (7d). Causa: cron archiveOrphanNonML
+        // não distinguia orphans reais (routing bug) de MT tips legítimas pending
+        // > 36h. Bug arquitetural settle (match_id namespace mismatch agg_* vs
+        // match_results, memory project_shadow_stuck_root_cause_2026_05_23) deixa
+        // tennis HG / football TOTAL / cs MAPN_WINNER / dota2 MAP1_WINNER em pending
+        // longo — arquivava 31+ tips reais como zombies em 7d. Alinha com dedup
+        // zombie cleanup threshold (commit 87ffd50). Quando Bug 1 (settle) for
+        // resolvido, considerar voltar threshold pra valor menor.
         const r = db.prepare(
           `UPDATE tips SET archived = 1
            WHERE result IS NULL
              AND (archived IS NULL OR archived = 0)
-             AND sent_at <= datetime('now', '-36 hours')
+             AND sent_at <= datetime('now', '-168 hours')
              AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})
              AND upper(COALESCE(market_type, '')) NOT LIKE 'TOTAL_KILLS_MAP%'`
         ).run(...ML_MARKETS_LIST);
-        // TOTAL_KILLS_MAP separado: 48h
+        // TOTAL_KILLS_MAP separado: 168h também (alinhado com non-ML — kills
+        // resolvable até final do torneio, mas torneios duram >48h tier-1).
         const rk = db.prepare(
           `UPDATE tips SET archived = 1
            WHERE result IS NULL
              AND (archived IS NULL OR archived = 0)
-             AND sent_at <= datetime('now', '-48 hours')
+             AND sent_at <= datetime('now', '-168 hours')
              AND upper(COALESCE(market_type, '')) LIKE 'TOTAL_KILLS_MAP%'`
         ).run();
         const total = r.changes + rk.changes;
         if (total > 0) {
-          log('INFO', 'NON-ML-AUTOARCHIVE', `${total} non-ML orphan tip(s) arquivada(s) (${r.changes} non-ML ≥36h, ${rk.changes} kills_map ≥48h)`);
+          log('INFO', 'NON-ML-AUTOARCHIVE', `${total} non-ML orphan tip(s) arquivada(s) (${r.changes} non-ML ≥168h, ${rk.changes} kills_map ≥168h)`);
         }
       } catch (e) { log('ERROR', 'NON-ML-AUTOARCHIVE', e.message); }
     };
     setTimeout(archiveOrphanNonML, 3 * 60 * 1000);
     setInterval(_wrapServerCron('non_ml_autoarchive', archiveOrphanNonML), 60 * 60 * 1000);
-    log('INFO', 'NON-ML-AUTOARCHIVE', 'Cron ativo: hourly, threshold 36h non-ML / 48h kills_map');
+    log('INFO', 'NON-ML-AUTOARCHIVE', 'Cron ativo: hourly, threshold 168h non-ML / 168h kills_map');
   }
 });
 
