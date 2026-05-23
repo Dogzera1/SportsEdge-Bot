@@ -3346,6 +3346,38 @@ const migrations = [
       addColumnIfMissing(db, 'market_tips_shadow', 'clv_history', 'clv_history TEXT');
     },
   },
+  {
+    id: '126_match_id_aliases',
+    up(db) {
+      // 2026-05-23: Resolver namespace mismatch entre tips emitidas pelo aggregator
+      // BR (match_id 'agg_<slug>') e match_results sources (espn_/sofa_/api_/csv_).
+      // Audit shadow stuck root cause: 59 football tips + 23 mma + 76 tennis nunca
+      // settled porque settle lookup era WHERE match_id = ? AND game = ? (exact)
+      // e agg_* nunca bate com canonical IDs em match_results.
+      //
+      // lib/match-id-resolver.js fuzzy match team1/team2/data em match_results,
+      // popula esta tabela quando score>=0.80. Settle path consulta alias antes
+      // de declarar no_match.
+      //
+      // PK (alias, game) idempotente — INSERT OR IGNORE no resolver.
+      // confidence>=0.80 default; threshold env-override em MATCH_ID_ALIAS_MIN_SCORE.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS match_id_aliases (
+          alias TEXT NOT NULL,
+          game TEXT NOT NULL,
+          canonical_match_id TEXT NOT NULL,
+          resolved_by TEXT,
+          confidence REAL,
+          created_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (alias, game)
+        );
+        CREATE INDEX IF NOT EXISTS idx_match_id_aliases_canonical
+          ON match_id_aliases(canonical_match_id, game);
+        CREATE INDEX IF NOT EXISTS idx_match_id_aliases_created
+          ON match_id_aliases(game, created_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

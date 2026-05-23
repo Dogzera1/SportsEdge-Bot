@@ -4770,10 +4770,17 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       const isMapMarket = tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type);
 
       const game = deriveGame(tip);
-      // Tentativa 1: match_id exato — funciona pra MAP markets (match_results
-      // armazena dota2_ps_*_MAP1 quando /dota-result resolve o mapa).
-      let row = tip.match_id
-        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(tip.match_id, game)
+      // 2026-05-23: resolveAlias trata aggregator BR (match_id 'agg_*' que NUNCA
+      // bate match_results canonicalizado em espn_/sofa_/api_). Pass-through pra
+      // non-agg IDs — behavior unchanged. Resolver score>=0.80 + ±2d window.
+      // Memory project_shadow_stuck_root_cause_2026_05_23.
+      const canonicalMatchId = tip.match_id
+        ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, tip.match_id, game); } catch (_) { return tip.match_id; } })()
+        : null;
+      // Tentativa 1: match_id exato (resolved se agg_*) — funciona pra MAP markets
+      // (match_results armazena dota2_ps_*_MAP1 quando /dota-result resolve o mapa).
+      let row = canonicalMatchId
+        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(canonicalMatchId, game)
         : null;
 
       // Tentativa 2: fuzzy — só pra ML (MAP tips NÃO podem fallback, senão
@@ -9942,6 +9949,89 @@ setInterval(load, 10000);
         related: ['/admin/football-settle-diag', '/admin/sofascore-proxy-health', '/sync-football-sofascore', '/sync-football-espn'],
       });
     })().catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+
+  // 2026-05-23: audit trail de match_id_aliases auto-resolved pelo
+  // lib/match-id-resolver. Mostra recent aliases pra revisar matches
+  // fuzzy team1/team2/data antes de confiar settle. Confidence baixa
+  // = candidate manual review (delete via SQL OR /admin/alias-delete).
+  // GET /admin/alias-audit?days=7&game=football&min_confidence=0.80&key=<KEY>
+  if (p === '/admin/alias-audit') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
+    const gameFilter = parsed.query.game ? String(parsed.query.game).trim() : null;
+    const minConfRaw = parseFloat(parsed.query.min_confidence);
+    const minConf = Number.isFinite(minConfRaw) && minConfRaw >= 0 && minConfRaw <= 1 ? minConfRaw : 0;
+    try {
+      const conds = [`datetime(a.created_at) >= datetime('now', '-' || ? || ' days')`];
+      const params = [String(days)];
+      if (gameFilter) { conds.push(`a.game = ?`); params.push(gameFilter); }
+      if (minConf > 0) { conds.push(`a.confidence >= ?`); params.push(minConf); }
+
+      const totals = db.prepare(`
+        SELECT
+          COUNT(*) AS total,
+          AVG(confidence) AS avg_confidence,
+          MIN(confidence) AS min_confidence,
+          MAX(confidence) AS max_confidence
+          FROM match_id_aliases a
+         WHERE ${conds.join(' AND ')}
+      `).get(...params);
+
+      const byGame = db.prepare(`
+        SELECT game, COUNT(*) AS n, AVG(confidence) AS avg_conf
+          FROM match_id_aliases a
+         WHERE ${conds.join(' AND ')}
+         GROUP BY game
+         ORDER BY n DESC
+      `).all(...params);
+
+      // Sample com join match_results pra contexto humano.
+      const sample = db.prepare(`
+        SELECT a.alias, a.game, a.canonical_match_id, a.resolved_by, a.confidence,
+               a.created_at, mr.team1, mr.team2, mr.winner, mr.resolved_at
+          FROM match_id_aliases a
+          LEFT JOIN match_results mr ON mr.match_id = a.canonical_match_id AND mr.game = a.game
+         WHERE ${conds.join(' AND ')}
+         ORDER BY a.created_at DESC
+         LIMIT 30
+      `).all(...params);
+
+      // Low-confidence candidates pra review (entre minConf e 0.85).
+      const lowConf = db.prepare(`
+        SELECT a.alias, a.game, a.canonical_match_id, a.confidence, a.created_at,
+               mr.team1, mr.team2
+          FROM match_id_aliases a
+          LEFT JOIN match_results mr ON mr.match_id = a.canonical_match_id AND mr.game = a.game
+         WHERE ${conds.join(' AND ')} AND a.confidence < 0.85
+         ORDER BY a.confidence ASC
+         LIMIT 15
+      `).all(...params);
+
+      sendJson(res, {
+        ok: true,
+        days,
+        filters: { game: gameFilter, min_confidence: minConf || null },
+        totals: {
+          n: totals?.total || 0,
+          avg_confidence: totals?.avg_confidence != null ? +totals.avg_confidence.toFixed(3) : null,
+          min_confidence: totals?.min_confidence != null ? +totals.min_confidence.toFixed(3) : null,
+          max_confidence: totals?.max_confidence != null ? +totals.max_confidence.toFixed(3) : null,
+        },
+        by_game: byGame.map(r => ({ ...r, avg_conf: +r.avg_conf.toFixed(3) })),
+        sample,
+        low_confidence_review: lowConf,
+        config: {
+          MATCH_ID_ALIAS_MIN_SCORE: process.env.MATCH_ID_ALIAS_MIN_SCORE || '0.80 (default)',
+          MATCH_ID_ALIAS_DATE_WINDOW: process.env.MATCH_ID_ALIAS_DATE_WINDOW || '2 (default)',
+        },
+        hint: 'Alias com confidence ~0.80-0.85 vale double-check. Delete falso match: DELETE FROM match_id_aliases WHERE alias = ? AND game = ?.',
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
     return;
   }
 
