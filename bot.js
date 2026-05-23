@@ -24344,6 +24344,11 @@ Máximo 180 palavras.`;
       if (_valNoOddsLive > 0 || _valNoOddsTotal >= 3) {
         log('INFO', 'AUTO-VAL', `no_odds skip: live=${_valNoOddsLive} total=${_valNoOddsTotal} (Pinnacle Guest sem odds embedded — gap esperado em tier3 OU outage; persistente >30min = investigar /valorant-matches)`);
       }
+      // 2026-05-23 diag: cycle summary visibility. Antes só "Iniciando" + "X partidas"
+      // apareciam — gates silent-continue (cooldown/odds-range/stale/drift) absorviam
+      // sem log. Cycle done sempre fires → surface se loop processou matches OR foi
+      // skipped antes do VLR call.
+      log('INFO', 'AUTO-VAL', `Cycle done: relevant=${relevant.length} live=${_hasLiveVal} noOdds=${_valNoOddsLive}/${_valNoOddsTotal} drained=${_drainedVal}`);
     } catch (e) {
       log('ERROR', 'AUTO-VAL', e.message);
       _livePhaseExit('valorant');
