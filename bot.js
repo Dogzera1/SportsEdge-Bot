@@ -4747,7 +4747,10 @@ async function _settleCompletedTipsInner() {
           if (/challenger/i.test(ev)) return 'chall';
           if (/wta 125k|wta125|125k/i.test(ev)) return 'wta125';
           if (/\bitf\b/i.test(ev)) return 'itf';
-          if (/atp rome|atp madrid|atp paris|atp miami|atp indian wells|wta rome|wta madrid|wta paris|wta miami|wta indian wells|roland garros|wimbledon|us open|australian open|french open|grand slam|masters|atp 1000|atp 500|atp 250|wta 1000|wta 500|wta 250/i.test(ev)) return 'main';
+          // 2026-05-23: expandido para cobrir ATP/WTA 250/500 weekly tour por cidade.
+          // Antes: 8 tips Hamburg/Geneva/Strasbourg/Rabat caíam em 'other', subreportando
+          // main_tour stuck nas semanas pré-Slam. Settle/void inalterado — só alerting.
+          if (/(?:atp|wta) (?:rome|madrid|paris|miami|indian wells|geneva|hamburg|lyon|strasbourg|rabat|stuttgart|munich|barcelona|monte[- ]carlo|estoril|houston|delray|rio|buenos aires|cordoba|santiago|adelaide|brisbane|sydney|auckland|montpellier|rotterdam|marseille|dubai|acapulco|s[ãa]o paulo|gstaad|kitzbuhel|umag|los cabos|toronto|cincinnati|winston[- ]salem|tokyo|beijing|shanghai|stockholm|vienna|antwerp|basel|halle|queens|eastbourne|mallorca|bad homburg|berlin|prague|abu dhabi|charleston|warsaw|cluj|hua hin|seoul|ningbo|nanchang|merida|guadalajara|monastir|jiujiang|chennai|hong kong)\b|roland garros|wimbledon|us open|australian open|french open|grand slam|\bmasters\b|atp 1000|atp 500|atp 250|wta 1000|wta 500|wta 250/i.test(ev)) return 'main';
           return 'other';
         };
         // Lazy-load lib MT settle (só usada em tennis ::mt:: orphan path)
