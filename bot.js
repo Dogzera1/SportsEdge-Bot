@@ -28488,8 +28488,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'SHADOW-DRIFT', e.message); }
   }
-  setInterval(() => runShadowVsRealDriftDaily().catch(e => log('ERROR', 'SHADOW-DRIFT', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runShadowVsRealDriftDaily().catch(() => {}), 40 * 60 * 1000);
+  setInterval(_wrapCron('shadow_vs_real_drift', runShadowVsRealDriftDaily), 60 * 60 * 1000);
+  setTimeout(_wrapCron('shadow_vs_real_drift', runShadowVsRealDriftDaily), 40 * 60 * 1000);
 
   // 2026-05-22: AI shadow audit cron — early warning pra AI tips degradando.
   // Memory project_ai_audit_2026_05_22 documentou tennis AI ROI -24.6% / avgEV
@@ -28526,8 +28526,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'AI-AUDIT', e.message); }
   }
-  setInterval(() => runAiShadowAuditDaily().catch(e => log('ERROR', 'AI-AUDIT', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runAiShadowAuditDaily().catch(() => {}), 45 * 60 * 1000);
+  setInterval(_wrapCron('ai_shadow_audit', runAiShadowAuditDaily), 60 * 60 * 1000);
+  setTimeout(_wrapCron('ai_shadow_audit', runAiShadowAuditDaily), 45 * 60 * 1000);
 
   // 2026-05-22: CSA Fase 2 — cron daily roda Cross-Significance Analyzer (lib/cross-significance.js).
   // Memory project_csa_session_2026_05_22 documentou Fase 1 MVP deployed (endpoint /admin/cross-significance).
