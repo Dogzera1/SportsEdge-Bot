@@ -28097,6 +28097,19 @@ load();
             const _sideRaw = String(matchId).match(/::mt::[^:]+::([^:]+)/);
             const _sideForDedup = _sideRaw ? _sideRaw[1] : null;
             if (_baseMid && _sideForDedup) {
+              // 2026-05-23 (#19 Brooksby line-drift policy): opt-in env permite
+              // re-emit quando line mudou (ex: Brooksby +6.5 → +7.5 — mercado
+              // moveu, nova oportunidade). Default OFF preserva dedup estrito.
+              // Hierarquia: MT_ALLOW_LINE_DRIFT_<SPORT> > MT_ALLOW_LINE_DRIFT.
+              const _sportKeyLD = String(sport || '').toUpperCase();
+              const _ldEnvs = [`MT_ALLOW_LINE_DRIFT_${_sportKeyLD}`, 'MT_ALLOW_LINE_DRIFT'];
+              const _allowLineDrift = _ldEnvs.some(k => /^(1|true|yes)$/i.test(String(process.env[k] || '')));
+              // Quando opt-in: match LIKE com line suffix (::lnXNN) exato → bloqueia
+              // apenas exact-dup; line moveu = match_id LIKE não bate → escapa.
+              // Quando opt-out (default): wildcard ::ln% bloqueia ambos exact+drift.
+              const _likePattern = _allowLineDrift
+                ? `${_baseMid}::mt::%::${_sideForDedup}::ln${String(matchId).match(/::ln([^:]+)/)?.[1] || '?'}%`
+                : `${_baseMid}::mt::%::${_sideForDedup}%`;
               const _matchDupe = db.prepare(
                 `SELECT id, tip_participant, result, sent_at FROM tips
                   WHERE sport = ?
@@ -28107,7 +28120,7 @@ load();
                     AND (result IS NULL OR result NOT IN ('void','push'))
                     AND sent_at > datetime('now', '-14 days')
                   ORDER BY id DESC LIMIT 1`
-              ).get(sport, `${_baseMid}::mt::%::${_sideForDedup}%`, marketN_);
+              ).get(sport, _likePattern, marketN_);
               if (_matchDupe) {
                 log('INFO', 'DEDUP',
                   `${sport} MT same match+side pending: existing id=${_matchDupe.id} (${_matchDupe.tip_participant}, sent=${_matchDupe.sent_at}) — skip new emit ${tipParticipant}`);
