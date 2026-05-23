@@ -17098,16 +17098,35 @@ load();
         out.steps.shadow_settle = { ok: true, ...r };
       } catch (e) { out.steps.shadow_settle = { ok: false, error: e.message }; }
 
-      // 2. Auto-archive non-ML órfãs (>48h pending fora de ML_MARKETS)
+      // 2. Auto-archive non-ML órfãs (true orphans — match já jogou mas tip
+      // não settled). 2026-05-23 audit FIX: condição original (>48h) archivava
+      // pre-game MT tips (sent 2-7d antes do kickoff) ANTES do match jogar.
+      // Caso real: tips 4063 (Selekhmeteva +6.5) + 4065 (Tjen +4.5) archived
+      // silently — 3 dedup layers filtram archived=0 → tips 4170/4176 dups emitidas.
+      // FIX: (a) aumentar threshold para 7d (cobre pre-game window 99%),
+      //      (b) skip se match_id base ainda em match_results.future ranges,
+      //      (c) log audit trail via tip_settlement_audit (was silent).
       try {
         const ph = ML_MARKETS_LIST.map(() => '?').join(',');
-        const r = db.prepare(
-          `UPDATE tips SET archived = 1
-           WHERE result IS NULL AND (archived IS NULL OR archived = 0)
-             AND sent_at <= datetime('now', '-48 hours')
-             AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})`
-        ).run(...ML_MARKETS_LIST);
-        out.steps.archive_orphan_non_ml = { ok: true, archived: r.changes };
+        // SELECT candidates primeiro pra log + audit individual
+        const candidates = db.prepare(
+          `SELECT id, sport, match_id, market_type FROM tips
+            WHERE result IS NULL AND (archived IS NULL OR archived = 0)
+              AND sent_at <= datetime('now', '-7 days')
+              AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})`
+        ).all(...ML_MARKETS_LIST);
+        const archStmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
+        const auditStmt = db.prepare(`
+          INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+          VALUES (?, ?, NULL, NULL, NULL, NULL, 'admin', 'auto_archive_non_ml_7d_pending', '/admin/repair')
+        `);
+        let archived = 0;
+        for (const c of candidates) {
+          archStmt.run(c.id);
+          try { auditStmt.run(c.id, c.sport); } catch (_) {}
+          archived++;
+        }
+        out.steps.archive_orphan_non_ml = { ok: true, archived, threshold_days: 7 };
       } catch (e) { out.steps.archive_orphan_non_ml = { ok: false, error: e.message }; }
 
       // 3. Bankroll diff stored vs computed (dry-run sempre, mesmo com apply)
@@ -28207,11 +28226,15 @@ load();
               const _likePattern = _allowLineDrift
                 ? `${_baseMid}::mt::%::${_sideForDedup}::ln${String(matchId).match(/::ln([^:]+)/)?.[1] || '?'}%`
                 : `${_baseMid}::mt::%::${_sideForDedup}%`;
+              // 2026-05-23 ZOMBIE FIX: incluir archived=1 + result=null (zombies).
+              // Root cause tip 4176: auto-archive (admin/repair) archivou tip 4063
+              // antes do match jogar (pre-game >48h). archived=0 filter escapou.
+              // Now: bloqueia se EXISTE tip pendente (archived irrelevant) com mesma
+              // chave — incluindo zombies. Pending = result IS NULL.
               const _matchDupe = db.prepare(
-                `SELECT id, tip_participant, result, sent_at FROM tips
+                `SELECT id, tip_participant, result, sent_at, archived FROM tips
                   WHERE sport = ?
                     AND COALESCE(is_shadow, 0) = 0
-                    AND (archived IS NULL OR archived = 0)
                     AND match_id LIKE ?
                     AND upper(COALESCE(market_type, 'ML')) = ?
                     AND (result IS NULL OR result NOT IN ('void','push'))
@@ -28731,13 +28754,16 @@ load();
         try {
           const _finalIsShadow = _isShadowTip ? 1 : 0;
           if (_finalIsShadow === 0) {
+            // 2026-05-23 ZOMBIE FIX: removido `(archived IS NULL OR archived = 0)`
+            // pra capturar zombies (archived=1 + result=null). Root cause tip 4176
+            // veio de auto-archive prematura (server.js:17105 — fix paralelo) que
+            // arquivou tip 4063 antes do match jogar. Result=null + not void = pending.
             const _finalDupe = db.prepare(
-              `SELECT id, sent_at FROM tips
+              `SELECT id, sent_at, archived FROM tips
                 WHERE sport = ? AND match_id = ?
                   AND upper(COALESCE(market_type, 'ML')) = ?
                   AND tip_participant = ?
                   AND COALESCE(is_shadow, 0) = 0
-                  AND (archived IS NULL OR archived = 0)
                   AND (result IS NULL OR result NOT IN ('void','push'))
                 LIMIT 1`
             ).get(sport, String(matchId), marketN_, tipParticipant);
