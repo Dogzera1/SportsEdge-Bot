@@ -22089,7 +22089,7 @@ Máximo 200 palavras.`;
         // em vez de fbConfig.shadowMode (env sport-level). Server pode rotar tip pra
         // shadow via _autoRouteToShadow (ml_disabled, SHADOW_LEAGUES, ml_bucket_blocked)
         // — helper pega rec.autoShadowed que env-check ignorava.
-        if (_isShadowDispatch(rec, 'football')) {
+        if (_isShadowDispatch(recFb, 'football')) {
           analyzedFootball.set(key, { ts: now, tipSent: true });
           log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} (DB log only)${recFb?.autoShadowed ? ' (auto-shadow)' : ''}`);
           continue;
