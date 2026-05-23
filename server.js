@@ -9710,6 +9710,94 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-23: diag análogo ao tennis-sources-diag — pra football. Motivação:
+  // /admin/sport-detail mostrou football com 59/59 ml_shadow stuck 24h+ (100%
+  // broken) e MMA 22/23 (95%). Investigação revelou que /settle não filtra
+  // is_shadow (commit 2026-05-03), getUnsettledTips não filtra, match_results
+  // tennis tem 38k rows — bug NÃO é shadow filter mas name/match_id mismatch
+  // entre tips e match_results. Esse endpoint expõe estado match_results
+  // football pra confirmar se pipeline está vazio (Sofascore/API-Football
+  // quebrados) ou cheio mas com nomes em formato divergente do tip.
+  // GET /admin/football-settle-diag?days=7&key=<KEY>
+  if (p === '/admin/football-settle-diag') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
+    try {
+      const totalRows = db.prepare(`SELECT COUNT(*) AS n FROM match_results WHERE game = 'football'`).get()?.n || 0;
+      const recentRows = db.prepare(`SELECT COUNT(*) AS n FROM match_results WHERE game = 'football' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')`).get(String(days))?.n || 0;
+      const lastUpsert = db.prepare(`SELECT MAX(datetime(resolved_at)) AS t FROM match_results WHERE game = 'football'`).get()?.t || null;
+      const sampleByLeague = db.prepare(`
+        SELECT league, COUNT(*) AS n, MAX(resolved_at) AS last
+          FROM match_results
+         WHERE game = 'football' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
+         GROUP BY league
+         ORDER BY n DESC
+         LIMIT 30
+      `).all(String(days));
+      const sampleNames = db.prepare(`
+        SELECT team1, team2, winner, resolved_at, league
+          FROM match_results
+         WHERE game = 'football' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
+         ORDER BY resolved_at DESC
+         LIMIT 20
+      `).all(String(days));
+      // Sample dos pendentes pra ver formato do tip (match_id format é critical
+      // pra football — aggregator BR usa 'agg_<slug>' enquanto API-Football usa
+      // numeric IDs; mismatch trava settle).
+      const pendingSample = db.prepare(`
+        SELECT id, participant1, participant2, match_id, sent_at, event_name, market_type, is_shadow
+          FROM tips
+         WHERE sport = 'football' AND result IS NULL
+           AND (archived IS NULL OR archived = 0)
+           AND datetime(sent_at) >= datetime('now', '-' || ? || ' days')
+         ORDER BY sent_at DESC
+         LIMIT 15
+      `).all(String(days));
+      // Sample dos match_ids únicos dos pendentes pra ver prefixos (agg_, fb_, api_...).
+      const pendingMatchIdPrefixes = db.prepare(`
+        SELECT substr(match_id, 1, 8) AS prefix, COUNT(*) AS n
+          FROM tips
+         WHERE sport = 'football' AND result IS NULL
+           AND (archived IS NULL OR archived = 0)
+           AND datetime(sent_at) >= datetime('now', '-' || ? || ' days')
+         GROUP BY substr(match_id, 1, 8)
+         ORDER BY n DESC
+         LIMIT 10
+      `).all(String(days));
+      const shadowStuck = db.prepare(`
+        SELECT COUNT(*) AS n
+          FROM tips
+         WHERE sport = 'football' AND result IS NULL
+           AND (archived IS NULL OR archived = 0)
+           AND is_shadow = 1
+           AND datetime(sent_at) <= datetime('now', '-24 hours')
+      `).get()?.n || 0;
+      sendJson(res, {
+        ok: true,
+        days,
+        match_results_football: { total: totalRows, recent: recentRows, lastUpsert },
+        stuck_shadow_24h: shadowStuck,
+        sources_check: {
+          tip: 'verifique /sync-football-api / /sync-sofascore-football / scripts/sync-football-data-csv',
+          aggregator_note: 'tips com match_id agg_* vêm do aggregator BR (repo separado agregador-odds) — pode ter divergência de naming vs API-Football',
+        },
+        leagues_in_results: sampleByLeague,
+        sample_team_names_in_results: sampleNames,
+        sample_pending_tips: pendingSample,
+        pending_match_id_prefixes: pendingMatchIdPrefixes,
+        hint: totalRows === 0
+          ? 'CRITICO: match_results vazio pra football. Sources não estão populando. Investigar API-Football/Sofascore/CSV sync crons.'
+          : recentRows < 30
+          ? 'BAIXO: poucos rows recentes. Source pode estar lenta ou bloqueada (Sofascore impersonate drift, API-Football quota).'
+          : 'OK: sources populando. Compare team1/team2 names com tip participant1/2 + match_id prefix com aggregator BR pra debug fuzzy match.',
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // 2026-05-05: trace step-by-step pra UMA tip — mostra EXATAMENTE o que o
   // matcher encontra. Usa quando /tennis-settle-debug retorna nearby_name_matches=0
   // mas dados claramente existem. Compara nomes processados pelo matcher.
