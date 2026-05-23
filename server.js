@@ -35900,6 +35900,19 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
               'Authorization': `Bearer ${DEEPSEEK_KEY}`
             }, { timeoutMs: 20000, retry: { maxAttempts: 3 } });
+            // 2026-05-23: tracking — path lol-explain antes escapava counter (Memory
+            // project_ai_tracking_bug_2026_05_23). Increment SEMPRE, tokens só em sucesso.
+            try {
+              const _month = new Date().toISOString().slice(0, 7);
+              stmts.incrApiUsage.run('deepseek', _month);
+              stmts.incrApiUsage.run('deepseek_lol', _month);
+              const _ptok = r ? (safeParse(r.body, {})?.usage?.prompt_tokens || 0) : 0;
+              const _ctok = r ? (safeParse(r.body, {})?.usage?.completion_tokens || 0) : 0;
+              if (_ptok || _ctok) {
+                db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_prompt_tokens', _month, _ptok);
+                db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_completion_tokens', _month, _ctok);
+              }
+            } catch (_) { /* tracking best-effort */ }
             const j = safeParse(r && r.body, null);
             const text = j?.choices?.[0]?.message?.content || '';
             ai = { ok: true, provider: 'deepseek', model: dsPayload.model, text: String(text || '').trim() };
@@ -36438,6 +36451,18 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           'Authorization': `Bearer ${DEEPSEEK_KEY}`,
           'content-type': 'application/json'
         }, { timeoutMs: 45000, retry: { baseDelayMs: 2000, maxDelayMs: 15000, minDelayMs: 1500 } });
+        // 2026-05-23: track ATTEMPT (não wait sucesso) — counter abril+maio mostrava 0
+        // porque 429s/empty bodies retornavam ANTES da increment. /cost-summary +
+        // /health.deepseekAi mostravam calls=0 enganoso; AI_MONTHLY_BUDGET_USD cap
+        // não podia trigger. Increment de attempts é OK porque cost real ainda vem
+        // de tokens (que só existem em sucesso) — failures contribuem só pra
+        // visibility count, não inflam custo computado.
+        try {
+          const _month = new Date().toISOString().slice(0, 7);
+          stmts.incrApiUsage.run('deepseek', _month);
+          const _spRaw = String(payload.sport || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+          if (_spRaw) stmts.incrApiUsage.run(`deepseek_${_spRaw}`, _month);
+        } catch (_) { /* tracking best-effort */ }
         if (!r || r.status !== 200) {
           log('WARN', 'AI', `DeepSeek HTTP ${r?.status || 'fail'} body=${String(r?.body || '').slice(0, 900)}`);
         }
@@ -36451,15 +36476,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           return;
         }
         _emitAiMetric('ok', _sportTag);
-        // Track usage: count + tokens (prompt + completion)
+        // Track tokens (only on success — billing accuracy)
         try {
           const month = new Date().toISOString().slice(0, 7);
-          stmts.incrApiUsage.run('deepseek', month);
-          // Per-sport tracking (bot envia payload.sport no /claude body)
+          // count + sport já incrementados acima (linha ~36441), aqui só tokens.
           const sportRaw = String(payload.sport || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
-          if (sportRaw) {
-            stmts.incrApiUsage.run(`deepseek_${sportRaw}`, month);
-          }
           // Tokens (DeepSeek retorna usage.prompt_tokens + completion_tokens quando disponível)
           const ptok = ds.usage?.prompt_tokens || 0;
           const ctok = ds.usage?.completion_tokens || 0;
