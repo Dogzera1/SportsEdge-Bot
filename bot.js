@@ -23524,6 +23524,8 @@ async function pollValorant(runOnce = false) {
       const _hasLiveVal = relevant.some(m => m.status === 'live');
       try { _metrics.gauge('live_matches', relevant.filter(m => m.status === 'live').length, { sport: 'valorant' }); } catch (_) {}
       _hadLiveVal = _hasLiveVal;
+      // 2026-05-23: populate hadLive/matches no heartbeat — early call L23497 só ping. P5 closure: cross-sport heartbeats sem dados (10 sports) — fix isolado pra valorant primeiro.
+      markPollHeartbeat('valorant', { matches: matches.length, hadLive: _hasLiveVal });
       if (_hasLiveVal) _livePhaseEnter('valorant');
       let _drainedVal = false;
       let _valNoOddsLive = 0, _valNoOddsTotal = 0;
