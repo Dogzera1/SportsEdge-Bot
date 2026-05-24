@@ -10371,6 +10371,106 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-24: bulk diag dos tennis stuck. /admin/tennis-tip-match-debug roda
+  // per-tip; aqui itera TODOS pending tennis ML e agrega por hint. Surface
+  // actionable categorização (players_did_not_meet → void, matcher bug → fix,
+  // date/league filter → tune param). Read-only, admin-gated.
+  // GET /admin/tennis-stuck-bulk-diag?days=7&limit=200&key=<KEY>
+  if (p === '/admin/tennis-stuck-bulk-diag') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10) || 7));
+    const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '200', 10) || 200));
+    try {
+      const tips = db.prepare(`
+        SELECT id, match_id, participant1, participant2, sent_at, event_name, market_type, is_shadow
+          FROM tips
+         WHERE sport = 'tennis'
+           AND result IS NULL
+           AND (archived IS NULL OR archived = 0)
+           AND sent_at >= datetime('now', ?)
+         ORDER BY sent_at DESC
+         LIMIT ?
+      `).all(`-${days} days`, limit);
+      const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
+      const rows = getTennisSettleRowsCached(lookbackDays);
+      const { tennisPairMatchesPlayers, tennisSinglePlayerNameMatch } = require('./lib/tennis-match');
+      const { norm } = require('./lib/utils');
+      const slackMs = Math.max(0, parseInt(process.env.TENNIS_SETTLE_BEFORE_TIP_SLACK_MS || '0', 10) || 0);
+      const buckets = {
+        sources_empty: { count: 0, samples: [] },
+        no_player_in_sources: { count: 0, samples: [] },
+        players_did_not_meet: { count: 0, samples: [] },
+        matcher_bug: { count: 0, samples: [] },
+        date_filter_rejected: { count: 0, samples: [] },
+        league_filter_only: { count: 0, samples: [] },
+        pickbest_found_but_caller_failed: { count: 0, samples: [] },
+        unknown: { count: 0, samples: [] },
+      };
+      for (const tip of tips) {
+        const tipP1Norm = norm(tip.participant1);
+        const tipP2Norm = norm(tip.participant2);
+        const sentRaw = String(tip.sent_at || '').trim();
+        const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
+        let involvingCount = 0;
+        let pairCount = 0;
+        let eligibleByDateCount = 0;
+        let p1Alone = false, p2Alone = false;
+        for (const r of rows) {
+          const t1n = norm(r.team1);
+          const t2n = norm(r.team2);
+          const touchesP1 = t1n.includes(tipP1Norm) || t2n.includes(tipP1Norm) || tipP1Norm.includes(t1n) || tipP1Norm.includes(t2n);
+          const touchesP2 = t1n.includes(tipP2Norm) || t2n.includes(tipP2Norm) || tipP2Norm.includes(t1n) || tipP2Norm.includes(t2n);
+          if (!touchesP1 && !touchesP2) continue;
+          involvingCount++;
+          const sM_p1_t1 = tennisSinglePlayerNameMatch(tip.participant1, r.team1);
+          const sM_p1_t2 = tennisSinglePlayerNameMatch(tip.participant1, r.team2);
+          const sM_p2_t1 = tennisSinglePlayerNameMatch(tip.participant2, r.team1);
+          const sM_p2_t2 = tennisSinglePlayerNameMatch(tip.participant2, r.team2);
+          if ((sM_p1_t1 && !sM_p2_t2) || (sM_p1_t2 && !sM_p2_t1)) p1Alone = true;
+          if ((sM_p2_t1 && !sM_p1_t2) || (sM_p2_t2 && !sM_p1_t1)) p2Alone = true;
+          if (tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.team1, r.team2)) {
+            pairCount++;
+            const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+            const eligibleByDate = Number.isFinite(resMs) && Number.isFinite(tipMs)
+              ? resMs >= tipMs - slackMs : !Number.isFinite(tipMs);
+            if (eligibleByDate) eligibleByDateCount++;
+          }
+        }
+        const pickBest = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
+        const sample = `#${tip.id} ${tip.participant1}/${tip.participant2}${tip.event_name ? ` [${tip.event_name}]` : ''}`;
+        let bucket;
+        if (rows.length === 0) bucket = 'sources_empty';
+        else if (involvingCount === 0) bucket = 'no_player_in_sources';
+        else if (pairCount === 0) bucket = (p1Alone && p2Alone) ? 'players_did_not_meet' : 'matcher_bug';
+        else if (eligibleByDateCount === 0) bucket = 'date_filter_rejected';
+        else if (pickBest?.winner) bucket = 'pickbest_found_but_caller_failed';
+        else bucket = 'league_filter_only';
+        buckets[bucket].count++;
+        if (buckets[bucket].samples.length < 5) buckets[bucket].samples.push(sample);
+      }
+      sendJson(res, {
+        ok: true,
+        scanned: tips.length,
+        days, limit,
+        cache_size: rows.length,
+        buckets,
+        hint: {
+          players_did_not_meet: 'safe to void via /admin/void-tips-batch — pair never played',
+          matcher_bug: 'code fix needed — name normalization OR doubles split',
+          date_filter_rejected: 'resolved_at < sent_at — tune TENNIS_SETTLE_BEFORE_TIP_SLACK_MS OR check sync time lag',
+          league_filter_only: '_tennisLeagueOverlap rejecting valid match — check tipLeague vs row.league',
+          no_player_in_sources: 'ESPN/Sackmann/Sofa NÃO ingested este player — coverage gap (esperado pra Challenger/ITF, anormal pra Slam/1000)',
+          sources_empty: 'cache vazio — investigar sync crons',
+          pickbest_found_but_caller_failed: 'pickBest acha row mas /settle no caller falha — bug downstream',
+        },
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // 2026-05-05: força settle de UM tip — replica server-side o que o bot faria
   // (pickBestTennisSettleRow + settleTipById + bankroll update). Permite drenar
   // backlog tennis sem precisar de curl POST. Só funciona pra tennis ML pendentes.
