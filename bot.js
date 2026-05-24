@@ -1994,6 +1994,45 @@ setInterval(() => {
   } catch (_) {}
 }, 15 * 1000).unref?.();  // 60s→15s: RSS pode subir 30+MB/tick com 244 fb + 267 pin caches
 
+// 2026-05-24: near-heap-limit diag pra capturar V8 OOM silent (FATAL stderr).
+// MEM-GUARD CRIT 260MB > V8 heap_cap 180MB (start.js BOT_HEAP_MB) — CRIT path
+// nunca dispara pra heap. Audit logs 2026-05-24 mostrou boot loop 5min sem
+// uncaughtException no [inf] log — V8 hit cap entre samples 15s. Poll 2s aqui
+// detecta heap > 85% do v8.heap_size_limit (cap real) e escreve snapshot JSON
+// leve (~500B). Próximo boot lê via /admin/boot-diag.last_near_heap_limit.
+let _lastNearHeapWriteAt = 0;
+setInterval(() => {
+  try {
+    const v8mod = require('v8');
+    const stats = v8mod.getHeapStatistics();
+    const limitMb = Math.round(stats.heap_size_limit / 1048576);
+    const usedMb = Math.round(stats.used_heap_size / 1048576);
+    if (limitMb <= 0 || usedMb / limitMb < 0.85) return;
+    // Rate-limit write: 1x/10s pra não martelar FS em loop OOM
+    if (Date.now() - _lastNearHeapWriteAt < 10_000) return;
+    _lastNearHeapWriteAt = Date.now();
+    const m = process.memoryUsage();
+    const snap = {
+      ts: new Date().toISOString(),
+      reason: 'near_heap_limit',
+      uptime_s: Math.round(process.uptime()),
+      pct_heap: Math.round((usedMb / limitMb) * 100),
+      heap_used_mb: usedMb,
+      heap_total_mb: Math.round(stats.total_heap_size / 1048576),
+      heap_limit_mb: limitMb,
+      rss_mb: Math.round(m.rss / 1048576),
+      external_mb: Math.round(m.external / 1048576),
+      array_buffers_mb: Math.round((m.arrayBuffers || 0) / 1048576),
+      malloced_mb: Math.round(stats.malloced_memory / 1048576),
+    };
+    const fs_nh = require('fs');
+    const path_nh = require('path');
+    const dbDir_nh = path_nh.dirname(path_nh.isAbsolute(DB_PATH) ? DB_PATH : path_nh.resolve(DB_PATH));
+    fs_nh.writeFileSync(path_nh.join(dbDir_nh, 'last_near_heap_limit.json'), JSON.stringify(snap));
+    log('ERROR', 'NEAR-HEAP-LIMIT', `heap=${usedMb}/${limitMb}MB (${snap.pct_heap}%) rss=${snap.rss_mb}MB ext=${snap.external_mb}MB — V8 OOM iminente`);
+  } catch (_) {}
+}, 2000).unref?.();
+
 // Helper exportável pra crons checarem se devem skip por mem critical.
 // Usar pattern: if (isMemCritical()) { log(...); return; }
 // 2026-05-15 Sprint 4 #2: checa também state cross-process — se server.js

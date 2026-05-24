@@ -12147,6 +12147,7 @@ setInterval(load, 10000);
           launcher_heartbeat: readJson('launcher_heartbeat.json'),
           last_launcher_exit: readJson('last_launcher_exit.json'),
           last_oom_snapshot: readJson('last_oom_snapshot.json'),
+          last_near_heap_limit: readJson('last_near_heap_limit.json'),
         },
         process: {
           uptime_s: Math.round(process.uptime()),
