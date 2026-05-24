@@ -235,7 +235,17 @@ const PORT = (() => {
   }
   return result;
 })();
-const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
+// 2026-05-24 (audit adversarial P0 #2 hardening): filtra negative IDs (group chat IDs)
+// pra prevenir misconfig vector — se admin pôr group chat.id (negativo) em
+// ADMIN_USER_IDS env, qualquer member do group viraria admin via /reset-tips etc.
+// User IDs Telegram são SEMPRE positivos; bot IDs também. Negative = chat/group/channel.
+const ADMIN_IDS = (() => {
+  const raw = (process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean);
+  const valid = raw.filter(id => { const n = parseInt(id, 10); return Number.isFinite(n) && n > 0; });
+  const rejected = raw.filter(id => !valid.includes(id));
+  if (rejected.length) console.warn(`[BOOT] ADMIN_USER_IDS rejeitou ${rejected.length} entry(s) negativo/inválido (group chat IDs?): ${rejected.join(',')}`);
+  return new Set(valid);
+})();
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
 const _AI_DISABLED = /^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''));
 
@@ -16408,7 +16418,12 @@ async function fetchEspnTennisEvent(tour) {
     const recentResults = [];
     const scheduledMatches = [];
     for (const ev of events) {
-      for (const grp of (ev.groupings || [])) {
+      // 2026-05-24 (audit P1-4 externos): fallback quando ESPN rename groupings.
+      // Historicamente já houve ESPN schema drift — sem fallback parse silencia 0 resultados.
+      const _groupings = (Array.isArray(ev.groupings) && ev.groupings.length)
+        ? ev.groupings
+        : [{ competitions: ev.competitions || [] }];
+      for (const grp of _groupings) {
         for (const comp of (grp.competitions || [])) {
           const state = comp.status?.type?.state;
           // Doubles: ESPN põe 2 atletas em roster[] por competitor; singles tem athlete direto.
