@@ -24,7 +24,7 @@ const db = new Database(path.resolve(DB_PATH), { readonly: true });
 const conds = [
   `result IN ('win','loss')`,
   `created_at >= datetime('now', '-${DAYS} days')`,
-  `sport IN ('lol','dota2','cs2','valorant')`,
+  `sport IN ('lol','dota2','cs','cs2','valorant')`,
   `market IN ('handicap','handicapSets','total')`,
   `best_of IS NOT NULL AND best_of > 0`,
   `line IS NOT NULL`,
