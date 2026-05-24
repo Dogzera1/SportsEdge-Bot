@@ -11530,10 +11530,12 @@ async function autoAnalyzeMatch(token, match) {
     // não disparava o path (user precisava setar AMBOS). Agora qualquer um dispara.
     const _lolAiShadowEnv = String(process.env.LOL_AI_SHADOW || '');
     const _lolAiRealEnv = String(process.env.LOL_AI_REAL || '');
-    const _lolAiActive = /^(1|true|yes)$/i.test(_lolAiShadowEnv) || /^(1|true|yes)$/i.test(_lolAiRealEnv);
+    const _lolAiShadowOn = /^(1|true|yes)$/i.test(_lolAiShadowEnv);
+    const _lolAiRealOn = /^(1|true|yes)$/i.test(_lolAiRealEnv);
+    const _lolAiActive = _lolAiShadowOn || _lolAiRealOn;
     if (match.game === 'lol') {
       if (_lolAiActive) {
-        log('INFO', 'AI-SHADOW', `trigger fire: ${match.team1} vs ${match.team2} (shadow=${_lolAiShadowEnv}|real=${_lolAiRealEnv})`);
+        log('INFO', 'AI-SHADOW', `trigger fire: ${match.team1} vs ${match.team2} (shadow=${_lolAiShadowOn}|real=${_lolAiRealOn})`);
         setImmediate(() => {
           _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
             .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
