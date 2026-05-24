@@ -3784,9 +3784,10 @@ async function runAutoAnalysis() {
           // Portfolio Kelly aplicado central em server.js /record-tip (cross-cycle).
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
+          // 2026-05-24 (audit P1-3): market/league enrich pra tier-aware ev-calibration cascade
           const tipStake = modelPForKelly
-            ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol', confKey: tipConf })
-            : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'lol' });
+            ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol', confKey: tipConf, market: 'ML', league: match.league || match.leagueSlug })
+            : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'lol', market: 'ML', league: match.league || match.leagueSlug });
           // Kelly negativo → não apostar
           if (tipStake === '0u') {
             if (_clvAdjLive.mult === 0) {
@@ -4384,9 +4385,10 @@ async function runAutoAnalysis() {
             // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
             const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
             const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
+            // 2026-05-24 (audit P1-3): market/league enrich pra tier-aware ev-calibration cascade
             const tipStake = modelPForKelly
-              ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol', confKey: tipConf })
-              : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'lol' });
+              ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol', confKey: tipConf, market: 'ML', league: match.league || match.leagueSlug })
+              : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'lol', market: 'ML', league: match.league || match.leagueSlug });
             if (tipStake === '0u') {
               if (_clvAdj.mult === 0) {
                 log('WARN', 'CLV-KELLY', `Shadow por CLV severo: ${match.team1} vs ${match.team2} [${match.league}] CLV ${_clvAdj.avgClv}% n=${_clvAdj.n}`);
@@ -17810,9 +17812,10 @@ Máximo 200 palavras.`;
         kellyFraction = kellyFraction * _steamDota.mult;
       }
       const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
+      // 2026-05-24 (audit P1-3): market/league enrich pra tier-aware ev-calibration cascade
       const tipStake = modelPForKelly
-        ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'dota2', confKey: tipConf })
-        : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'dota2' });
+        ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'dota2', confKey: tipConf, market: 'ML', league: match.league })
+        : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'dota2', market: 'ML', league: match.league });
       if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); _dotaCycleSkips.kelly_neg++; await _sleep(2000); continue; }
 
       const riskAdj = await applyGlobalRisk('dota2', parseFloat(String(tipStake).replace('u', '').replace(',','.')) || 0, match.league);
@@ -23345,7 +23348,8 @@ Máximo 200 palavras.`;
           log('INFO', 'STEAM-BOOST', `cs ${match.team1} vs ${match.team2} ${pickTeam}: mult=${_steamCs.mult} (${_steamCs.evt?.oldOdd}→${_steamCs.evt?.newOdd}, ${_steamCs.evt?.velocityPct}% in ${_steamCs.evt?.windowMin}min)`);
           csKellyFrac = csKellyFrac * _steamCs.mult;
         }
-        const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac, { sport: 'cs', confKey: aiConf || 'MEDIA' });
+        // 2026-05-24 (audit P1-3): market/league enrich pra tier-aware ev-calibration cascade
+        const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac, { sport: 'cs', confKey: aiConf || 'MEDIA', market: 'ML', league: match.league });
         if (stake === '0u') {
           if (_clvAdjCs.mult === 0) {
             log('WARN', 'CLV-KELLY', `Shadow cs por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
@@ -24250,7 +24254,8 @@ Máximo 180 palavras.`;
           log('INFO', 'STEAM-BOOST', `valorant ${match.team1} vs ${match.team2} ${pickTeam}: mult=${_steamVal.mult} (${_steamVal.evt?.oldOdd}→${_steamVal.evt?.newOdd}, ${_steamVal.evt?.velocityPct}% in ${_steamVal.evt?.windowMin}min)`);
           _valKellyFrac = _valKellyFrac * _steamVal.mult;
         }
-        const stake = calcKellyWithP(pickP, pickOdd, _valKellyFrac, { sport: 'valorant', confKey: 'MEDIA' });
+        // 2026-05-24 (audit P1-3): market/league enrich pra tier-aware ev-calibration cascade
+        const stake = calcKellyWithP(pickP, pickOdd, _valKellyFrac, { sport: 'valorant', confKey: 'MEDIA', market: 'ML', league: match.league });
         if (stake === '0u') {
           if (_clvAdjVal.mult === 0) {
             log('WARN', 'CLV-KELLY', `Shadow valorant por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
