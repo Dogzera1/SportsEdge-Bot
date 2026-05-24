@@ -28659,6 +28659,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Tennis MT shadow ~22 tips/dia → janela 6h n=5 detecta direção. DM dedup
   // via _isCycleMuted previne spam. Opt-out: SHADOW_VS_REAL_DRIFT_AUTO=false.
   let _lastShadowDriftMs = 0;
+  // 2026-05-24 audit (causa→fix bridge): drift detector marca sports pra auto-refit
+  // imediato (fora schedule weekly). Consumido por runDriftTriggeredRefit cron 30min.
+  // Cooldown 6h evita refit thrashing. P2-safe: refit calib é causa fix, não sintoma.
+  const _driftTriggeredCalibRefit = new Map(); // sport → triggeredAt timestamp
+  const _lastDriftRefitBySport = new Map();    // sport → lastRefittedAt timestamp
   async function runShadowVsRealDriftDaily() {
     if (/^(0|false|no)$/i.test(String(process.env.SHADOW_VS_REAL_DRIFT_AUTO ?? 'true'))) return;
     const intervalH = Math.max(1, Math.min(24, parseInt(process.env.SHADOW_VS_REAL_DRIFT_INTERVAL_H || '6', 10) || 6));
@@ -28680,14 +28685,62 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           const dReal = `${a.delta_real >= 0 ? '+' : ''}${a.delta_real}pp`;
           return `🩸 ${a.sport}: shadow ${dShadow} (n=${a.n_shadow}) vs real ${dReal} (n=${a.n_real}) — gap ${a.gap_pp}pp`;
         });
-        const msg = `⚠️ *SHADOW vs REAL DRIFT — early warning*\n\nModelo base sangrando, gates ainda mascarando em real:\n\n${lines.join('\n')}\n\nInvestigar causa (regime change? data feed? calib stale?). Knobs: SHADOW_VS_REAL_DRIFT_GAP_PP, _SHADOW_DROP_PP, _WINDOW_DAYS.`;
+        const msg = `⚠️ *SHADOW vs REAL DRIFT — early warning*\n\nModelo base sangrando, gates ainda mascarando em real:\n\n${lines.join('\n')}\n\nInvestigar causa (regime change? data feed? calib stale?). Knobs: SHADOW_VS_REAL_DRIFT_GAP_PP, _SHADOW_DROP_PP, _WINDOW_DAYS.\n\n_Auto-refit calib disparará em <30min (DRIFT_TRIGGERED_REFIT_AUTO)._`;
         const token = resolveAlertsToken();
         if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+      // 2026-05-24 audit (causa→fix bridge): marca sports pra auto-refit imediato.
+      // P2-safe — refit calib é "causa fix" (não "sintoma block"). Cooldown 6h.
+      if (!/^(0|false|no)$/i.test(String(process.env.DRIFT_TRIGGERED_REFIT_AUTO ?? 'true'))) {
+        for (const a of r.alerts) {
+          if (a.sport) _driftTriggeredCalibRefit.set(a.sport, Date.now());
+        }
       }
     } catch (e) { log('ERROR', 'SHADOW-DRIFT', e.message); }
   }
   setInterval(_wrapCron('shadow_vs_real_drift', runShadowVsRealDriftDaily), 60 * 60 * 1000);
   setTimeout(_wrapCron('shadow_vs_real_drift', runShadowVsRealDriftDaily), 40 * 60 * 1000);
+
+  // 2026-05-24 audit (causa→fix bridge): consome flags marcadas por drift detector
+  // e dispara refit calib imediato per sport. Cooldown 6h evita thrashing.
+  // P2-safe: refit calib é causa fix (não auto-disable). Opt-out DRIFT_TRIGGERED_REFIT_AUTO=false.
+  async function runDriftTriggeredRefit() {
+    if (/^(0|false|no)$/i.test(String(process.env.DRIFT_TRIGGERED_REFIT_AUTO ?? 'true'))) return;
+    if (!_driftTriggeredCalibRefit.size) return;
+    if (isMemCritical()) { log('WARN', 'DRIFT-REFIT', 'mem_critical — defer'); return; }
+    const cooldownMs = Math.max(3600000, parseInt(process.env.DRIFT_TRIGGERED_REFIT_COOLDOWN_MS || String(6 * 3600 * 1000), 10) || (6 * 3600 * 1000));
+    const adminKey = process.env.ADMIN_KEY || '';
+    const adminHeaders = adminKey ? { 'x-admin-key': adminKey } : {};
+    for (const [sport, triggeredAt] of _driftTriggeredCalibRefit) {
+      const last = _lastDriftRefitBySport.get(sport) || 0;
+      if (Date.now() - last < cooldownMs) {
+        log('DEBUG', 'DRIFT-REFIT', `${sport}: cooldown active (last ${Math.round((Date.now()-last)/60000)}min ago, need ${cooldownMs/60000}min)`);
+        continue;
+      }
+      // Sport-specific stratify (mirror manual /admin/mt-refit-calib usage)
+      const useStratify = (sport === 'tennis' || sport === 'lol') ? 'tier_side' : '';
+      const qs = `sport=${sport}&days=30&eval_days=14&write=1${useStratify ? `&stratify=${useStratify}` : ''}`;
+      try {
+        log('INFO', 'DRIFT-REFIT', `auto-trigger refit ${sport} (drift detected ${new Date(triggeredAt).toISOString()}, stratify=${useStratify||'none'})`);
+        const r = await serverGet(`/admin/mt-refit-calib?${qs}`, null, adminHeaders).catch(e => ({ error: e.message }));
+        if (r?.ok) {
+          log('INFO', 'DRIFT-REFIT', `${sport}: refit OK written=${r.written || '?'} nSamples=${r.nSamples || 0} train=${r.n_train || 0} eval=${r.n_eval || 0}`);
+          const bt = r.backtest || {};
+          if (bt.pre && bt.post) {
+            log('INFO', 'DRIFT-REFIT', `${sport}: brier ${bt.pre.brier?.toFixed?.(4) || '?'}→${bt.post.brier?.toFixed?.(4) || '?'} | ece ${bt.pre.ece?.toFixed?.(4) || '?'}→${bt.post.ece?.toFixed?.(4) || '?'} | roi ${bt.pre.roi || '?'}→${bt.post.roi || '?'}`);
+          }
+        } else {
+          log('WARN', 'DRIFT-REFIT', `${sport}: refit failed — ${r?.error || JSON.stringify(r).slice(0,150)}`);
+        }
+        _lastDriftRefitBySport.set(sport, Date.now());
+        _driftTriggeredCalibRefit.delete(sport);
+      } catch (e) {
+        log('WARN', 'DRIFT-REFIT', `${sport}: ${e.message}`);
+      }
+    }
+  }
+  setInterval(_wrapCron('drift_triggered_refit', runDriftTriggeredRefit), 30 * 60 * 1000);
+  setTimeout(_wrapCron('drift_triggered_refit', runDriftTriggeredRefit), 10 * 60 * 1000);
 
   // 2026-05-22: AI shadow audit cron — early warning pra AI tips degradando.
   // Memory project_ai_audit_2026_05_22 documentou tennis AI ROI -24.6% / avgEV
