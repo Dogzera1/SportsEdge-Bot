@@ -24179,6 +24179,17 @@ load();
   if (p === '/admin/mt-shadow-by-league') {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    // 2026-05-24 audit (roi-analyst visibility): param source=real era silenciosamente
+    // ignorado — endpoint só lê market_tips_shadow. Retornava dados shadow misleading
+    // o user que pediu real. Reject explícito com hint pra canonical /shadow-readiness.
+    if (parsed.query.source === 'real') {
+      sendJson(res, {
+        ok: false,
+        error: 'source=real_not_supported',
+        hint: 'Este endpoint só lê market_tips_shadow (research universe). Para real (tips table) use /shadow-readiness?source=real&groupBy=sport_market'
+      }, 400);
+      return;
+    }
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
     const minN = Math.max(3, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
