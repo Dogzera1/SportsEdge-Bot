@@ -16408,10 +16408,21 @@ async function fetchEspnTennisRankings() {
   return espnTennisCache;
 }
 
-async function fetchEspnTennisEvent(tour) {
+async function fetchEspnTennisEvent(tour, opts = {}) {
   try {
     const slug = tour === 'WTA' ? 'wta' : 'atp';
-    const j = await tennisData.getScoreboard(slug).catch(() => null);
+    // 2026-05-24 (audit P0-1 externos): pass dates range — sem dates ESPN
+    // retorna SÓ semana corrente. SETTLE-TENNIS pipeline ficava cego pra
+    // Slam/250 R1 sent_at 5-7d atrás → /void-old-pending cron auto-voidava
+    // após 36h cutoff. Default 7d back cobre torneios completos.
+    // Override via opts.dates (YYYYMMDD-YYYYMMDD) OR opts.daysBack.
+    const _dates = opts.dates || (() => {
+      const now = new Date();
+      const back = new Date(now.getTime() - (opts.daysBack || 7) * 24 * 3600 * 1000);
+      const _fmt = (d) => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`;
+      return `${_fmt(back)}-${_fmt(now)}`;
+    })();
+    const j = await tennisData.getScoreboard(slug, { dates: _dates }).catch(() => null);
     const events = Array.isArray(j?.events) ? j.events : [];
     if (!events.length) return null;
 
