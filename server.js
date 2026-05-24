@@ -18354,7 +18354,11 @@ load();
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
           AND result IN ('win','loss','push','void')
-          AND id IN (SELECT MAX(id) FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0 GROUP BY COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)))
+          AND id IN (SELECT COALESCE(
+            MAX(CASE WHEN result IN ('win','loss','push') THEN id END),
+            MAX(CASE WHEN result IS NULL THEN id END),
+            MAX(id)
+          ) FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0 GROUP BY COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)))
       `;
       const deduped = db.prepare(dedupedSql).all(...sportSet, ...sportSet);
       const sumDeduped = deduped.reduce((s, t) => s + Number(t.profit_reais || 0), 0);
@@ -33939,7 +33943,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     // Fix: espelha outer is_shadow filter no inner dedup — dedup acontece DENTRO
     // do universo shadow ou real, nunca cross-universe.
     const dedupShadowFilter = includeShadow ? '' : ' AND COALESCE(tdx.is_shadow, 0) = 0';
-    const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0)${dedupShadowFilter} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    // 2026-05-24 audit (user-report): dedup MAX(id) ignorava result quality.
+    // Caso real: #4063 (loss, sent 21/05) + #4176 (void dedup, sent 23/05) mesmo
+    // match_id (HG +6.5 Kostyuk/Selekhmeteva) → MAX(id)=4176 → dashboard mostrava
+    // R$0 (void) em vez de -R$0.50 (loss real). Outros 6 casos confirmed in audit.
+    // Fix: priority dedup — win/loss/push (outcome real) > null (pending) > void.
+    // Dentro de cada tier, MAX(id) como antes.
+    const dedupSql = `t.id IN (SELECT COALESCE(
+      MAX(CASE WHEN tdx.result IN ('win','loss','push') THEN tdx.id END),
+      MAX(CASE WHEN tdx.result IS NULL THEN tdx.id END),
+      MAX(tdx.id)
+    ) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0)${dedupShadowFilter} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     // 2026-05-22 audit P4: expose emission_source via json_extract pra dashboard
     // diferenciar tips AI-emitted vs deterministic. Hoje fica em tip_context_json
     // mas dashboard/tools precisam coluna top-level. Memory: project_ai_audit_2026_05_22.
