@@ -27476,6 +27476,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }, 30 * 1000);
 
   setInterval(_wrapCron('model_calibration', runModelCalibrationCycle), 24 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('model_calibration', runModelCalibrationCycle), 30 * 60 * 1000); // boot-fire 30min — fix audit 2026-05-24
   setInterval(_wrapCron('path_guard', runPathGuardCycle), 6 * 60 * 60 * 1000);
   setTimeout(_wrapCron('path_guard', runPathGuardCycle), 30 * 60 * 1000);
 
@@ -28367,6 +28368,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch (e) { log('ERROR', 'TENNIS-CALIB-REFIT', e.message); }
   }
   setInterval(_wrapCron('tennis_calib_refit', runTennisCalibRefitDaily), 60 * 60 * 1000);
+  setTimeout(_wrapCron('tennis_calib_refit', runTennisCalibRefitDaily), 8 * 60 * 1000); // boot-fire 8min — fix audit 2026-05-24
   setTimeout(() => runTennisCalibRefitDaily().catch(() => {}), 95 * 60 * 1000);
 
   // 2026-05-14: rotation policy — archive (NÃO delete) tips/market_tips_shadow
@@ -28400,6 +28402,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch (e) { log('ERROR', 'ROTATION', e.message); }
   }
   setInterval(_wrapCron('rotation_policy', runRotationPolicyCycle), 24 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('rotation_policy', runRotationPolicyCycle), 15 * 60 * 1000); // boot-fire 15min — fix audit 2026-05-24
   setTimeout(() => runRotationPolicyCycle().catch(() => {}), 110 * 60 * 1000);
 
   // Tennis MT real promote readiness watch — DM admin quando verdict virar READY.
@@ -28439,6 +28442,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch (e) { log('ERROR', 'TENNIS-MT-WATCH', e.message); }
   }
   setInterval(_wrapCron('tennis_mt_readiness_watch', runTennisMtReadinessWatch), 12 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('tennis_mt_readiness_watch', runTennisMtReadinessWatch), 20 * 60 * 1000); // boot-fire 20min — fix audit 2026-05-24
   setTimeout(() => runTennisMtReadinessWatch().catch(() => {}), 100 * 60 * 1000);
 
   // Tennis MT REAL health watch — DM admin se métricas degradarem.
@@ -28518,6 +28522,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch (e) { log('ERROR', 'TENNIS-MT-HEALTH', e.message); }
   }
   setInterval(_wrapCron('tennis_mt_real_health_watch', runTennisMtRealHealthWatch), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('tennis_mt_real_health_watch', runTennisMtRealHealthWatch), 15 * 60 * 1000); // boot-fire 15min — fix audit 2026-05-24 (cron was 18.6h stale)
   setTimeout(() => runTennisMtRealHealthWatch().catch(() => {}), 105 * 60 * 1000);
 
   // Esports MT calib refit daily (05h local). Multi-sport (lol/cs2/dota2/valorant).
@@ -28619,6 +28624,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     }
   }
   setInterval(_wrapCron('esports_calib_refit', runEsportsCalibRefitDaily), 60 * 60 * 1000);
+  setTimeout(_wrapCron('esports_calib_refit', runEsportsCalibRefitDaily), 8 * 60 * 1000); // boot-fire 8min — fix audit 2026-05-24
   setTimeout(() => runEsportsCalibRefitDaily().catch(() => {}), 100 * 60 * 1000);
 
   // ROI drift CUSUM diário (09h local, depois do Kelly tune). Detecta sport
