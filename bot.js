@@ -23502,12 +23502,16 @@ Máximo 200 palavras.`;
         // 'ALTA' (default): só Elo com ≥20 jogos ambos lados.
         // 'ALTA_MEDIA': ALTA + MÉDIA (factors≥2).
         // 'ALL': sem filtro.
-        const confAllowed = CS_LIVE_CONF === 'ALL'
-          || (CS_LIVE_CONF === 'ALTA' && conf === 'ALTA')
-          || (CS_LIVE_CONF === 'ALTA_MEDIA' && (conf === 'ALTA' || conf === 'MÉDIA'));
-        if (!confAllowed) {
-          log('INFO', 'AUTO-CS', `[GATE ${CS_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido`);
-          continue;
+        // 2026-05-24 (mirror VAL fix): gate SÓ aplica em live tips (env name diz LIVE_CONF).
+        // Pre tips sempre DM se !shadow — evita ghost real bets sem visibility.
+        if (isLiveCs) {
+          const confAllowed = CS_LIVE_CONF === 'ALL'
+            || (CS_LIVE_CONF === 'ALTA' && conf === 'ALTA')
+            || (CS_LIVE_CONF === 'ALTA_MEDIA' && (conf === 'ALTA' || conf === 'MÉDIA'));
+          if (!confAllowed) {
+            log('INFO', 'AUTO-CS', `[GATE ${CS_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido (live)`);
+            continue;
+          }
         }
 
         // 2026-05-16 audit adversarial #1: live odds drift guard cross-sport.
@@ -24406,12 +24410,19 @@ Máximo 180 palavras.`;
           continue;
         }
 
-        const confAllowed = VAL_LIVE_CONF === 'ALL'
-          || (VAL_LIVE_CONF === 'ALTA' && conf === 'ALTA')
-          || (VAL_LIVE_CONF === 'ALTA_MEDIA' && (conf === 'ALTA' || conf === 'MÉDIA'));
-        if (!confAllowed) {
-          log('INFO', 'AUTO-VAL', `[GATE ${VAL_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido`);
-          continue;
+        // 2026-05-24 user-report fix: env NAME diz VALORANT_LIVE_CONF mas gate
+        // aplicava em pre também → user reportou "tip real no dashboard mas
+        // sem DM Telegram". Real bet sem DM = ghost. Semantic correto: gate
+        // SÓ filtra live tips (mais ruidosos); pre tips sempre DM se !shadow.
+        // Para filtrar pre conf use future VALORANT_PRE_CONF env (separate).
+        if (isLiveVal) {
+          const confAllowed = VAL_LIVE_CONF === 'ALL'
+            || (VAL_LIVE_CONF === 'ALTA' && conf === 'ALTA')
+            || (VAL_LIVE_CONF === 'ALTA_MEDIA' && (conf === 'ALTA' || conf === 'MÉDIA'));
+          if (!confAllowed) {
+            log('INFO', 'AUTO-VAL', `[GATE ${VAL_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido (live)`);
+            continue;
+          }
         }
 
         // 2026-05-16 audit adversarial #1: live odds drift guard cross-sport.
