@@ -23307,17 +23307,19 @@ Máximo 200 palavras.`;
 
         // Stage boost: IEM Major Final → ×1.15, IEM Katowice/Cologne → ×1.10
         // + §5b Stakes context (showmatch/exhibition deflate; decider boost)
-        // Kelly fracional dinâmico: trained conf alta → aumenta Kelly frac (tip mais confiável
-        // merece mais stake); trained conf baixa ou IA override (BAIXA) → reduz.
-        // Base 1/8. Range [1/16, 1/5]. Só quando trained model disponível.
-        let csKellyFrac = 1/8;
+        // 2026-05-24 (audit P0-1 financial): base via getKellyFraction respeita
+        // env hierarchy KELLY_CS_<MARKET>_<CONF> > KELLY_CS_<CONF> > KELLY_<CONF>
+        // + tier mult + side mult. Antes hardcoded 1/8 ignorava envs (CS ALTA
+        // n=13 -45% leak persistia com KELLY_CS_ALTA=0.5 sem efeito).
+        // tConf escalação preserva intent histórico (trained conf alta → boost),
+        // mas como Math.max — env override sempre wins se >= escalado.
+        let csKellyFrac = getKellyFraction('cs', aiConf || 'MEDIA', null, match.league);
         if (_csTrainedPrediction?.confidence != null) {
           const tConf = _csTrainedPrediction.confidence;
-          if (aiConf === 'BAIXA') csKellyFrac = 1/16; // override ou downgrade → half stake
-          else if (tConf >= 0.75) csKellyFrac = 1/5;
-          else if (tConf >= 0.65) csKellyFrac = 1/6;
-          else if (tConf >= 0.55) csKellyFrac = 1/7;
-          // else default 1/8
+          if (aiConf === 'BAIXA') csKellyFrac = Math.min(csKellyFrac, 1/16); // BAIXA cap conservador
+          else if (tConf >= 0.75) csKellyFrac = Math.max(csKellyFrac, 1/5);
+          else if (tConf >= 0.65) csKellyFrac = Math.max(csKellyFrac, 1/6);
+          else if (tConf >= 0.55) csKellyFrac = Math.max(csKellyFrac, 1/7);
         }
         try {
           const stage = _esportsMatchStage(match.league || '');
