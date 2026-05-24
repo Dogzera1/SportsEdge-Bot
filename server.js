@@ -28122,6 +28122,17 @@ load();
           const m = String(t.stake || '').match(/(\d+(?:\.\d+)?)/);
           return m ? parseFloat(m[1]) : 0;
         })();
+        // 2026-05-24 audit P1-4: NaN/0 guard quando t.stake provided mas parse falhou.
+        // Antes: t.stake="abcu" ou "0u" silenciosamente virava 0 → tip persistia com
+        // stake=0 → loss path não incrementava bankroll (asymmetric vs win parses).
+        // Reject 400 quando stake string presente mas não parseável OU zero explícito.
+        const _stakeStrRaw = String(t.stake || '').trim();
+        if (_stakeStrRaw && _stakeUnitsCurrent <= 0 && !t.isShadow) {
+          log('WARN', 'RECORD-TIP', `stake parse fail/zero: t.stake="${_stakeStrRaw.slice(0,32)}" → ${_stakeUnitsCurrent}u (sport=${sport} p1=${p1} p2=${p2}) — rejecting real tip pra evitar bankroll asymmetric`);
+          try { require('./lib/metrics').incr('record_tip_stake_invalid', { sport: String(sport || 'unknown') }); } catch (_) {}
+          sendJson(res, { error: 'invalid_stake', received: _stakeStrRaw.slice(0,32), parsed: _stakeUnitsCurrent }, 400);
+          return;
+        }
         // 2026-05-19 audit P0-3: clamp stake units hard cap ANTES de portfolio adjust.
         // /record-tip aceita t.stake string ("50u") direto do payload, baipassando
         // _applyKelly product cap (lib/utils.js MAX_KELLY_FRAC=0.15). Atacante OR bug
