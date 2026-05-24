@@ -28742,6 +28742,37 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('drift_triggered_refit', runDriftTriggeredRefit), 30 * 60 * 1000);
   setTimeout(_wrapCron('drift_triggered_refit', runDriftTriggeredRefit), 10 * 60 * 1000);
 
+  // 2026-05-24 audit (2nd causa→fix bridge): detecta calib JSON files com fittedAt
+  // > N dias → marca em pending Map → runDriftTriggeredRefit consome.
+  // Captura modelo enviesado SEM drift signal explícito (passive staleness).
+  // Caso real: lol-mt-calib.json estava stale ~9 dias antes refit manual recente.
+  async function runCalibStalenessDetector() {
+    if (/^(0|false|no)$/i.test(String(process.env.CALIB_STALENESS_AUTO ?? 'true'))) return;
+    const thresholdDays = Math.max(3, parseInt(process.env.CALIB_STALENESS_THRESHOLD_DAYS || '7', 10) || 7);
+    const path = require('path');
+    const fs = require('fs');
+    const calibFiles = [
+      { sport: 'tennis', file: 'tennis-markov-calib.json' },
+      { sport: 'lol', file: 'lol-mt-calib.json' },
+      { sport: 'cs', file: 'cs-mt-calib.json' },
+    ];
+    for (const { sport, file } of calibFiles) {
+      try {
+        const fp = path.join(__dirname, 'lib', file);
+        if (!fs.existsSync(fp)) continue;
+        const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
+        if (!data.fittedAt) continue;
+        const ageDays = (Date.now() - new Date(data.fittedAt).getTime()) / (24 * 3600 * 1000);
+        if (ageDays >= thresholdDays && !_driftTriggeredCalibRefit.has(sport)) {
+          log('INFO', 'CALIB-STALENESS', `${sport} calib age ${ageDays.toFixed(1)}d ≥ ${thresholdDays}d threshold — marking pending refit (drift bridge will consume)`);
+          _driftTriggeredCalibRefit.set(sport, Date.now());
+        }
+      } catch (e) { log('WARN', 'CALIB-STALENESS', `${sport}: ${e.message}`); }
+    }
+  }
+  setInterval(_wrapCron('calib_staleness', runCalibStalenessDetector), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('calib_staleness', runCalibStalenessDetector), 15 * 60 * 1000);
+
   // 2026-05-22: AI shadow audit cron — early warning pra AI tips degradando.
   // Memory project_ai_audit_2026_05_22 documentou tennis AI ROI -24.6% / avgEV
   // 49% (hallucinated). Refit prompt + P validation aplicados, mas sem
