@@ -332,10 +332,16 @@ function updateEloMatch(homeTeam, awayTeam, winner) {
   return { homeTeam, awayTeam, before: { rH, rA }, after: { newH, newA }, K, homeAdvElo };
 }
 
-/** Escopo SQL: uma linha por partida (MAX(id)); evita duplicatas de match_id no dashboard/ROI.
- * Também filtra archived=0 pra esconder tips contaminadas (pré 2026-04-17, bugs de dedup/Kelly). */
+/** Escopo SQL: uma linha por partida; evita duplicatas de match_id no dashboard/ROI.
+ * Também filtra archived=0 pra esconder tips contaminadas (pré 2026-04-17, bugs de dedup/Kelly).
+ * 2026-05-24 audit (dashboard fix 13ad1ff): priority dedup — win/loss/push > null > void.
+ * Antes MAX(id) puro fazia void mascara loss settled (caso real Kostyuk #4063 vs #4176). */
 function sqlTipsDedupeIdIn(alias, sportParam = '?') {
-  return `${alias}.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport = ${sportParam} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+  return `${alias}.id IN (SELECT COALESCE(
+    MAX(CASE WHEN tdx.result IN ('win','loss','push') THEN tdx.id END),
+    MAX(CASE WHEN tdx.result IS NULL THEN tdx.id END),
+    MAX(tdx.id)
+  ) FROM tips tdx WHERE tdx.sport = ${sportParam} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
 }
 
 /** Filtro simples pra queries que não usam dedupe mas precisam excluir tips arquivadas. */
@@ -34854,7 +34860,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
     // Dedup por match_id só — sem sport — pra coalesce tips duplicadas entre esports↔lol/dota2.
     // FILTRA is_shadow=0 também pra não contaminar view individual com tips shadow.
-    const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) AND COALESCE(tdx.is_shadow, 0) = 0 GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    // 2026-05-24 audit: priority dedup win/loss/push > null > void (consistent w/ /tips-history fix 13ad1ff).
+    const dedupe = `t.id IN (SELECT COALESCE(
+      MAX(CASE WHEN tdx.result IN ('win','loss','push') THEN tdx.id END),
+      MAX(CASE WHEN tdx.result IS NULL THEN tdx.id END),
+      MAX(tdx.id)
+    ) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) AND COALESCE(tdx.is_shadow, 0) = 0 GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     const gameSql = sqlGameFilter('t', sport, effectiveGame);
     // Win rate / ROI excluem void E push (push = refund, não é WIN nem LOSS).
     // 'pushes' contado separadamente pra UI mostrar totais corretos.
