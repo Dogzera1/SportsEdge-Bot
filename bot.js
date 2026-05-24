@@ -17075,13 +17075,17 @@ async function _pollDotaInner(runOnce = false) {
       let dotaLiveContext = '';
       let dotaHasLiveStats = false;
       let od = null; // hoisted — também usado em live-series override fora deste if
+      // hoisted — referenciados no gate "Sem stats live" (L17173) fora deste if
+      let ps = null;
+      let sourceIsRT = false;
+      let isPsMatch = false;
       if (isLive) {
         const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
         const fmtTeam = (team) => (team.players||[]).map(p =>
           `  ${(p.hero||'?').padEnd(14)} ${(p.name||'?').slice(0,12).padEnd(12)} ${p.kills}/${p.deaths}/${p.assists} lvl${p.level} ${g(p.gold)}g`
         ).join('\n');
 
-        const isPsMatch = String(match.id).startsWith('ps_');
+        isPsMatch = String(match.id).startsWith('ps_');
         const [odRes, psRes] = await Promise.allSettled([
           serverGet(`/opendota-live?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`),
           isPsMatch
@@ -17090,13 +17094,13 @@ async function _pollDotaInner(runOnce = false) {
         ]);
 
         od = odRes.status === 'fulfilled' ? odRes.value : null;
-        const ps = psRes.status === 'fulfilled' ? psRes.value : null;
+        ps = psRes.status === 'fulfilled' ? psRes.value : null;
         if (odRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `OpenDota fetch falhou: ${odRes.reason?.message || odRes.reason}`);
         if (isPsMatch && psRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `PS live fetch falhou: ${psRes.reason?.message || psRes.reason}`);
 
         // Mede staleness: Steam RT tem delay ~15s; OpenDota agg ~3min nativo.
         // Se source = opendota-only e gameTime > 5min, dado pode estar muito velho.
-        const sourceIsRT = String(od?._source || '').includes('steam-rt');
+        sourceIsRT = String(od?._source || '').includes('steam-rt');
         const ageHint = sourceIsRT ? '~15s' : (od?.hasPlayerStats ? '~30s' : '~3min anti-cheat');
         log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!od?.hasLiveStats} playerStats=${!!od?.hasPlayerStats} agg=${!!od?.hasAggregateStats} source=${od?._source || '?'} delayEst=${ageHint}${od?.error?` err=${od.error}`:''}`);
         if (_dotaHasSteamRT && od?.hasLiveStats && !sourceIsRT) {
