@@ -27864,16 +27864,7 @@ load();
         // sem registro em tip_settlement_audit — investigação MMA shadow voids 13/05
         // 13:25 ficou impossível de rastrear (forensics retornava voided_entry=null).
         // Agora: capture IDs, write audit per-tip, log IDs no return + console.
-        const realIdsRow = db.prepare(
-          `SELECT id FROM tips WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
-             AND sent_at < datetime('now', ?)`
-        ).all(sport, cutoffExpr);
-        const realIds = realIdsRow.map(x => x.id);
-        const r = db.prepare(
-          `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
-           WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
-             AND sent_at < datetime('now', ?)`
-        ).run(sport, cutoffExpr);
+        //
         // 2026-05-12: shadow tips com match FANTASMA (Pinnacle expôs odds preliminares
         // antes do bracket draw final, depois removeu) NUNCA settlam via match_results.
         // Audit identificou tip#1534 Ostapenko vs Anisimova [WTA Rome R2] stuck 5d
@@ -27887,16 +27878,57 @@ load();
           const globalDays = parseInt(process.env.SHADOW_VOID_DAYS || '14', 10);
           return Number.isFinite(globalDays) && globalDays > 0 ? globalDays : 14;
         })();
+        // 2026-05-24 P0 fix (caso French Open R1 18 tips voidadas pré-match):
+        // antes usava `sent_at < cutoff` puro. Tips emitidas com antecedência
+        // (Slam Pinnacle abre odds 3-4d antes do draw; LoL playoff brackets;
+        // snooker tournaments) caíam no VOID_STUCK_H_<SPORT>=36h e eram
+        // voidadas ANTES do match acontecer.
+        //
+        // Critério novo: usar match_end_at quando populado (record-tip captura
+        // resolved_at se match já terminou na hora da emissão — caso in-play);
+        // se NULL (tip pré-match), fallback pra zombie cutoff = shadowDays
+        // (mesmo do shadow path, default 14d) — match ainda pode resolver,
+        // mas se passou 14d sem chegar é zombie real.
+        //
+        // P5 cross-sport: aplica a TODOS sports via mesma SQL — tennis/lol/
+        // snooker que sofriam, football/mma com threshold >7d eram menos
+        // expostos mas se beneficiam de consistência.
+        const realIdsRow = db.prepare(
+          `SELECT id FROM tips WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
+             AND (
+               (match_end_at IS NOT NULL AND match_end_at < datetime('now', ?))
+               OR (match_end_at IS NULL AND sent_at < datetime('now', '-' || ? || ' days'))
+             )`
+        ).all(sport, cutoffExpr, shadowDays);
+        const realIds = realIdsRow.map(x => x.id);
+        const r = db.prepare(
+          `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
+           WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
+             AND (
+               (match_end_at IS NOT NULL AND match_end_at < datetime('now', ?))
+               OR (match_end_at IS NULL AND sent_at < datetime('now', '-' || ? || ' days'))
+             )`
+        ).run(sport, cutoffExpr, shadowDays);
+        // Shadow path: aplica mesma logic (COALESCE match_end_at, sent_at) usando
+        // shadowDays como cutoff único. Match_end_at < N dias atrás = match
+        // resolveu há tempo e settle falhou; sent_at < N dias atrás c/ end_at
+        // NULL = match nunca aconteceu (fantasma).
         const shadowIdsRow = db.prepare(
           `SELECT id FROM tips WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 1
-             AND sent_at < datetime('now', '-' || ? || ' days')`
-        ).all(sport, shadowDays);
+             AND (
+               (match_end_at IS NOT NULL AND match_end_at < datetime('now', '-' || ? || ' days'))
+               OR (match_end_at IS NULL AND sent_at < datetime('now', '-' || ? || ' days'))
+             )`
+        ).all(sport, shadowDays, shadowDays);
         const shadowIds = shadowIdsRow.map(x => x.id);
         const rShadow = db.prepare(
           `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
            WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 1
-             AND sent_at < datetime('now', '-' || ? || ' days')`
-        ).run(sport, shadowDays);
+             AND (
+               (match_end_at IS NOT NULL AND match_end_at < datetime('now', '-' || ? || ' days'))
+               OR (match_end_at IS NULL AND sent_at < datetime('now', '-' || ? || ' days'))
+             )`
+        ).run(sport, shadowDays, shadowDays);
         // Audit trail: registrar em tip_settlement_audit pra rastreio futuro.
         // Cobre real + shadow. Idempotente (INSERT — no conflict possível).
         try {
