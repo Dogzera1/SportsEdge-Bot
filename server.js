@@ -1179,11 +1179,15 @@ async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
     ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
     : NaN;
   if (!Number.isFinite(tipMs)) tipMs = Date.now();
-  // 2026-05-20 mitigation #2: global rate-limit ANTES de per-anchor.
-  // Qualquer sync respeita min interval cross-anchor — evita 10+ syncs/cycle
-  // por unique anchor days. Default 120s = ~5 syncs/cycle 10min.
-  const globalMinMs = Math.min(600000, Math.max(30000, parseInt(process.env.TENNIS_ESPN_ANY_WINDOW_MIN_MS || '120000', 10) || 120000));
-  if ((Date.now() - _tennisEspnAnyWindowSyncLastMs) < globalMinMs) return 0;
+  // 2026-05-24 (audit P1-5 externos): global rate-limit REMOVED do path per-tip
+  // (aroundSentAt). Antes 120s entre QUALQUER sync causava starvation: 50 tips
+  // pending span 5 dias → 5 anchors distintos → 1º sync, 49 skipam → no_match
+  // 49× → next cycle igual. Per-anchor shouldSkipTennisEspnWindowSync já evita
+  // re-sync mesmo day-window (TTL cache 15min via tennis-data). Global preservado
+  // em syncTennisEspnCompletedRecentSpan + ToMatchResults (cron paths, sem starvation).
+  // Opt-in retorno do global via TENNIS_ESPN_AROUND_GLOBAL_THROTTLE_MS env.
+  const _aroundGlobalMs = parseInt(process.env.TENNIS_ESPN_AROUND_GLOBAL_THROTTLE_MS || '0', 10) || 0;
+  if (_aroundGlobalMs > 0 && (Date.now() - _tennisEspnAnyWindowSyncLastMs) < _aroundGlobalMs) return 0;
   const anchorKey = `day:${utcDayAnchorMs(tipMs)}`;
   if (shouldSkipTennisEspnWindowSync(anchorKey)) return 0;
   _tennisEspnAnyWindowSyncLastMs = Date.now();
