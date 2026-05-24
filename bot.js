@@ -16409,11 +16409,19 @@ async function fetchEspnTennisEvent(tour) {
       for (const grp of (ev.groupings || [])) {
         for (const comp of (grp.competitions || [])) {
           const state = comp.status?.type?.state;
-          const c1 = comp.competitors?.[0]?.athlete?.displayName || '';
-          const c2 = comp.competitors?.[1]?.athlete?.displayName || '';
+          // Doubles: ESPN põe 2 atletas em roster[] por competitor; singles tem athlete direto.
+          // Junta via ' / ' pra bater tips com participant1='A / B'.
+          const _athleteName = (cmp) => {
+            if (Array.isArray(cmp?.roster) && cmp.roster.length >= 2) {
+              return cmp.roster.map(r => r?.athlete?.displayName).filter(Boolean).join(' / ');
+            }
+            return cmp?.athlete?.displayName || cmp?.roster?.[0]?.athlete?.displayName || '';
+          };
+          const c1 = _athleteName(comp.competitors?.[0]);
+          const c2 = _athleteName(comp.competitors?.[1]);
           if (state === 'post') {
             const winnerComp = comp.competitors?.find(c => c.winner === true);
-            const winner = winnerComp?.athlete?.displayName || '';
+            const winner = _athleteName(winnerComp);
             const score = comp.status?.displayClock
               || comp.competitors?.map(c => c.score).join('-')
               || '';
