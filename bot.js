@@ -19425,7 +19425,18 @@ async function pollTennis(runOnce = false) {
                 : { surface: markovSurface };
               const mSp = extractServeProbs(ss1, ss2, rpwOpts);
               if (mSp) {
-                const bestOfMarkov = /grand slam|\[g\]|wimbledon|us open|roland|australian/i.test(match.league || '') ? 5 : 3;
+                // 2026-05-24 audit ATP vs WTA French Open totalGames divergence (-73% vs +44%):
+                // regex anterior matchava 'roland' mas event_name é "ATP French Open - R1" → MISS
+                // → ATP main draw Slam modelado como Bo3 quando reality Bo5. Fix:
+                // (a) add "french open" pattern, (b) require ATP prefix (WTA é sempre Bo3),
+                // (c) exclude qualifiers (Bo3 mesmo em Slam).
+                const bestOfMarkov = (() => {
+                  const _lg = match.league || '';
+                  const _isSlam = /grand slam|\[g\]|wimbledon|us open|french open|roland garros|australian open/i.test(_lg);
+                  const _isAtp = /\batp\b/i.test(_lg);
+                  const _isQuali = /qualifier|qualifying|quali\b/i.test(_lg);
+                  return (_isSlam && _isAtp && !_isQuali) ? 5 : 3;
+                })();
                 const markov = priceTennisMatch({ p1Serve: mSp.p1Serve, p2Serve: mSp.p2Serve, bestOf: bestOfMarkov, iters: 15000 });
                 // 2026-04-28: Markov blend só aplica quando modelConf >= 0.6.
                 // Antes blend 40/60 SEMPRE desfazia isotonic+segment (modelP1
@@ -19661,7 +19672,14 @@ async function pollTennis(runOnce = false) {
                   handicapGames: _maxEvHG,
                   totalGames: _maxEvTG,
                 };
-                const tnBestOfForScan = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
+                // 2026-05-24 audit: mesma classe de bug (vide L19428) — French Open ATP main Bo5.
+                const tnBestOfForScan = (() => {
+                  const _lg = match.league || '';
+                  const _isSlam = /grand slam|\[g\]|wimbledon|us open|french open|roland garros|australian open/i.test(_lg);
+                  const _isAtp = /\batp\b/i.test(_lg);
+                  const _isQuali = /qualifier|qualifying|quali\b/i.test(_lg);
+                  return (_isSlam && _isAtp && !_isQuali) ? 5 : 3;
+                })();
                 // Auto-guard wired: env > DB auto > default 1.50 (shadow leak <1.5).
                 const { minOdd: minOddTn, maxOdd: maxOddTn } = _resolveMtOddBounds('tennis', { defaultMinOdd: 1.50 });
                 // 2026-04-29 Sprint 2.1: gender-aware games shrink. Audit 7d:

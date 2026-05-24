@@ -27390,7 +27390,13 @@ load();
               eloSurface1: elo.eloSurface1 || elo.elo1, eloSurface2: elo.eloSurface2 || elo.elo2,
               gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2,
               surface,
-              bestOf: /grand slam|wimbledon|us open|roland|australian/i.test(league) ? 5 : 3,
+              // 2026-05-24 audit: French Open + ATP-men + main-draw → Bo5 (vide bot.js:19428).
+              bestOf: (() => {
+                const _isSlam = /grand slam|wimbledon|us open|french open|roland garros|australian open/i.test(league || '');
+                const _isAtp = /\batp\b/i.test(league || '');
+                const _isQuali = /qualifier|qualifying|quali\b/i.test(league || '');
+                return (_isSlam && _isAtp && !_isQuali) ? 5 : 3;
+              })(),
               winStreakDiff, wrLast10Diff,
             });
           } else {
@@ -27511,7 +27517,13 @@ load();
               eloOverall1: elo.eloOverall1 || elo.elo1, eloOverall2: elo.eloOverall2 || elo.elo2,
               eloSurface1: elo.eloSurface1 || elo.elo1, eloSurface2: elo.eloSurface2 || elo.elo2,
               gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2, surface,
-              bestOf: /grand slam|wimbledon|us open|roland|australian/i.test(league) ? 5 : 3,
+              // 2026-05-24 audit: French Open + ATP-men + main-draw → Bo5 (vide bot.js:19428).
+              bestOf: (() => {
+                const _isSlam = /grand slam|wimbledon|us open|french open|roland garros|australian open/i.test(league || '');
+                const _isAtp = /\batp\b/i.test(league || '');
+                const _isQuali = /qualifier|qualifying|quali\b/i.test(league || '');
+                return (_isSlam && _isAtp && !_isQuali) ? 5 : 3;
+              })(),
               winStreakDiff, wrLast10Diff,
             });
           } else {
