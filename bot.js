@@ -27166,6 +27166,94 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // mas garante que mesmo bot que sobe já no horário pegue o slot.
   setTimeout(() => runDbBackupCheck().catch(() => {}), 25 * 60 * 1000);
 
+  // ── DM delivery health check: detecta tips real com dm_dispatched_at NULL
+  // após sent_at >5min — Telegram banido (TG403), rate limit OU bot pausado
+  // fica silencioso. Mig 121 populou tips.dm_dispatched_at em todos sendDM
+  // success paths (commit 88e333c). Sem este cron, gap fica invisível até
+  // admin notar tips reais "ghost" (registered mas nunca chegaram no Telegram).
+  // Audit-cron P0: cron faltando documentado memory pending #5.
+  // Gated DM_HEALTH_AUTO=true (default true). Cron 30min, dispara DM 1x/dia.
+  let _lastDmHealthDay = null;
+  async function runDmDeliveryHealthCheck() {
+    const _t0 = Date.now();
+    const _hb = (result, note) => { try { markCronHeartbeat('dm_health', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    if (/^(0|false|no)$/i.test(String(process.env.DM_HEALTH_AUTO || 'true'))) { _hb('disabled'); return; }
+    if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
+    const hourUtc = parseInt(process.env.DM_HEALTH_HOUR_UTC || '11', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastDmHealthDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastDmHealthDay = today;
+    try {
+      const threshold = parseInt(process.env.DM_HEALTH_THRESHOLD || '3', 10);
+      const rows = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+          MIN(sent_at) AS oldest_pending,
+          MAX(sent_at) AS newest_pending
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 0
+          AND (archived IS NULL OR archived = 0)
+          AND dm_dispatched_at IS NULL
+          AND sent_at < datetime('now', '-5 minutes')
+          AND sent_at > datetime('now', '-24 hours')
+        GROUP BY sport
+        HAVING n >= ?
+        ORDER BY n DESC
+      `).all(threshold);
+      if (!rows.length) { _hb('ok_no_gaps'); return; }
+      const msgLines = [`⚠️ *[DM-HEALTH] Tips reais sem DM dispatched 24h:*`, ''];
+      for (const r of rows) {
+        msgLines.push(`🔴 \`${r.sport}\`: ${r.n} tip(s) | oldest=${(r.oldest_pending||'').slice(0,16)} | newest=${(r.newest_pending||'').slice(0,16)}`);
+      }
+      msgLines.push('');
+      msgLines.push(`_Threshold ≥${threshold} tip(s)/sport. Verificar TELEGRAM_TOKEN_<SPORT> banido (TG403), rate limit, OR bot pausado._`);
+      msgLines.push(`_Audit endpoint: /admin/dm-dispatch-audit?key=..._`);
+      const msg = msgLines.join('\n');
+      const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (!token) { _hb('no_token'); return; }
+      let sent = 0;
+      for (const adminId of ADMIN_IDS) {
+        if (await sendDM(token, adminId, msg).catch(() => false)) sent++;
+      }
+      log('WARN', 'DM-HEALTH', `${rows.length} sport(s) flagged, ${sent}/${ADMIN_IDS.size} admin(s) notified`);
+      _hb('ok', `${rows.length} sports flagged`);
+    } catch (e) {
+      log('WARN', 'DM-HEALTH', `err: ${e.message}`);
+      _hb('error', e.message);
+    }
+  }
+  setInterval(_wrapCron('dm_health', runDmDeliveryHealthCheck), 30 * 60 * 1000);
+  setTimeout(_wrapCron('dm_health', runDmDeliveryHealthCheck), 8 * 60 * 1000);
+
+  // ── WAL checkpoint: PRAGMA wal_checkpoint(PASSIVE) 30min.
+  // Audit-banco P1-1: WAL sem cron checkpoint scheduled — bursts cron heavy
+  // empilham páginas antes do auto-checkpoint default (1000 pages) disparar.
+  // PASSIVE = non-blocking, libera só páginas que pode sem block writers.
+  // Gated WAL_CHECKPOINT_AUTO=true (default true). Cron 30min.
+  async function runWalCheckpoint() {
+    const _t0 = Date.now();
+    const _hb = (result, note) => { try { markCronHeartbeat('wal_checkpoint', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    if (/^(0|false|no)$/i.test(String(process.env.WAL_CHECKPOINT_AUTO || 'true'))) { _hb('disabled'); return; }
+    try {
+      const r = db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get();
+      // r = { busy: 0|1, log: <pages_in_wal>, checkpointed: <pages_synced> }
+      const wal = r?.log ?? 0;
+      const sync = r?.checkpointed ?? 0;
+      const busy = r?.busy ?? 0;
+      if (wal > 5000) {
+        log('WARN', 'WAL-CHECKPOINT', `WAL pages=${wal} (>5000) checkpointed=${sync} busy=${busy} — high concurrent writes?`);
+      }
+      _hb('ok', `wal=${wal} sync=${sync} busy=${busy}`);
+    } catch (e) {
+      log('WARN', 'WAL-CHECKPOINT', `err: ${e.message}`);
+      _hb('error', e.message);
+    }
+  }
+  setInterval(_wrapCron('wal_checkpoint', runWalCheckpoint), 30 * 60 * 1000);
+  setTimeout(_wrapCron('wal_checkpoint', runWalCheckpoint), 5 * 60 * 1000);
+
   // ── Daily Leaks Digest: 1x/dia DM admin com top leaks (sport, market, side)
   // de market_tips_shadow nos últimos 7d. Foca em ROI<-15% n>=20.
   // Gated por DAILY_LEAKS_DIGEST_AUTO=true (default true).
