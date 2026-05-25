@@ -23470,15 +23470,85 @@ load();
                 if (!sideFit.skip) tierSideFits[sideKey] = sideFit;
                 else tierStratified[`${market}/${tierKey}/${sideKey}_skipped`] = sideFit;
               }
-              tiersFit[tierKey] = Object.keys(tierSideFits).length
-                ? { ...tierFit, sides: tierSideFits }
+
+              // 2026-05-25 (schema v3): per-(tier, format) split. Tennis-only —
+              // só ATP main em Slam dispara Bo5. Causa-fix Slam ATP R1 calib_gap
+              // -30.8pp (Bo3 dominava ATP main sample, Bo5 mal-calibrado).
+              // Espelha logic do scripts/fit-tennis-markov-calibration.js + helper
+              // _classifyFormat espelha bot.js:19449-19454 regex (P5 cross-check).
+              const tierFormatFits = {};
+              if (sport === 'tennis') {
+                const MIN_FORMAT_N = Math.max(12, Math.min(100,
+                  parseInt(parsed.query.min_format_n || '15', 10) || 15));
+                const _classifyFormat = (tip) => {
+                  if (!tip || (tip.sport && tip.sport !== 'tennis')) return 'bo3';
+                  const lg = String(tip.league || '');
+                  const isSlam = /grand slam|\[g\]|wimbledon|us open|french open|roland garros|australian open/i.test(lg);
+                  const isAtp = /\batp\b/i.test(lg);
+                  const isQuali = /qualifier|qualifying|quali\b/i.test(lg);
+                  return (isSlam && isAtp && !isQuali) ? 'bo5' : 'bo3';
+                };
+                const formatKeys = new Set();
+                for (const t of tips) {
+                  if (t.market !== market) continue;
+                  if (tierFor(t.league) !== tierKey) continue;
+                  const fk = _classifyFormat(t);
+                  if (fk) formatKeys.add(fk);
+                }
+                for (const fmtKey of formatKeys) {
+                  const fmtFilter = (t) =>
+                    tierFor(t.league) === tierKey && _classifyFormat(t) === fmtKey;
+                  const fmtSampleN = tips.filter(t => t.market === market && fmtFilter(t)).length;
+                  if (fmtSampleN < MIN_FORMAT_N) {
+                    tierStratified[`${market}/${tierKey}/format=${fmtKey}_skipped`] = { skip: 'insufficient_format_sample', n: fmtSampleN, min: MIN_FORMAT_N };
+                    continue;
+                  }
+                  const fmtFit = fitMarket(market, fmtFilter);
+                  if (fmtFit.skip) {
+                    tierStratified[`${market}/${tierKey}/format=${fmtKey}_skipped`] = fmtFit;
+                    continue;
+                  }
+                  // Per-(tier, format, side) sub-fit — só sample >= MIN_SIDE_N
+                  const tfsFits = {};
+                  const tfsSideKeys = new Set();
+                  for (const t of tips) {
+                    if (t.market !== market) continue;
+                    if (!fmtFilter(t)) continue;
+                    const sk = _normSide(t.side);
+                    if (sk) tfsSideKeys.add(sk);
+                  }
+                  for (const sideKey of tfsSideKeys) {
+                    const tfsFilter = (t) =>
+                      fmtFilter(t) && _normSide(t.side) === sideKey;
+                    const tfsSampleN = tips.filter(t => t.market === market && tfsFilter(t)).length;
+                    if (tfsSampleN < MIN_SIDE_N) continue;
+                    const tfsFit = fitMarket(market, tfsFilter);
+                    if (!tfsFit.skip) tfsFits[sideKey] = tfsFit;
+                  }
+                  tierFormatFits[fmtKey] = Object.keys(tfsFits).length
+                    ? { ...fmtFit, sides: tfsFits }
+                    : fmtFit;
+                }
+              }
+
+              const hasSides = Object.keys(tierSideFits).length > 0;
+              const hasFormats = Object.keys(tierFormatFits).length > 0;
+              tiersFit[tierKey] = (hasSides || hasFormats)
+                ? {
+                    ...tierFit,
+                    ...(hasSides ? { sides: tierSideFits } : {}),
+                    ...(hasFormats ? { formats: tierFormatFits } : {}),
+                  }
                 : tierFit;
             }
             if (Object.keys(tiersFit).length) {
               calibByMarket[market].tiers = tiersFit;
-              tierStratified[market] = Object.entries(tiersFit).map(([t, v]) =>
-                v.sides ? `${t}[+${Object.keys(v.sides).length}sides]` : t
-              );
+              tierStratified[market] = Object.entries(tiersFit).map(([t, v]) => {
+                const parts = [];
+                if (v.sides) parts.push(`+${Object.keys(v.sides).length}sides`);
+                if (v.formats) parts.push(`+${Object.keys(v.formats).length}formats`);
+                return parts.length ? `${t}[${parts.join(',')}]` : t;
+              });
             }
           }
         } catch (e) {
