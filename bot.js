@@ -6269,7 +6269,10 @@ function getKellyFraction(sport, conf, market = null, league = null, side = null
     const perSportMarket = process.env[`KELLY_${spEnv}_${mkEnv}_${key}`];
     if (perSportMarket != null && perSportMarket !== '') {
       const v = parseFloat(perSportMarket);
-      if (Number.isFinite(v) && v > 0 && v <= 1) baseFraction = v;
+      // 2026-05-25 (audit-financeiro P1-1): cap 1.0→0.50 — fixed bankroll blow-up
+      // vector se user setar KELLY_<SPORT>_<MARKET>_<CONF>=1.0 + KELLY_PRODUCT_CAP_FRAC override.
+      // Real Kelly defaults ALTA=0.25, MEDIA=0.10, BAIXA=0.05 — cap 0.50 dá 2x folga.
+      if (Number.isFinite(v) && v > 0 && v <= 0.5) baseFraction = v;
     }
   }
   // Per-sport override (sport-wide env)
@@ -6277,7 +6280,8 @@ function getKellyFraction(sport, conf, market = null, league = null, side = null
     const perSport = process.env[`KELLY_${spEnv}_${key}`];
     if (perSport != null && perSport !== '') {
       const v = parseFloat(perSport);
-      if (Number.isFinite(v) && v > 0 && v <= 1) baseFraction = v;
+      // 2026-05-25 (audit-financeiro P1-1): cap 1.0→0.50 (vide comment branch acima).
+      if (Number.isFinite(v) && v > 0 && v <= 0.5) baseFraction = v;
     }
   }
   // Global override
@@ -6285,7 +6289,8 @@ function getKellyFraction(sport, conf, market = null, league = null, side = null
     const global = process.env[`KELLY_${key}`];
     if (global != null && global !== '') {
       const v = parseFloat(global);
-      if (Number.isFinite(v) && v > 0 && v <= 1) baseFraction = v;
+      // 2026-05-25 (audit-financeiro P1-1): cap 1.0→0.50 (vide comment branch acima).
+      if (Number.isFinite(v) && v > 0 && v <= 0.5) baseFraction = v;
     }
   }
   // Auto-tune runtime state (daily cron runKellyAutoTune)
