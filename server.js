@@ -6410,6 +6410,63 @@ const server = http.createServer(async (req, res) => {
     const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
     const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
     const format = parsed.query.format ? String(parsed.query.format) : '';
+    // 2026-05-25: Valorant ML CLV path. Antes /odds?game=valorant caía em
+    // fetchOdds('esports') + findOdds('esports') que NÃO tem VAL data (cache
+    // separado _valorantPinnacleCache). checkCLV (bot.js:30742) usava esse URL
+    // → "odds não encontradas" → CLV NULL → coverage VAL 0% pós commit 3748a8f.
+    // Mirror lol branch: consulta cache dedicado + live-fetch moneyline.
+    if (gameParam === 'valorant') {
+      const normT = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
+      const n1 = normT(t1), n2 = normT(t2);
+      if (process.env.PINNACLE_VALORANT === 'true' && !_valorantPinnacleCache.data.length) {
+        try { await getPinnacleValorantMatches(); } catch (_) {}
+      }
+      const pinHit = (_valorantPinnacleCache.data || []).find(m => {
+        const vt1 = normT(m?.team1 || ''), vt2 = normT(m?.team2 || '');
+        return ((vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2)))
+            || ((vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2)));
+      });
+      if (pinHit?.id) {
+        const swap = !(normT(pinHit.team1).includes(n1) || n1.includes(normT(pinHit.team1)));
+        const matchupId = String(pinHit.id).replace(/^pin_valorant_/, '');
+        const ml = await pinnacle.getMatchupMoneylineByPeriod(matchupId, 0).catch(() => null);
+        if (ml?.oddsHome && ml?.oddsAway) {
+          const [th, ta] = swap ? [ml.oddsAway, ml.oddsHome] : [ml.oddsHome, ml.oddsAway];
+          sendJson(res, { t1: String(th), t2: String(ta), bookmaker: 'Pinnacle' });
+          return;
+        }
+      }
+      sendJson(res, { error: 'odds Valorant não encontradas' });
+      return;
+    }
+    // 2026-05-25: CS ML CLV path (P5 cross-sport mirror — mesmo bug VAL).
+    // checkCLV bot.js:30737 usa `&game=cs`. Cache dedicado _csPinnacleCache
+    // com prefix `pin_cs_`. Coverage CS 49→83% pós 3748a8f (MT path), mas ML
+    // ainda dependia do fallback genérico esports. Agora explicit.
+    if (gameParam === 'cs' || gameParam === 'cs2') {
+      const normT = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
+      const n1 = normT(t1), n2 = normT(t2);
+      if (process.env.PINNACLE_CS === 'true' && !_csPinnacleCache.data.length) {
+        try { await getPinnacleCsMatches(); } catch (_) {}
+      }
+      const pinHit = (_csPinnacleCache.data || []).find(m => {
+        const vt1 = normT(m?.team1 || ''), vt2 = normT(m?.team2 || '');
+        return ((vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2)))
+            || ((vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2)));
+      });
+      if (pinHit?.id) {
+        const swap = !(normT(pinHit.team1).includes(n1) || n1.includes(normT(pinHit.team1)));
+        const matchupId = String(pinHit.id).replace(/^pin_cs_/, '');
+        const ml = await pinnacle.getMatchupMoneylineByPeriod(matchupId, 0).catch(() => null);
+        if (ml?.oddsHome && ml?.oddsAway) {
+          const [th, ta] = swap ? [ml.oddsAway, ml.oddsHome] : [ml.oddsHome, ml.oddsAway];
+          sendJson(res, { t1: String(th), t2: String(ta), bookmaker: 'Pinnacle' });
+          return;
+        }
+      }
+      sendJson(res, { error: 'odds CS não encontradas' });
+      return;
+    }
     // LoL: LINE SHOPPING — busca SX.Bet + Pinnacle em paralelo, retorna melhor preço
     if (gameParam === 'lol') {
       const liveOnly = !!(mapNumber && mapNumber > 0);
