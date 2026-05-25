@@ -4583,6 +4583,15 @@ const ADMIN_ROUTES_ANY = new Set([
   '/debug-match-odds',
   '/sync-pro-stats',
   '/sync-golgg-role-impact',
+  // 2026-05-25 SECURITY P0 (audit adversarial + endpoints):
+  // /void-tip aceita GET (admite ?id&sport query) — sem auth permitia void seletivo de wins.
+  // /admin/analytics + /api/analytics + /analytics-data expõem ROI/EV calib/shadow-vs-real
+  // — comentário inline dizia "público (sem PII)" mas é competitive intel completo.
+  // Audit endpoints P0.1/P0.2/F2.
+  '/void-tip',
+  '/admin/analytics',
+  '/api/analytics',
+  '/analytics-data',
 ]);
 
 const ADMIN_ROUTES_POST = new Set([
@@ -4603,6 +4612,21 @@ const ADMIN_ROUTES_POST = new Set([
   '/claude',
   '/ps-result',
   '/football-result',
+  // 2026-05-25 SECURITY P0 (audit adversarial F1+F3 + endpoints P0.1/P0.3):
+  // POST endpoints sem auth permitiam:
+  //   - /seed-* poison match_results table (drive de settle) + DoS quota PandaScore/VLR
+  //   - /void-bad-* + /void-market-tips-bogus bulk void com threshold attacker-controlled
+  //   - /admin/mark-dm-dispatched mark arbitrary tip IDs (quebra audit DM outage)
+  '/seed-cs-history',
+  '/seed-valorant-history',
+  '/seed-dota',
+  '/seed-tabletennis',
+  '/seed-valorant-maps-from-vlr',
+  '/void-bad-tennis',
+  '/void-bad-darts',
+  '/void-bad-mma',
+  '/void-market-tips-bogus',
+  '/admin/mark-dm-dispatched',
 ]);
 
 const EXPENSIVE_ROUTES = new Set([
@@ -15601,93 +15625,10 @@ setInterval(load, 60000);
     return;
   }
 
-  // ── /admin/env-audit: sanity check de envs críticas.
-  // GET /admin/env-audit?key=<ADMIN_KEY>
-  // Mostra: configurada/null + tipo (bool/string/number) + valor masked se sensitive.
-  if (p === '/admin/env-audit' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
-    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
-    // 2026-05-06 FIX: revelar APENAS últimos 4 chars (era 8 = 25% de entropy
-    // de uma key 32-char). Idealmente nem isso — mas mantemos sufix p/
-    // distinguir "key A vs key B" ao trocar/auditar. Set REVEAL_TAIL=0 pra
-    // não revelar nada.
-    const _revealTail = parseInt(process.env.ADMIN_ENV_REVEAL_TAIL ?? '4', 10);
-    const _mask = (v) => {
-      if (!v) return null;
-      const s = String(v);
-      if (s.length <= 8 || _revealTail <= 0) return '***';
-      const tail = Math.max(0, Math.min(_revealTail, 4));
-      return tail > 0 ? '***' + s.slice(-tail) : '***';
-    };
-    const _bool = (v) => v == null ? null : !/^(0|false|no)$/i.test(String(v));
-    const out = {
-      ok: true,
-      ts: new Date().toISOString(),
-      // Critical: tokens, keys, paths
-      critical: {
-        ADMIN_KEY: { set: !!process.env.ADMIN_KEY, masked: _mask(process.env.ADMIN_KEY) },
-        ADMIN_USER_IDS: { set: !!process.env.ADMIN_USER_IDS, count: String(process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean).length },
-        DB_PATH: { set: !!process.env.DB_PATH, value: process.env.DB_PATH || null },
-        TIPS_UNIFIED_TOKEN: { set: !!process.env.TIPS_UNIFIED_TOKEN, masked: _mask(process.env.TIPS_UNIFIED_TOKEN) },
-        SYSTEM_ALERTS_TOKEN: { set: !!process.env.SYSTEM_ALERTS_TOKEN, masked: _mask(process.env.SYSTEM_ALERTS_TOKEN) },
-        DEEPSEEK_API_KEY: { set: !!process.env.DEEPSEEK_API_KEY, masked: _mask(process.env.DEEPSEEK_API_KEY) },
-        THE_ODDS_API_KEY: { set: !!process.env.THE_ODDS_API_KEY, masked: _mask(process.env.THE_ODDS_API_KEY) },
-        PANDASCORE_TOKEN: { set: !!process.env.PANDASCORE_TOKEN, masked: _mask(process.env.PANDASCORE_TOKEN) },
-        HLTV_PROXY_BASE: { set: !!process.env.HLTV_PROXY_BASE, value: process.env.HLTV_PROXY_BASE || null },
-        SOFASCORE_PROXY_BASE: { set: !!process.env.SOFASCORE_PROXY_BASE, value: process.env.SOFASCORE_PROXY_BASE || null },
-        SUPABASE_URL: { set: !!process.env.SUPABASE_URL, value: process.env.SUPABASE_URL || null },
-        SUPABASE_ANON_KEY: { set: !!process.env.SUPABASE_ANON_KEY, masked: _mask(process.env.SUPABASE_ANON_KEY) },
-      },
-      // Feature flags
-      flags: {
-        AI_DISABLED: _bool(process.env.AI_DISABLED) || false,
-        FOOTBALL_MT_SHADOW_ONLY: _bool(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'),
-        TENNIS_ISOTONIC_DISABLED: _bool(process.env.TENNIS_ISOTONIC_DISABLED ?? 'true'),
-        LOL_ISOTONIC_DISABLED: _bool(process.env.LOL_ISOTONIC_DISABLED ?? 'true'),
-        FB_USE_FD_CSV: process.env.FB_USE_FD_CSV !== 'false',
-        FB_DIVERGENCE_GATE: !/^(0|false|no)$/i.test(String(process.env.FB_DIVERGENCE_GATE ?? 'true')),
-        FB_XG_BLEND_DISABLED: _bool(process.env.FB_XG_BLEND_DISABLED) || false,
-        MT_SHADOW_DM_ALL: /^true$/i.test(process.env.MT_SHADOW_DM_ALL || ''),
-        TENNIS_MARKET_TIPS_ENABLED: process.env.TENNIS_MARKET_TIPS_ENABLED === 'true',
-        LOL_MARKET_TIPS_ENABLED: process.env.LOL_MARKET_TIPS_ENABLED === 'true',
-        CS_MARKET_TIPS_ENABLED: process.env.CS_MARKET_TIPS_ENABLED === 'true',
-        DOTA_MARKET_TIPS_ENABLED: process.env.DOTA_MARKET_TIPS_ENABLED === 'true',
-        VALORANT_MARKET_TIPS_ENABLED: process.env.VALORANT_MARKET_TIPS_ENABLED === 'true',
-        FOOTBALL_MARKET_TIPS_ENABLED: process.env.FOOTBALL_MARKET_TIPS_ENABLED === 'true',
-        TENNIS_MT_TIER2_PROMOTE: /^(1|true|yes)$/i.test(String(process.env.TENNIS_MT_TIER2_PROMOTE || '')),
-        MARKET_TIPS_DM_KILL_SWITCH: /^true$/i.test(String(process.env.MARKET_TIPS_DM_KILL_SWITCH || '')),
-        TENNIS_CORRELATION_ADJ: process.env.TENNIS_CORRELATION_ADJ !== 'false',
-        LOL_KILLS_PROMOTE: /^(1|true|yes)$/i.test(String(process.env.LOL_KILLS_PROMOTE || '')),
-        LOL_KILLS_XCHECK_GATE: !/^(0|false|no)$/i.test(String(process.env.LOL_KILLS_XCHECK_GATE ?? 'true')),
-        DB_SLOW_QUERY_MS: parseInt(process.env.DB_SLOW_QUERY_MS || '0', 10),
-      },
-      // Tuning numérico
-      tuning: {
-        MARKET_TIP_MAX_EV: parseFloat(process.env.MARKET_TIP_MAX_EV || 'NaN') || null,
-        MAX_STAKE_UNITS: parseFloat(process.env.MAX_STAKE_UNITS || 'NaN') || null,
-        TENNIS_MARKET_SCAN_MAX_EV: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV || '40'),
-        TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES || '35'),
-        TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES || '40'),
-        FB_DIVERGENCE_MAX_PP: parseFloat(process.env.FB_DIVERGENCE_MAX_PP || '12'),
-        ANALYZED_TTL_MS: parseInt(process.env.ANALYZED_TTL_MS || String(72 * 3600 * 1000), 10),
-        MEM_WATCHDOG_RSS_MB: process.env.MEM_WATCHDOG_RSS_MB ? parseFloat(process.env.MEM_WATCHDOG_RSS_MB) : null,
-      },
-      // Lists / blocklists (mt_permanent DB-driven via mig 108)
-      lists: {
-        MT_PERMANENT_DISABLE_LIST: Array.from(require('./lib/mt-permanent-disable').loadSet(db)),
-        ODDS_BUCKET_BLOCK: String(process.env.ODDS_BUCKET_BLOCK || '').split(',').map(s => s.trim()).filter(Boolean),
-      },
-    };
-    // Sanity warnings
-    out.warnings = [];
-    if (!out.critical.ADMIN_KEY.set) out.warnings.push('ADMIN_KEY ausente — admin endpoints abertos!');
-    if (!out.critical.ADMIN_USER_IDS.set) out.warnings.push('ADMIN_USER_IDS ausente — DMs admin não funcionam');
-    if (!out.critical.DB_PATH.set) out.warnings.push('DB_PATH ausente — fallback pode usar working dir');
-    if (out.flags.AI_DISABLED) out.warnings.push('AI_DISABLED=true — DeepSeek desligado, fallback determinístico ativo');
-    if (!out.critical.HLTV_PROXY_BASE.set) out.warnings.push('HLTV_PROXY_BASE ausente — CS scoreboard live indisponível');
-    sendJson(res, out);
-    return;
-  }
+  // 2026-05-25 audit P3/P4 code hygiene: handler /admin/env-audit duplicado
+  // foi removido aqui (era L15628-15714, ~87L). Node http handler retorna no
+  // primeiro match → este segundo handler nunca executava (dead code). Live
+  // handler permanece em server.js:13772 (impl mais nova, comments 2026-05-08).
 
   // ── /admin/tg-commands: lista comandos Telegram disponíveis.
   if (p === '/admin/tg-commands' && (req.method === 'GET' || req.method === 'POST')) {
