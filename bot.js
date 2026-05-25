@@ -26329,11 +26329,21 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const _alertsDays = Math.max(14, Math.min(365, parseInt(process.env.ANALYTICS_ALERTS_RETENTION_DAYS || '90', 10) || 90));
     const _driftDays = Math.max(14, Math.min(365, parseInt(process.env.BANKROLL_DRIFT_LOG_RETENTION_DAYS || '90', 10) || 90));
     const _polyDays = Math.max(14, Math.min(180, parseInt(process.env.POLYMARKET_PAPER_TRADES_RETENTION_DAYS || '60', 10) || 60));
+    // 2026-05-25 audit-banco P1-9: market_tips_shadow crescendo sem limite
+    // (~5-15k/dia × 11 sports). Sem retention amplifica custo de TODAS queries
+    // OLAP (lib/shadow-vs-real-drift, ev-calibration refit, league-trust, etc).
+    // Default 45d — alinha com janela max de calib refit (lib/sport-mt-calib).
+    // tip_factor_log (P1-8): também sem retention, JOIN tips em hot path —
+    // cresce 5-10x tips/dia. Default 60d (preserva analysis window).
+    const _shadowDays = Math.max(14, Math.min(180, parseInt(process.env.MARKET_TIPS_SHADOW_RETENTION_DAYS || '45', 10) || 45));
+    const _tipFactorDays = Math.max(14, Math.min(180, parseInt(process.env.TIP_FACTOR_LOG_RETENTION_DAYS || '60', 10) || 60));
     const targets = [
       { table: 'ml_gate_rejected_audit', col: 'rejected_at', days: _mlgraDays, extraWhere: '' },
       { table: 'analytics_alerts',       col: 'fired_at',    days: _alertsDays, extraWhere: " AND status != 'open'" },
       { table: 'bankroll_drift_log',     col: 'detected_at', days: _driftDays, extraWhere: '' },
       { table: 'polymarket_paper_trades',col: 'copied_at',   days: _polyDays, extraWhere: '' },
+      { table: 'market_tips_shadow',     col: 'created_at',  days: _shadowDays, extraWhere: '' },
+      { table: 'tip_factor_log',         col: 'logged_at',   days: _tipFactorDays, extraWhere: '' },
     ];
     for (const t of targets) {
       try {
