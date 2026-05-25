@@ -20673,6 +20673,15 @@ load();
            WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
            GROUP BY sport ORDER BY n DESC
         `).all(`-${days} days`);
+        // 2026-05-25: enrich com pcts calculados — antes clientes precisavam
+        // recompute. Cron lib/analytics-watchdog já usa clv_capture_rate_pct nome
+        // (linha 113); padroniza payload pra reuse.
+        const coverageEnriched = coverage.map(r => ({
+          ...r,
+          clv_capture_rate_pct: r.n > 0 ? +((r.n_with_clv / r.n) * 100).toFixed(1) : null,
+          live_capture_rate_pct: r.n_live > 0 ? +((r.n_live_clv / r.n_live) * 100).toFixed(1) : null,
+          pre_capture_rate_pct: (r.n - r.n_live) > 0 ? +((r.n_pre_clv / (r.n - r.n_live)) * 100).toFixed(1) : null,
+        }));
 
         const categories = analysisDb.prepare(`
           SELECT sport, COUNT(*) n,
@@ -20685,7 +20694,7 @@ load();
            GROUP BY sport HAVING n >= 5 ORDER BY n DESC
         `).all(`-${days} days`);
 
-        sendJson(res, { ok: true, days, snapshot: snapshotPath, coverage, categories });
+        sendJson(res, { ok: true, days, snapshot: snapshotPath, coverage: coverageEnriched, categories });
       }
     } catch (e) {
       sendJson(res, { ok: false, error: e.message }, 500);
