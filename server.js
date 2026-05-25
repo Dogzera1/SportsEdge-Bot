@@ -8391,8 +8391,15 @@ setInterval(load, 10000);
 
   if (p === '/match-result') {
     const raw = parsed.query.matchId || '';
-    const matchId = String(raw).replace(/^lol_/, '');
     const game = parsed.query.game || 'lol';
+    // 2026-05-25 (audit P0-2 settle_dispatch defense): resolveAlias para tips com
+    // match_id 'agg_*' (BR aggregator). Sem isso, /match-result fazia raw.replace(/^lol_/)
+    // que era no-op pra agg_* → Riot API call com agg_* → resolved=false.
+    // Pass-through pra non-agg IDs.
+    const rawCanonical = raw
+      ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, String(raw), game); } catch (_) { return String(raw); } })()
+      : '';
+    const matchId = String(rawCanonical || raw).replace(/^lol_/, '');
     try {
       const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
       const sd = safeParse(sr.body, {});
@@ -34344,12 +34351,23 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           // /unsettled-tips incluía, bot loop infinito logando WIN/LOSS sem
           // settlement real (bancaDelta=0 todo ciclo).
           // archived continua filtrado: NON_ML_AUTOARCHIVE já decidiu órfã.
+          // 2026-05-25 (audit P0-4 settle_dispatch): resolveAlias para tips com
+          // match_id 'agg_*' (BR aggregator). Se incoming matchId for canonical
+          // (espn_/sofa_/api_/pin_), tips podem estar gravadas com agg_ — e vice-versa.
+          // SELECT em ambos: original + canonical. Sem mudança comportamental
+          // pra non-agg IDs (resolveAlias passthrough → ambos = mesmo valor).
+          const _settleGame = sport === 'esports' ? 'lol' : sport;
+          const canonicalMid = matchId
+            ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, matchId, _settleGame); } catch (_) { return matchId; } })()
+            : matchId;
+          const _midA = matchId;
+          const _midB = canonicalMid && canonicalMid !== matchId ? canonicalMid : matchId;
           const tips = db.prepare(
             `SELECT * FROM tips
-             WHERE match_id = ? AND sport = ?
+             WHERE match_id IN (?, ?) AND sport = ?
                AND result IS NULL
                AND (archived IS NULL OR archived = 0)`
-          ).all(matchId, sport);
+          ).all(_midA, _midB, sport);
           // Filtro defensivo extra: mesmo se match_id passou pelo guard acima, qualquer
           // tip individual com market_type non-ML é rejeitada (defesa em profundidade).
           // Exceção: MAP{N}_WINNER esports é settable via sweep detection (vencedor da
