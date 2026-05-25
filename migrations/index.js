@@ -3449,6 +3449,48 @@ const migrations = [
       } catch (e) { console.log(`[mig 128] tier: ${e.message}`); }
     },
   },
+  {
+    id: '129_perf_indices_audit_p1',
+    up(db) {
+      // 2026-05-25 audit-banco P1-3 / P1-4 / P1-7: 3 partial/covering indices
+      // pra queries OLAP/cron + DM health endpoint.
+      //
+      // P1-3: mt-auto-promote agrega market_tips_shadow per (sport, market, league).
+      //   Existing idx_mts_readiness_agg(sport, market, side, league, result) coloca
+      //   `side` antes de `league` — SQLite pode preferir scan + sort. Covering index
+      //   sem `side` evita decoração.
+      //
+      // P1-4: DM health cron (commit d3d235d) + endpoint /admin/dm-dispatch-audit
+      //   queryam tips WHERE dm_dispatched_at IS NULL AND is_shadow=0 AND archived=0
+      //   AND sent_at > N. Sem partial index → scan completo tips (~100k+ rows).
+      //
+      // P1-7: getUnsettledFactorLogs faz `tip_factor_log tfl JOIN tips t ON t.id=tfl.tip_id
+      //   WHERE t.result IS NULL`. Mig 104 indexou OPPOSITE (`WHERE actual_winner IS
+      //   NOT NULL`). Partial index pra unsettled cobre o caso atual.
+      try {
+        // P1-3: covering index pra GROUP BY (sport, market, league)
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_mts_auto_promote_agg
+            ON market_tips_shadow(sport, market, league, created_at, result)
+        `);
+        // P1-4: partial pra dm_dispatched_at IS NULL pending check
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_tips_dm_pending
+            ON tips(sent_at)
+            WHERE dm_dispatched_at IS NULL
+              AND COALESCE(is_shadow, 0) = 0
+              AND COALESCE(archived, 0) = 0
+        `);
+        // P1-7: partial pra tip_factor_log unsettled JOIN
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_tfl_tip_id_unsettled
+            ON tip_factor_log(tip_id)
+            WHERE actual_winner IS NULL
+        `);
+        console.log('[mig 129] 3 partial/covering indices created (banco P1-3/4/7)');
+      } catch (e) { console.log(`[mig 129] indices: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
