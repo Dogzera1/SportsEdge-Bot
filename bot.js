@@ -3226,10 +3226,10 @@ async function loadSubscribedUsers() {
         const prefs = safeParse(u.sport_prefs, []);
         subscribedUsers.set(u.user_id, new Set(prefs));
       }
-      log('INFO', 'BOOT', `${users.length} usuários carregados do DB`);
+      log('INFO', 'SUBS', `${users.length} usuários carregados do DB`);
     }
   } catch(e) {
-    log('WARN', 'BOOT', 'Erro ao carregar usuários: ' + e.message);
+    log('WARN', 'SUBS', 'Erro ao carregar usuários: ' + e.message);
   }
 
   // Auto-subscribe admin users to all enabled sports (ensures tips are sent after cold redeploys)
@@ -3248,7 +3248,7 @@ async function loadSubscribedUsers() {
     if (isNaN(id)) continue;
     if (!subscribedUsers.has(id) || subscribedUsers.get(id).size === 0) {
       subscribedUsers.set(id, new Set(allSports));
-      log('INFO', 'BOOT', `Admin ${id} auto-inscrito em: ${[...allSports].join(', ')}`);
+      log('INFO', 'SUBS', `Admin ${id} auto-inscrito em: ${[...allSports].join(', ')}`);
       // Persist to DB via server so it survives future restarts
       serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...allSports] }).catch(() => {});
     }
@@ -3271,7 +3271,7 @@ async function loadSubscribedUsers() {
   const _envGroupSet = new Set();
   for (const gid of _groupIdsAll) {
     const id = parseInt(gid, 10);
-    if (isNaN(id)) { log('WARN', 'BOOT', `TELEGRAM_GROUP_CHAT_IDS_ALL: chat_id inválido "${gid}"`); continue; }
+    if (isNaN(id)) { log('WARN', 'SUBS', `TELEGRAM_GROUP_CHAT_IDS_ALL: chat_id inválido "${gid}"`); continue; }
     _envGroupSet.add(id);
     // 2026-05-20: SEMPRE force allSports pra grupos no env (não só first-time).
     // Antes: if size > 0, skip. Resultado: grupo adicionado via /save-user antigo
@@ -3280,7 +3280,7 @@ async function loadSubscribedUsers() {
     const sportsChanged = !existing || existing.size !== allSports.size || [...allSports].some(s => !existing.has(s));
     if (sportsChanged) {
       subscribedUsers.set(id, new Set(allSports));
-      log('INFO', 'BOOT', `Telegram group ${id} subscribed em: ${[...allSports].join(', ')}`);
+      log('INFO', 'SUBS', `Telegram group ${id} subscribed em: ${[...allSports].join(', ')}`);
       serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...allSports] }).catch(() => {});
     }
   }
@@ -3304,7 +3304,7 @@ async function loadSubscribedUsers() {
   }
   for (const id of _toUnsubscribe) {
     subscribedUsers.delete(id);
-    log('INFO', 'BOOT', `Group ${id} não está em TELEGRAM_GROUP_CHAT_IDS_* env → unsubscribed`);
+    log('INFO', 'SUBS', `Group ${id} não está em TELEGRAM_GROUP_CHAT_IDS_* env → unsubscribed`);
     serverPost('/save-user', { userId: id, subscribed: false, sportPrefs: [] }).catch(() => {});
   }
   // Per-sport groups: TELEGRAM_GROUP_CHAT_IDS_LOL, _CS, _FOOTBALL, etc.
@@ -3313,21 +3313,21 @@ async function loadSubscribedUsers() {
     const ids = String(process.env[envKey] || '').split(',').map(s => s.trim()).filter(Boolean);
     for (const gid of ids) {
       const id = parseInt(gid, 10);
-      if (isNaN(id)) { log('WARN', 'BOOT', `${envKey}: chat_id inválido "${gid}"`); continue; }
+      if (isNaN(id)) { log('WARN', 'SUBS', `${envKey}: chat_id inválido "${gid}"`); continue; }
       const existing = subscribedUsers.get(id) || new Set();
       if (!existing.has(sport)) {
         existing.add(sport);
         subscribedUsers.set(id, existing);
-        log('INFO', 'BOOT', `Telegram group ${id} subscribed em ${sport} (via ${envKey})`);
+        log('INFO', 'SUBS', `Telegram group ${id} subscribed em ${sport} (via ${envKey})`);
         serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...existing] }).catch(() => {});
       }
     }
   }
 
   if (subscribedUsers.size === 0) {
-    log('WARN', 'BOOT', 'Nenhum usuário inscrito. Configure ADMIN_USER_IDS no .env para receber tips automaticamente.');
+    log('WARN', 'SUBS', 'Nenhum usuário inscrito. Configure ADMIN_USER_IDS no .env para receber tips automaticamente.');
   } else {
-    log('INFO', 'BOOT', `Total: ${subscribedUsers.size} usuários com notificações ativas`);
+    log('INFO', 'SUBS', `Total: ${subscribedUsers.size} usuários com notificações ativas`);
   }
 }
 
@@ -25584,7 +25584,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const _subsRefreshMs = parseInt(process.env.SUBSCRIBERS_REFRESH_INTERVAL_MS || String(5 * 60 * 1000), 10);
   if (Number.isFinite(_subsRefreshMs) && _subsRefreshMs >= 30000) {
     setInterval(() => {
-      loadSubscribedUsers().catch(e => log('WARN', 'BOOT', `refresh subscribers: ${e.message}`));
+      loadSubscribedUsers().catch(e => log('WARN', 'SUBS', `refresh subscribers: ${e.message}`));
     }, _subsRefreshMs);
     log('INFO', 'BOOT', `Subscribers refresh interval: ${Math.round(_subsRefreshMs/1000)}s`);
   }
