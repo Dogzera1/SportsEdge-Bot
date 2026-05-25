@@ -3414,6 +3414,41 @@ const migrations = [
       } catch (e) { console.log(`[mig 127] tip_pre_dm_*: ${e.message}`); }
     },
   },
+  {
+    id: '128_mt_permanent_disable_tier',
+    up(db) {
+      // 2026-05-25: audit-granularidade P0 — mt_permanent_disable_list sem col `tier`.
+      // Entries seed do mig 108 ('lol','total','','ROI -54% n=10') bloqueavam LoL
+      // TOTAL across ALL tiers apesar de leak ser tier2/3 only — anti-pattern P1
+      // explícito em CLAUDE.md.
+      //
+      // Schema decision (pragmática): mantém PK (sport, market, side) — significa
+      // MAX 1 entry por (sport, market, side) com seu próprio tier. Trade-off:
+      //   ✓ Mig idempotente, sem rebuild table
+      //   ✓ Backwards compat: tier=NULL → bloqueia todos tiers (entries antigas OK)
+      //   ✗ Admin não pode ter `tier2 AND tier3` em separado pra mesma s/m/side
+      //     (workaround: usar tier='tier2' e admin manual tier3 se needed)
+      // Future enhancement: rebuild PK pra (sport, market, side, tier) se múltiplos
+      // tiers por s/m/side virar caso frequente.
+      //
+      // Key format em lib/mt-permanent-disable Set passa de 3 → 4 segments:
+      //   `lol|total||` (block all sides + all tiers — entries legacy NULL tier)
+      //   `lol|total||tier2` (block tier2 only)
+      //   `tennis|totalgames|over|` (block side, all tiers)
+      //   `tennis|totalgames|over|tier1` (block side + tier)
+      //
+      // Idempotent: PRAGMA table_info check antes ADD COLUMN.
+      try {
+        const cols = db.prepare(`PRAGMA table_info(mt_permanent_disable_list)`).all().map(c => c.name);
+        if (!cols.includes('tier')) {
+          db.exec(`ALTER TABLE mt_permanent_disable_list ADD COLUMN tier TEXT`);
+          console.log('[mig 128] mt_permanent_disable_list.tier column added');
+        } else {
+          console.log('[mig 128] mt_permanent_disable_list.tier already exists, skipping');
+        }
+      } catch (e) { console.log(`[mig 128] tier: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

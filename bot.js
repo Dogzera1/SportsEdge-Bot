@@ -6974,12 +6974,15 @@ function describeMtGateSkip(sport, market, side, league, opts = {}) {
     return `mt_disabled — ${envName}!=true (set Railway env pra ativar promote)`;
   }
   if (market) {
-    const perm = (typeof _getMtPermanentDisable === 'function') ? _getMtPermanentDisable() : new Set();
+    // 2026-05-25 (mig 128): delegate pra isBlocked — single source of truth pro
+    // formato 4-segment (sport|market|side|tier). Antes era inline perm.has com
+    // 2/3-segment keys hardcoded, breaking pós mig 128.
     const _sl = String(sport).toLowerCase();
     const _ml = String(market).toLowerCase();
     const _sdl = side ? String(side).toLowerCase() : '';
-    if (side && perm.has(`${_sl}|${_ml}|${_sdl}`)) return `mt_disabled — permanent disable [${sport}|${market}|${side}]`;
-    if (perm.has(`${_sl}|${_ml}`)) return `mt_disabled — permanent disable [${sport}|${market}]`;
+    if (_mtPermDisable.isBlocked(db, _sl, _ml, _sdl)) {
+      return `mt_disabled — permanent disable [${sport}|${market}${side ? '|' + side : ''}]`;
+    }
     if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}|${league}]`;
     if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}]`;
     if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return `mt_disabled — leak guard runtime[${sport}|${market}]`;
@@ -7019,13 +7022,13 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   const enabled = envEnabled || shadowDmAll;
   if (!enabled) return false;
   if (market) {
-    // Permanent blocklist (env-driven, antes de runtime/DB checks).
-    const perm = _getMtPermanentDisable();
+    // Permanent blocklist (DB-driven via mig 108, env fallback).
+    // 2026-05-25 (mig 128): delegate pra isBlocked — handles 4-segment format
+    // sport|market|side|tier corretamente. Substituiu inline perm.has 2/3-seg.
     const _sl = String(sport).toLowerCase();
     const _ml = String(market).toLowerCase();
     const _sdl = side ? String(side).toLowerCase() : '';
-    if (side && perm.has(`${_sl}|${_ml}|${_sdl}`)) return false;
-    if (perm.has(`${_sl}|${_ml}`)) return false;
+    if (_mtPermDisable.isBlocked(db, _sl, _ml, _sdl)) return false;
     // Precedência runtime: (market+side+league) > (market+side+tier) > (market+side) > market inteiro.
     // Tier-level inserido entre side e league: pega leak quando ligas individuais
     // têm sample <10 mas tier total >=20. Tier resolvido on-the-fly via league.
