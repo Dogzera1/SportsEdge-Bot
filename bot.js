@@ -27700,6 +27700,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     _mtAutoPromote.loadMtMarketLeagueBlocklist(db);
     _mtMarketPromote.loadMtMarketPromoteCache(db);
     const _mtAutoPromoteRun = async () => {
+      // 2026-05-25 audit-banco P1-2: OLAP heavy (cross-sport scan shadow stats).
+      // Railway 512MB cap — skip se mem critical pra não amplificar OOM.
+      if (isMemCritical()) { log('INFO', 'MT-AUTO-PROMOTE', 'mem_critical — defer'); return; }
       const r = await _mtAutoPromote.runMtAutoPromoteCycle(db);
       await _dmAutoPromoteDecisions('MT', r);
     };
@@ -28409,6 +28412,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastKellyTuneDay = null;
   async function runKellyAutoTuneDaily() {
     if (/^(0|false|no)$/i.test(String(process.env.KELLY_AUTO_TUNE || ''))) return;
+    // 2026-05-25 audit-banco P1-2: OLAP heavy (sport×market×bucket scan tips real).
+    if (isMemCritical()) { log('INFO', 'KELLY-AUTO-TUNE', 'mem_critical — defer'); return; }
     const now = new Date();
     if (now.getHours() !== 8) return;
     const today = now.toISOString().slice(0, 10);
@@ -28819,6 +28824,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const _lastDriftRefitBySport = new Map();    // sport → lastRefittedAt timestamp
   async function runShadowVsRealDriftDaily() {
     if (/^(0|false|no)$/i.test(String(process.env.SHADOW_VS_REAL_DRIFT_AUTO ?? 'true'))) return;
+    // 2026-05-25 audit-banco P1-2: OLAP heavy (48 queries/h × 12 sports).
+    if (isMemCritical()) { log('INFO', 'SHADOW-VS-REAL-DRIFT', 'mem_critical — defer'); return; }
     const intervalH = Math.max(1, Math.min(24, parseInt(process.env.SHADOW_VS_REAL_DRIFT_INTERVAL_H || '6', 10) || 6));
     const intervalMs = intervalH * 60 * 60 * 1000;
     if (Date.now() - _lastShadowDriftMs < intervalMs) return;
@@ -29120,6 +29127,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastGateAttrWeek = null;
   async function runGateAttributionWeekly() {
     if (/^(0|false|no)$/i.test(String(process.env.GATE_ATTRIBUTION_AUTO ?? 'true'))) return;
+    // 2026-05-25 audit-banco P1-2: OLAP heavy (counterfactual cross-gate scan).
+    if (isMemCritical()) { log('INFO', 'GATE-ATTRIBUTION', 'mem_critical — defer'); return; }
     const dow = parseInt(process.env.GATE_ATTRIBUTION_DOW || '1', 10); // 1=Monday
     const hourUtc = parseInt(process.env.GATE_ATTRIBUTION_HOUR_UTC || '15', 10);
     const now = new Date();
@@ -29307,6 +29316,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastReadinessLearnerDay = null;
   async function runReadinessLearnerWeekly() {
     if (!/^(1|true|yes)$/i.test(String(process.env.READINESS_LEARNER_AUTO || ''))) return;
+    // 2026-05-25 audit-banco P1-2: OLAP heavy (snapshot+verify+holdout sample).
+    if (isMemCritical()) { log('INFO', 'READINESS-LEARNER', 'mem_critical — defer'); return; }
     const now = new Date();
     // Roda domingos 11h UTC (default; tune via env READINESS_LEARNER_DOW/HOUR)
     const dow = parseInt(process.env.READINESS_LEARNER_DOW || '0', 10); // 0=Sun
