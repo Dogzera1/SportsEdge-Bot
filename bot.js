@@ -19931,6 +19931,28 @@ async function pollTennis(runOnce = false) {
                           markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                           const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
                           log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u${discTag} (sent=${r.sent} failed=${r.failed}) tipId=${_gate_tn.tipId}`);
+                          // 2026-05-25 Fase 0 pre-DM drift instrument. Opt-in via env
+                          // TENNIS_PREDM_INSTRUMENT=true (default OFF — zero impact se não setada).
+                          // Re-fetch Pinnacle cache-bypass + UPDATE tips com drift % real.
+                          // Mede gap entre emit odd e Pinnacle no momento — baseline pra Fase 1
+                          // (decisão swap/abort). Fire-and-forget, não bloqueia próxima iter.
+                          if (process.env.TENNIS_PREDM_INSTRUMENT === 'true' && _gate_tn?.tipId && (String(t.market || '').toLowerCase() === 'handicapgames' || String(t.market || '').toLowerCase() === 'totalgames')) {
+                            try {
+                              const { instrumentTipDrift } = require('./lib/tennis-predm-check');
+                              setImmediate(() => {
+                                instrumentTipDrift({
+                                  db,
+                                  tipId: _gate_tn.tipId,
+                                  matchId: match.id,
+                                  market: t.market,
+                                  line: t.line,
+                                  side: t.side,
+                                  emitOdd: t.odd,
+                                  isLive: isLiveTennis,
+                                }).catch(() => {});
+                              });
+                            } catch (_) { /* require fail silencioso */ }
+                          }
                         } else {
                           log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                         }

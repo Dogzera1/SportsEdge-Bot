@@ -3378,6 +3378,42 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '127_tips_pre_dm_drift',
+    up(db) {
+      // 2026-05-25: Pre-DM drift instrumentation (Fase 0 do plano tennis HG line shop).
+      // Mede drift entre `odds` (emit time, cache Pinnacle) e Pinnacle re-fetch
+      // imediatamente antes do DM dispatch. Audit 30d real n=86 mostrou:
+      //   HG live mean drift -13%, 50% das tips com drift < -20%
+      //   HG positive drift n=20 concentrada em WTA (ROI -11.9%) vs ATP +31.6%
+      // Sem timestamp/drift gravado, impossivel medir gap real entre cache + DM.
+      //
+      // Colunas adicionadas (todas nullable, default NULL — população opt-in via
+      // env TENNIS_PREDM_INSTRUMENT=true):
+      //   tip_pre_dm_drift_pct  REAL — (refresh_odd - odds) / odds * 100
+      //   tip_pre_dm_check_at   TEXT — ISO timestamp da check
+      //   tip_pre_dm_decision   TEXT — 'ship' | 'ship_updated' | 'swap' | 'abort'
+      //                              | 'skip_instrument' (Fase 0 só loga)
+      //
+      // Idempotent: PRAGMA table_info check antes ADD COLUMN.
+      try {
+        const cols = db.prepare(`PRAGMA table_info(tips)`).all().map(c => c.name);
+        const required = [
+          { name: 'tip_pre_dm_drift_pct', type: 'REAL' },
+          { name: 'tip_pre_dm_check_at', type: 'TEXT' },
+          { name: 'tip_pre_dm_decision', type: 'TEXT' },
+        ];
+        let added = 0;
+        for (const { name, type } of required) {
+          if (!cols.includes(name)) {
+            db.exec(`ALTER TABLE tips ADD COLUMN ${name} ${type}`);
+            added++;
+          }
+        }
+        console.log(`[mig 127] tips.tip_pre_dm_* columns added: ${added} new (${required.length} total)`);
+      } catch (e) { console.log(`[mig 127] tip_pre_dm_*: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -10574,6 +10574,143 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-25: Pre-DM drift instrumentation debug (Fase 0 do plano tennis HG line shop).
+  // Agrega tips.tip_pre_dm_drift_pct grouped by league_type × market × side_dir × is_live.
+  // Requer mig 127 + TENNIS_PREDM_INSTRUMENT=true coletando dados em prod.
+  // GET /admin/tennis-predm-drift-debug?days=7&key=<KEY>
+  if (p === '/admin/tennis-predm-drift-debug') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+      const rows = db.prepare(`
+        SELECT id, event_name, tip_participant, market_type, is_live, odds,
+               tip_pre_dm_drift_pct, tip_pre_dm_decision, tip_pre_dm_check_at,
+               result, stake_reais, profit_reais, sent_at
+        FROM tips
+        WHERE sport = 'tennis'
+          AND is_shadow = 0
+          AND (archived IS NULL OR archived = 0)
+          AND tip_pre_dm_check_at IS NOT NULL
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY sent_at DESC
+      `).all(days);
+
+      function leagueType(t) {
+        const ev = String(t.event_name || '').toLowerCase();
+        if (ev.includes('challenger')) return 'Challenger';
+        if (ev.includes('itf')) return 'ITF';
+        if (ev.includes('doubles')) return 'Doubles';
+        if (ev.includes('wta')) return 'WTA';
+        if (ev.includes('roland') || ev.includes('french open') || ev.includes('wimbledon')
+            || ev.includes('us open') || ev.includes('australian open')) return 'ATP-Slam';
+        if (ev.includes('atp')) return 'ATP-main';
+        return 'other';
+      }
+      function sideDir(t) {
+        const m = String(t.market_type || '').toUpperCase();
+        const tp = String(t.tip_participant || '');
+        if (m === 'HANDICAP_GAMES') {
+          if (/\+\d/.test(tp)) return 'POS';
+          if (/-\d/.test(tp)) return 'NEG';
+          return 'unknown';
+        }
+        if (m === 'TOTAL_GAMES') {
+          if (/over|under/i.test(tp)) return tp.match(/over/i) ? 'OVER' : 'UNDER';
+          return 'unknown';
+        }
+        return 'unknown';
+      }
+
+      const enriched = rows.map(r => ({
+        ...r,
+        league_type: leagueType(r),
+        side_dir: sideDir(r),
+        drift_bucket: r.tip_pre_dm_drift_pct == null ? 'no_fresh' :
+          r.tip_pre_dm_drift_pct >= 10 ? 'pos_>+10%' :
+          r.tip_pre_dm_drift_pct >= 5 ? 'pos_+5_+10%' :
+          r.tip_pre_dm_drift_pct >= 0 ? 'pos_0_+5%' :
+          r.tip_pre_dm_drift_pct >= -5 ? 'neg_0_-5%' :
+          r.tip_pre_dm_drift_pct >= -10 ? 'neg_-5_-10%' :
+          r.tip_pre_dm_drift_pct >= -20 ? 'neg_-10_-20%' : 'neg_<=-20%',
+      }));
+
+      function pctile(arr, p) {
+        if (!arr.length) return null;
+        const s = [...arr].sort((a, b) => a - b);
+        return s[Math.min(s.length - 1, Math.floor(s.length * p))];
+      }
+      function statsFor(subset) {
+        const drifts = subset.filter(r => Number.isFinite(r.tip_pre_dm_drift_pct))
+                             .map(r => r.tip_pre_dm_drift_pct);
+        const settled = subset.filter(r => r.result === 'win' || r.result === 'loss');
+        let stake = 0, profit = 0;
+        for (const t of settled) {
+          const s = parseFloat(t.stake_reais) || 0;
+          stake += s;
+          if (t.result === 'win') profit += s * (parseFloat(t.odds) - 1);
+          else if (t.result === 'loss') profit -= s;
+        }
+        return {
+          n: subset.length,
+          n_with_drift: drifts.length,
+          n_no_fresh_line: subset.filter(r => r.tip_pre_dm_decision === 'no_fresh_line').length,
+          drift_mean: drifts.length ? +(drifts.reduce((a, b) => a + b, 0) / drifts.length).toFixed(2) : null,
+          drift_median: pctile(drifts, 0.5),
+          drift_p10: pctile(drifts, 0.10),
+          drift_p25: pctile(drifts, 0.25),
+          drift_p75: pctile(drifts, 0.75),
+          drift_p90: pctile(drifts, 0.90),
+          adverse_le_minus5_pct: drifts.length ? +(drifts.filter(d => d <= -5).length / drifts.length * 100).toFixed(1) : null,
+          adverse_le_minus10_pct: drifts.length ? +(drifts.filter(d => d <= -10).length / drifts.length * 100).toFixed(1) : null,
+          adverse_le_minus20_pct: drifts.length ? +(drifts.filter(d => d <= -20).length / drifts.length * 100).toFixed(1) : null,
+          positive_ge_5_pct: drifts.length ? +(drifts.filter(d => d >= 5).length / drifts.length * 100).toFixed(1) : null,
+          n_settled: settled.length,
+          stake_total: +stake.toFixed(2),
+          profit_total: +profit.toFixed(2),
+          roi_pct: stake > 0 ? +((profit / stake) * 100).toFixed(2) : null,
+        };
+      }
+
+      function groupBy(subset, keyFn) {
+        const map = new Map();
+        for (const r of subset) {
+          const k = keyFn(r);
+          if (!map.has(k)) map.set(k, []);
+          map.get(k).push(r);
+        }
+        const out = {};
+        for (const [k, arr] of map) out[k] = statsFor(arr);
+        return out;
+      }
+
+      sendJson(res, {
+        ok: true,
+        days,
+        _disclaimer: 'Fase 0 instrumentation — TENNIS_PREDM_INSTRUMENT=true required em prod pra popular tip_pre_dm_* cols. Drift % = (Pinnacle fresh - emit odd) / emit odd × 100. Negativo = linha colapsou (market sharpened); positivo = linha alongou (market afastou).',
+        overall: statsFor(enriched),
+        by_market: groupBy(enriched, r => r.market_type),
+        by_market_live: groupBy(enriched, r => `${r.market_type}/${r.is_live ? 'LIVE' : 'PRE'}`),
+        by_league_type: groupBy(enriched, r => r.league_type),
+        by_league_market_side: groupBy(enriched, r => `${r.league_type}|${r.market_type}|${r.side_dir}`),
+        by_drift_bucket: groupBy(enriched, r => r.drift_bucket),
+        recent_top_adverse: enriched
+          .filter(r => Number.isFinite(r.tip_pre_dm_drift_pct))
+          .sort((a, b) => a.tip_pre_dm_drift_pct - b.tip_pre_dm_drift_pct)
+          .slice(0, 10)
+          .map(r => ({ id: r.id, sent_at: r.sent_at, league: r.league_type, market: r.market_type, tip: r.tip_participant, emit_odd: r.odds, drift_pct: +r.tip_pre_dm_drift_pct.toFixed(1), decision: r.tip_pre_dm_decision, result: r.result })),
+        recent_top_positive: enriched
+          .filter(r => Number.isFinite(r.tip_pre_dm_drift_pct))
+          .sort((a, b) => b.tip_pre_dm_drift_pct - a.tip_pre_dm_drift_pct)
+          .slice(0, 10)
+          .map(r => ({ id: r.id, sent_at: r.sent_at, league: r.league_type, market: r.market_type, tip: r.tip_participant, emit_odd: r.odds, drift_pct: +r.tip_pre_dm_drift_pct.toFixed(1), decision: r.tip_pre_dm_decision, result: r.result })),
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   // 2026-05-05: força settle de UM tip — replica server-side o que o bot faria
   // (pickBestTennisSettleRow + settleTipById + bankroll update). Permite drenar
   // backlog tennis sem precisar de curl POST. Só funciona pra tennis ML pendentes.
