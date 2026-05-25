@@ -171,6 +171,19 @@ function _classifyTier(tip) {
   return classifyTierString(tip?.sport || SPORT, tip?.league);
 }
 
+// 2026-05-25 (causa-fix Bo5 Slam ATP R1 leak): classifica match format (bo3/bo5)
+// pra split de calib v3 dentro de tier. Espelha exatamente bot.js:19449-19454
+// (P5 cross-check). Só ATP main draw em Grand Slam = Bo5; WTA sempre Bo3,
+// Challenger sempre Bo3, qualifiers sempre Bo3.
+function _classifyFormat(tip) {
+  if (!tip || (tip.sport && tip.sport !== 'tennis')) return 'bo3';
+  const lg = String(tip.league || '');
+  const isSlam = /grand slam|\[g\]|wimbledon|us open|french open|roland garros|australian open/i.test(lg);
+  const isAtp = /\batp\b/i.test(lg);
+  const isQuali = /qualifier|qualifying|quali\b/i.test(lg);
+  return (isSlam && isAtp && !isQuali) ? 'bo5' : 'bo3';
+}
+
 // Auto-detecta markets fitáveis a partir do sample (mercados com >=12 settled, pós-dedup)
 function detectMarkets(tips) {
   const dedup = dedupRebroadcasts(tips);
@@ -308,6 +321,10 @@ function _fitBins(lst, marketName, tag = 'all') {
 // fallback menos específico quando insuficiente. Override --min-tier-n / --min-side-n.
 const MIN_TIER_N = parseInt(arg('min-tier-n', '30'), 10);
 const MIN_SIDE_N = parseInt(arg('min-side-n', '30'), 10);
+// MIN_FORMAT_N: split Bo3/Bo5 dentro de tier (schema v3). Mais alto que MIN_TIER_N
+// porque Bo5 é só 4 Slams ATP/ano — variance maior e overfit risk. Override
+// --min-format-n; sample insuficiente → format key não criada, fallback tier-only.
+const MIN_FORMAT_N = parseInt(arg('min-format-n', '15'), 10);
 
 // Normaliza side pra label canônico (tennis market data tem variações).
 function _normSide(s) {
@@ -392,11 +409,57 @@ function fitMarket(tipsRaw, marketName) {
       }
     }
 
+    // 2026-05-25 (schema v3): per-(tier, format) split. Só tennis ATP main tem
+    // chance de Bo5 sample suficiente (4 Slams/ano). Outros tiers ficam Bo3-only
+    // → format key não criada e fallback v2 segue.
+    const tierFormatFits = {};
+    if (SPORT === 'tennis') {
+      const tierFormatGroups = new Map();
+      for (const t of sub) {
+        const fmt = _classifyFormat(t);
+        if (!fmt) continue;
+        if (!tierFormatGroups.has(fmt)) tierFormatGroups.set(fmt, []);
+        tierFormatGroups.get(fmt).push(t);
+      }
+      for (const [fmt, sub2] of tierFormatGroups) {
+        if (sub2.length < MIN_FORMAT_N) {
+          console.log(`[${marketName}/tier=${tier}/format=${fmt}] n=${sub2.length} < MIN_FORMAT_N=${MIN_FORMAT_N}, fold into tier-only`);
+          continue;
+        }
+        const fmtFit = _fitBins(sub2, marketName, `tier=${tier}/format=${fmt}`);
+        if (!fmtFit) continue;
+        // Per-(tier, format, side) sub-fit — gate MIN_SIDE_N por side dentro do format.
+        const tfsFits = {};
+        const tfsGroups = new Map();
+        for (const t of sub2) {
+          const side = _normSide(t.side);
+          if (!side) continue;
+          if (!tfsGroups.has(side)) tfsGroups.set(side, []);
+          tfsGroups.get(side).push(t);
+        }
+        for (const [side, sub3] of tfsGroups) {
+          if (sub3.length < MIN_SIDE_N) continue;
+          const tfsFit = _fitBins(sub3, marketName, `tier=${tier}/format=${fmt}/side=${side}`);
+          if (tfsFit) {
+            tfsFits[side] = tfsFit;
+            console.log(`[${marketName}/tier=${tier}/format=${fmt}/side=${side}] fitted n=${tfsFit.nTotal} ${tfsFit.bins.length} bins`);
+          }
+        }
+        tierFormatFits[fmt] = {
+          ...fmtFit,
+          sides: Object.keys(tfsFits).length ? tfsFits : undefined,
+        };
+        console.log(`[${marketName}/tier=${tier}/format=${fmt}] fitted n=${fmtFit.nTotal} ${fmtFit.bins.length} bins coverage=[${fmtFit.coverage[0].toFixed(3)},${fmtFit.coverage[1].toFixed(3)}]${tierFormatFits[fmt].sides ? ` + ${Object.keys(tfsFits).length} side subfits` : ''}`);
+      }
+    }
+
     tierFits[tier] = {
       ...tierFit,
       sides: Object.keys(tierSideFits).length ? tierSideFits : undefined,
+      formats: Object.keys(tierFormatFits).length ? tierFormatFits : undefined,
     };
-    console.log(`[${marketName}/tier=${tier}] fitted n=${tierFit.nTotal} ${tierFit.bins.length} bins coverage=[${tierFit.coverage[0].toFixed(3)},${tierFit.coverage[1].toFixed(3)}]${tierFits[tier].sides ? ` + ${Object.keys(tierSideFits).length} side subfits` : ''}`);
+    const fmtCount = Object.keys(tierFormatFits).length;
+    console.log(`[${marketName}/tier=${tier}] fitted n=${tierFit.nTotal} ${tierFit.bins.length} bins coverage=[${tierFit.coverage[0].toFixed(3)},${tierFit.coverage[1].toFixed(3)}]${tierFits[tier].sides ? ` + ${Object.keys(tierSideFits).length} side subfits` : ''}${fmtCount ? ` + ${fmtCount} format subfits` : ''}`);
   }
 
   return {
