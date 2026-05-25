@@ -29318,7 +29318,15 @@ load();
             }
           }
         } catch (e) { log('WARN', 'DEDUP-FINAL', `err: ${e.message}`); }
-        const result = stmts.insertTip.run({
+        // 2026-05-25 (audit-banco P0-1): wrap INSERT tips + 5 UPDATEs +
+        // incrementApiUsage em db.transaction. Antes 7 writes sequenciais sem
+        // atomicity — crash entre passos deixava tip com open_odds/pinnacle_odd
+        // NULL → CLV capture downstream usava dados parciais. better-sqlite3
+        // transaction é sync: tudo ou nada. Inner try/catches preservados —
+        // erros locais não abortam tx (apenas erro não-capturado faz rollback).
+        let result;
+        db.transaction(() => {
+        result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
           tipParticipant, odds: oddsN,
@@ -29417,6 +29425,7 @@ load();
           }
         }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
+        })();
         // Metrics: counter por sport + isLive + isShadow.
         try {
           const metrics = require('./lib/metrics');
