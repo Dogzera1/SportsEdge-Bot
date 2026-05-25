@@ -6871,15 +6871,23 @@ function _loadMarketTipsRuntimeState() {
     }
     _marketTipsDisabledRuntime.clear();
     for (const r of rows) {
-      const parts = [r.sport, r.market];
-      if (r.side) parts.push(r.side);
+      // 2026-05-25: normaliza case ao carregar — ghost real bet tip 4327
+      // (HANJIN BRION lol|TOTAL|under) escapou pq manual disable salvou
+      // 'TOTAL' mas scanner check usa 'total' (lowercase scanner output).
+      // Lowercasing aqui cobre legacy rows uppercase sem requerer DB migration.
+      // Side já era lowercased em endpoint, mas defensive aqui também.
+      const _sportLc = String(r.sport || '').toLowerCase();
+      const _marketLc = String(r.market || '').toLowerCase();
+      const _sideLc = r.side ? String(r.side).toLowerCase() : null;
+      const parts = [_sportLc, _marketLc];
+      if (_sideLc) parts.push(_sideLc);
       // Tier-level disable: key inclui `tier{N}` entre side e league.
       if (r.tier && !r.league) parts.push(`tier${r.tier}`);
       if (r.league) parts.push(r.league);
       const key = parts.join('|');
       _marketTipsDisabledRuntime.set(key, {
         reason: r.reason, since: r.updated_at, clv: r.clv_pct, n: r.clv_n, source: r.source,
-        side: r.side || null,
+        side: _sideLc,
         league: r.league || null,
         tier: r.tier || null,
       });

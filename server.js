@@ -22482,7 +22482,11 @@ load();
   if (p === '/admin/mt-disable' && (req.method === 'POST' || req.method === 'GET')) {
     if (!requireAdmin(req, res)) return;
     const sport = String(parsed.query.sport || '').trim().toLowerCase();
-    const market = String(parsed.query.market || '').trim();
+    // 2026-05-25: lowercase market — manual disable salvava 'TOTAL' enquanto
+    // scanner check usa 'total' (lowercase scanner output) → case mismatch
+    // deixou lol|TOTAL|under disable não bloquear tip 4327 HANJIN BRION.
+    // Sport+side já eram lowercased; market era o único campo escapando.
+    const market = String(parsed.query.market || '').trim().toLowerCase();
     const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : null;
     // 2026-05-15 audit P2 (granularidade): league opt pra disable cirúrgico
     // (ex: ATP Challenger Mauthausen sem afetar resto da ATP Challenger). Era
