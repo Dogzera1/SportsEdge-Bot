@@ -10481,6 +10481,38 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-25: debug endpoint pra audit Sackmann sample size por jogador
+  // (DF model overestimation pendency, memory project_tennis_df_model_pendency_2026_05_25).
+  // Retorna getPlayerServeProfile completo + variants per surface/sinceDays.
+  // GET /admin/tennis-player-stats-debug?player=Frances+Tiafoe&surface=hard&sinceDays=730
+  if (p === '/admin/tennis-player-stats-debug') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const player = String(parsed.query.player || '').trim();
+    if (!player) { sendJson(res, { ok: false, error: 'player obrigatório' }, 400); return; }
+    try {
+      const { getPlayerServeProfile, getPlayerAceRate, getPlayerDfRate } = require('./lib/tennis-player-stats');
+      const surface = parsed.query.surface ? String(parsed.query.surface).trim() : null;
+      const sinceDays = Math.max(30, Math.min(3650, parseInt(parsed.query.sinceDays || '730', 10) || 730));
+      const minMatches = Math.max(1, Math.min(100, parseInt(parsed.query.minMatches || '5', 10) || 5));
+      // Default + surface-filtered + sinceDays variants pra triangular sample bias
+      const profileDefault = getPlayerServeProfile(db, player, { sinceDays, minMatches });
+      const profileSurface = surface ? getPlayerServeProfile(db, player, { sinceDays, surface, minMatches }) : null;
+      const profileShort = getPlayerServeProfile(db, player, { sinceDays: 180, minMatches: 1 });
+      const profileLong = getPlayerServeProfile(db, player, { sinceDays: 3650, minMatches: 1 });
+      sendJson(res, {
+        ok: true,
+        player, query: { surface, sinceDays, minMatches },
+        default: profileDefault,
+        surface_filtered: profileSurface,
+        last_180d: profileShort,
+        last_10y: profileLong,
+        hint: 'Compare matches counts cross-variants. n<20 em default sugere DF model unreliable. Surface_filtered null = sem matches naquela surface.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-05: força settle de UM tip — replica server-side o que o bot faria
   // (pickBestTennisSettleRow + settleTipById + bankroll update). Permite drenar
   // backlog tennis sem precisar de curl POST. Só funciona pra tennis ML pendentes.
