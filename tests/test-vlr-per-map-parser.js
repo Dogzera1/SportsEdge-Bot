@@ -121,6 +121,32 @@ test('returns null when no winner (in-progress)', () => {
   assert(r === null, `expected null, got ${JSON.stringify(r)}`);
 });
 
+// 2026-05-25 regression: VLR prod markup tem `class="score "` (trailing space)
+// + `style="margin-right: 12px;"` attr. Audit live VLR 660380 capturava winner
+// mas score=null → log mostrava "(?-?)". Fix em lib/vlr.js _parseMapHeader regex.
+test('parses VLR live markup with trailing space + style attr', () => {
+  const liveHtml = `
+<div class="vm-stats-game-header">
+  <div class="team">
+    <div class="team-name">G2 Esports</div>
+    <div class="score mod-win" style="margin-right: 12px;">13 </div>
+  </div>
+  <div class="map">
+    <span>Ascent<span class="picked">PICK</span></span>
+  </div>
+  <div class="team mod-right">
+    <div class="team-name">NRG</div>
+    <div class="score " style="margin-left: 8px;">8</div>
+  </div>
+</div>
+<div style="text-align: center">scoreboard</div>
+`;
+  const r = _parseMapHeader(liveHtml);
+  assert(r !== null, 'should parse live markup');
+  assert(r.winner === 'G2 Esports', `winner=${r.winner}`);
+  assert(r.score === '13-8', `score=${r.score} (esperado 13-8, regex trailing-space fix)`);
+});
+
 let passed = 0, failed = 0;
 for (const t of tests) {
   try {
