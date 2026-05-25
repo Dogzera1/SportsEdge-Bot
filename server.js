@@ -6418,7 +6418,10 @@ const server = http.createServer(async (req, res) => {
     if (gameParam === 'valorant') {
       const normT = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
       const n1 = normT(t1), n2 = normT(t2);
-      if (process.env.PINNACLE_VALORANT === 'true' && !_valorantPinnacleCache.data.length) {
+      // Lazy-warm sem env gate (mirror /odds-markets:6046). getPinnacle*Matches
+      // retorna [] internamente se PINNACLE_VALORANT/PINNACLE_CS não set OR sem key.
+      // Catch silent: lazy-warm best-effort, fallback é cache miss → "não encontradas" (esperado).
+      if (!_valorantPinnacleCache.data.length) {
         try { await getPinnacleValorantMatches(); } catch (_) {}
       }
       const pinHit = (_valorantPinnacleCache.data || []).find(m => {
@@ -6446,7 +6449,8 @@ const server = http.createServer(async (req, res) => {
     if (gameParam === 'cs' || gameParam === 'cs2') {
       const normT = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
       const n1 = normT(t1), n2 = normT(t2);
-      if (process.env.PINNACLE_CS === 'true' && !_csPinnacleCache.data.length) {
+      // Lazy-warm sem env gate (mirror VAL block above). Catch silent: best-effort.
+      if (!_csPinnacleCache.data.length) {
         try { await getPinnacleCsMatches(); } catch (_) {}
       }
       const pinHit = (_csPinnacleCache.data || []).find(m => {
