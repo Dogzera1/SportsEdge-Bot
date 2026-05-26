@@ -1066,6 +1066,26 @@ setInterval(() => {
   try { require('./lib/metrics').gauge('bot_uptime_s', Math.round(process.uptime())); } catch (_) {}
 }, 60 * 1000).unref();
 
+// 2026-05-26 fix bot_restart_loop falso-positivo: rapid_boot_count_1h era setado
+// UMA vez no boot (bot.js:701) e ficava congelado. Sem refresh, alerta dispara
+// pra sempre mesmo com bot saudável uptime=15h+. Decai naturalmente conforme
+// boots saem da janela 1h. Refresh 5min é trade-off entre IO disco e responsividade.
+setInterval(() => {
+  try {
+    const fs = require('fs');
+    if (!fs.existsSync(BOOT_COUNT_FILE)) return;
+    const data = safeParse(fs.readFileSync(BOOT_COUNT_FILE, 'utf8'), null);
+    if (!data || !Array.isArray(data.recentBoots)) return;
+    const now = Date.now();
+    const oneHourAgo = now - 3600 * 1000;
+    const recent24h = data.recentBoots.filter(ts => Number.isFinite(ts) && (now - ts) < 24 * 3600 * 1000);
+    const rapid1h = recent24h.filter(ts => ts >= oneHourAgo).length;
+    const m = require('./lib/metrics');
+    m.gauge('bot_boot_count_24h', recent24h.length);
+    m.gauge('bot_rapid_boot_count_1h', rapid1h);
+  } catch (_) {}
+}, 5 * 60 * 1000).unref();
+
 // 2026-05-21 (audit feed-medic P0): Pinnacle key expired/invalid DM alert.
 // lib/pinnacle.js seta gauge pinnacle_key_expired{status=401|403} quando
 // API retorna unauth. Sem alerta DM, log Railway era único sinal — gap

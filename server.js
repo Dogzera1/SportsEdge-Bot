@@ -1528,6 +1528,51 @@ const HEALTH_CACHE_MS = (() => {
   const raw = parseInt(process.env.HEALTH_CACHE_MS || '', 10);
   return Number.isFinite(raw) && raw >= 0 ? raw : 30000;
 })();
+
+// 2026-05-26 fix bot_restart_loop falso-positivo: cache permanente do /health
+// congelava `bot_uptime_s` e `bot_rapid_boot_count_1h` no snapshot inicial
+// (uptime=120s + rapid=9 = trigger). Após 15h saudáveis, alert ainda dispara.
+// Helpers abaixo re-leem gauges fresh in-memory (bridge bot.js→server cada
+// 60s, sem custo DB) e re-avaliam alerts gauge-dependentes antes de servir
+// cache. Mantém heavy DB queries cacheadas — só alerts transitivos refrescam.
+function _readLiveBotGauges() {
+  try {
+    const snap = require('./lib/metrics').snapshot();
+    const get = (k) => {
+      const direct = snap.gauges?.[k]?.value;
+      if (Number.isFinite(direct)) return direct;
+      const bridged = snap.gauges?.[`bot:${k}`]?.value;
+      return Number.isFinite(bridged) ? bridged : null;
+    };
+    return {
+      db_integrity_ok: get('db_integrity_ok'),
+      db_size_mb: get('db_size_mb'),
+      bot_uptime_s: get('bot_uptime_s'),
+      bot_boot_count_24h: get('bot_boot_count_24h'),
+      bot_boot_count_total: get('bot_boot_count_total'),
+      bot_rapid_boot_count_1h: get('bot_rapid_boot_count_1h'),
+    };
+  } catch (_) { return {}; }
+}
+function _refreshTransientAlerts(cachedAlerts, g) {
+  // Filtra alerts gauge-dependentes (re-avaliados); preserva resto (sport_silent,
+  // theodds_quota, feed_*, oddspapi_*, db_error, analysis_stale, etc).
+  const TRANSIENT_IDS = new Set(['bot_restart_loop', 'db_integrity_failed', 'db_size_high']);
+  const out = (cachedAlerts || []).filter(a => !TRANSIENT_IDS.has(a?.id));
+  if (g.db_integrity_ok === 0) {
+    out.push({ id: 'db_integrity_failed', severity: 'critical', msg: 'PRAGMA integrity_check retornou erro — investigar urgente' });
+  }
+  const _dbSizeAlertMb = parseInt(process.env.DB_SIZE_ALERT_MB || '500', 10);
+  if (Number.isFinite(g.db_size_mb) && g.db_size_mb > _dbSizeAlertMb) {
+    out.push({ id: 'db_size_high', severity: 'warning', msg: `DB ${g.db_size_mb}MB (>${_dbSizeAlertMb}MB threshold) — considerar archive antigo + VACUUM (consulte /admin/db-stats)` });
+  }
+  const rapid1h = g.bot_rapid_boot_count_1h;
+  const uptime = g.bot_uptime_s;
+  if (Number.isFinite(rapid1h) && rapid1h >= 5 && Number.isFinite(uptime) && uptime < 600) {
+    out.push({ id: 'bot_restart_loop', severity: 'warning', msg: `${rapid1h} boots na última hora (${g.bot_boot_count_24h ?? '?'} em 24h, uptime ${uptime}s) — checar crash recorrente` });
+  }
+  return out;
+}
 let _healthRefreshInFlight = false;
 let _healthRefreshLastStart = 0;
 let _oddsBackoffLogTs = 0;
@@ -7829,15 +7874,28 @@ const server = http.createServer(async (req, res) => {
     // Consumers que precisam fresh data devem usar /admin/risk-metrics etc.
     if (_healthCache.ts > 0 && _healthCache.response) {
       const cacheAgeMs = _now - _healthCache.ts;
+      // 2026-05-26 fix bot_restart_loop falso-positivo: cache permanente
+      // congelava o snapshot inicial de uptime+rapid_boots, fazendo o alert
+      // disparar pra sempre. Re-avalia COM gauges fresh (in-memory metrics
+      // são atualizadas pela bridge bot.js→server cada 60s, sem custo DB).
+      // Mantém o resto do response cacheado (DB-heavy queries intactas).
+      const liveBotGauges = _readLiveBotGauges();
+      const liveAlerts = _refreshTransientAlerts(_healthCache.alerts || [], liveBotGauges);
       if (p === '/alerts') {
         sendJson(res, {
-          alerts: _healthCache.alerts || [],
+          alerts: liveAlerts,
           ts: new Date(_healthCache.ts).toISOString(),
           cached: true,
           cacheAgeMs,
         });
       } else {
-        sendJson(res, { ..._healthCache.response, cached: true, cacheAgeMs });
+        sendJson(res, {
+          ..._healthCache.response,
+          alerts: liveAlerts,
+          botGauges: liveBotGauges,
+          cached: true,
+          cacheAgeMs,
+        });
       }
       return;
     }
