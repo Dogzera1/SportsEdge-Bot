@@ -18753,7 +18753,14 @@ load();
       }
       if (shadowMtResult) summary.shadow_mt = shadowMtResult;
       if (_psKillsTrace.length) summary.ps_kills_trace = _psKillsTrace;
-      log('INFO', 'FORCE-SETTLE', `${summary.attempted} attempted | ${summary.settled} settled | ${summary.voided} voided | ${summary.skipped} skipped | ${summary.errors} errors${shadowMtResult ? ` | shadow_mt: ${shadowMtResult.settled||0}/${shadowMtResult.skipped||0}` : ''}`);
+      // 2026-05-26 (audit log closure): split shadow_mt skipped em 3 categorias
+      // (cooldown/no_cand/unhandled) — antes só `settled/total_skipped` mascarava
+      // 100 "stuck" como urgente quando era cooldown design intencional.
+      const _smt = shadowMtResult;
+      const _smtTail = _smt
+        ? ` | shadow_mt: settled=${_smt.settled||0} skipped=${_smt.skipped||0} (cooldown=${_smt.skippedCooldown||0} no_cand=${_smt.skippedNoCandidate||0} unhandled=${_smt.skippedUnhandled||0})`
+        : '';
+      log('INFO', 'FORCE-SETTLE', `${summary.attempted} attempted | ${summary.settled} settled | ${summary.voided} voided | ${summary.skipped} skipped | ${summary.errors} errors${_smtTail}`);
       sendJson(res, summary);
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;

@@ -28108,6 +28108,24 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('shadow_settle', runShadowSettle), MT_SETTLE_INTERVAL_MS);
   setTimeout(_wrapCron('shadow_settle', runShadowSettle), 5 * 60 * 1000); // primeira run em 5min pós-boot
 
+  // 2026-05-26 (audit log "shadow_mt 0/100" closure): cron 4h força bypass do
+  // cooldown 30min in-memory pra capturar tips cujo match_results chegou
+  // depois do cooldown set. Sem isto, tip pode ficar stuck cycles inteiros
+  // (10min × 30min cooldown loop) enquanto sync atrasado catch up.
+  // Manual: POST /admin/settle-market-tips-shadow?force=1
+  const runShadowSettleForceBypass = async () => {
+    try {
+      const { settleShadowTips } = require('./lib/market-tips-shadow');
+      const r = settleShadowTips(db, { force: true });
+      if (r.settled > 0) {
+        log('INFO', 'MT-SHADOW-FORCE', `force-bypass: settled=${r.settled} skipped=${r.skipped} (cooldown=${r.skippedCooldown||0} no_cand=${r.skippedNoCandidate||0} unhandled=${r.skippedUnhandled||0})`);
+      }
+    } catch (e) { reportBug('MT-SHADOW-FORCE', e); }
+  };
+  const MT_SHADOW_FORCE_INTERVAL_MS = parseInt(process.env.MT_SHADOW_FORCE_INTERVAL_MS || '14400000', 10); // 4h default
+  setInterval(_wrapCron('shadow_settle_force', runShadowSettleForceBypass), MT_SHADOW_FORCE_INTERVAL_MS);
+  setTimeout(_wrapCron('shadow_settle_force', runShadowSettleForceBypass), 30 * 60 * 1000); // primeira run 30min pós-boot
+
   // Sprint 2.3 — Football MT auto-promote checker (cron 6h).
   // Quando football MT shadow acumula n≥30 settled com ROI≥+10% e CLV≥0,
   // alerta admin pra considerar flip FOOTBALL_MT_SHADOW_ONLY=false.
