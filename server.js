@@ -8490,7 +8490,12 @@ setInterval(load, 10000);
     const mapMatch = rawId.match(/_MAP(\d+)$/);
     const mapN = mapMatch ? parseInt(mapMatch[1], 10) : null;
     const baseId = rawId.replace(/_MAP\d+$/, '');
-    const psId = baseId.replace(/^ps_/, '');
+    // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
+    // Pass-through pra non-agg IDs.
+    const baseCanonical = baseId
+      ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, String(baseId), 'lol'); } catch (_) { return String(baseId); } })()
+      : '';
+    const psId = String(baseCanonical || baseId).replace(/^ps_/, '');
     if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
@@ -8550,7 +8555,11 @@ setInterval(load, 10000);
     const mapMatch = rawId.match(/_MAP(\d+)$/);
     const mapN = mapMatch ? parseInt(mapMatch[1], 10) : null;
     const baseId = rawId.replace(/_MAP\d+$/, '');
-    const psId = baseId.replace(/^dota2_ps_/, '').replace(/^ps_/, '');
+    // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
+    const baseCanonical = baseId
+      ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, String(baseId), 'dota2'); } catch (_) { return String(baseId); } })()
+      : '';
+    const psId = String(baseCanonical || baseId).replace(/^dota2_ps_/, '').replace(/^ps_/, '');
     if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
@@ -8760,8 +8769,10 @@ setInterval(load, 10000);
     const t2 = parsed.query.team2 || '';
     const sentAt = parsed.query.sentAt || '';
     if (!rawId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
+    const rawCanonical = (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, String(rawId), 'cs'); } catch (_) { return String(rawId); } })();
     try {
-      const r = await resolveEsportsResult({ sport: 'cs', game: 'cs', pandaPath: 'csgo', rawId, t1, t2, sentAt });
+      const r = await resolveEsportsResult({ sport: 'cs', game: 'cs', pandaPath: 'csgo', rawId: String(rawCanonical || rawId), t1, t2, sentAt });
       sendJson(res, { matchId: rawId, ...r });
     } catch (e) {
       sendJson(res, { matchId: rawId, resolved: false, error: e.message });
@@ -8775,8 +8786,10 @@ setInterval(load, 10000);
     const t2 = parsed.query.team2 || '';
     const sentAt = parsed.query.sentAt || '';
     if (!rawId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
+    const rawCanonical = (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, String(rawId), 'valorant'); } catch (_) { return String(rawId); } })();
     try {
-      const r = await resolveEsportsResult({ sport: 'valorant', game: 'valorant', pandaPath: 'valorant', rawId, t1, t2, sentAt });
+      const r = await resolveEsportsResult({ sport: 'valorant', game: 'valorant', pandaPath: 'valorant', rawId: String(rawCanonical || rawId), t1, t2, sentAt });
       sendJson(res, { matchId: rawId, ...r });
     } catch (e) {
       sendJson(res, { matchId: rawId, resolved: false, error: e.message });
@@ -8787,7 +8800,11 @@ setInterval(load, 10000);
   // ── Resultado Darts (settlement via Sofascore event status) ──
   if (p === '/darts-result') {
     const rawId = parsed.query.matchId || '';
-    const sofaId = String(rawId).replace(/^darts_/, '');
+    // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
+    const rawCanonical = rawId
+      ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, String(rawId), 'darts'); } catch (_) { return String(rawId); } })()
+      : '';
+    const sofaId = String(rawCanonical || rawId).replace(/^darts_/, '');
     if (!sofaId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     try {
       const r = await sofascoreDarts.getEventResult(sofaId);
@@ -9220,7 +9237,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/basket-result') {
-    const matchId = (parsed.query.matchId || '').trim();
+    const matchIdRaw = (parsed.query.matchId || '').trim();
     const team1   = (parsed.query.team1   || '').trim();
     const team2   = (parsed.query.team2   || '').trim();
     const sentAt  = (parsed.query.sentAt  || '').trim();
@@ -9229,6 +9246,10 @@ setInterval(load, 10000);
       sendJson(res, { resolved: false, error: 'team1 e team2 obrigatórios' }, 400);
       return;
     }
+    // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
+    const matchId = matchIdRaw
+      ? (() => { try { return require('./lib/match-id-resolver').resolveAlias(db, matchIdRaw, 'basket') || matchIdRaw; } catch (_) { return matchIdRaw; } })()
+      : '';
     try {
       // 2026-05-09 BUG FIX: tips gravam match_id como `basket_espn_<id>` mas
       // match_results grava como `espn_basket_<id>` (prefix invertido). Direct
@@ -35611,6 +35632,23 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       res.end(html);
     } catch(_) {
       res.writeHead(404); res.end('Dashboard not found');
+    }
+    return;
+  }
+
+  // LoL Live Edge Terminal — dashboard visual em tempo real (Riot livestats + modelo + EV)
+  if (p === '/lol-live-dashboard' || p === '/lol-live' || p === '/edge') {
+    const htmlPath = path.join(__dirname, 'public', 'lol-live-dashboard.html');
+    try {
+      const html = fs.readFileSync(htmlPath, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Pragma': 'no-cache'
+      });
+      res.end(html);
+    } catch(_) {
+      res.writeHead(404); res.end('lol-live-dashboard.html not found');
     }
     return;
   }
