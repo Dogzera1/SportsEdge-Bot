@@ -5212,6 +5212,226 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // LoL Live Edge Terminal — JSON aggregator for /lol-live-dashboard
+  // Combina /lol-matches (Riot+PandaScore live), /live-game (livestats), lol-map-model,
+  // lol-markets, lol-patches. Edge scanner ranqueia mercados com EV >= threshold.
+  if (p === '/api/lol-live-dashboard') {
+    try {
+      const selfPort = (req.socket && req.socket.localPort) || PORT;
+      const baseUrl = `http://127.0.0.1:${selfPort}`;
+      const feeds = { riot: 'up', panda: 'up', pinnacle: 'up', xcheck: 'up' };
+
+      const lmR = await httpGet(`${baseUrl}/lol-matches`).catch(() => null);
+      if (!lmR || lmR.status !== 200) feeds.panda = 'warn';
+      const allMatches = (lmR && lmR.status === 200) ? safeParse(lmR.body, []) : [];
+      const live = (Array.isArray(allMatches) ? allMatches : []).filter(m => m && m.status === 'live');
+
+      let lolMapModel, lolMarkets, lolPatches;
+      try { lolMapModel = require('./lib/lol-map-model'); } catch(_) {}
+      try { lolMarkets  = require('./lib/lol-markets');  } catch(_) {}
+      try { lolPatches  = require('./lib/lol-patches');  } catch(_) {}
+
+      let patchCtx = null;
+      try {
+        if (lolPatches && lolPatches.getActivePatch) {
+          const nowMs = Date.now();
+          const cur = lolPatches.getActivePatch(nowMs);
+          const days = lolPatches.getDaysSincePatch ? lolPatches.getDaysSincePatch(nowMs) : null;
+          patchCtx = { version: (cur && cur.version) || null, daysSince: days, sideBias: 0.520, notes: (days != null && days <= 4) ? 'patch fresco - modelo kills/series menos confiavel' : null };
+        }
+      } catch(_) {}
+
+      const enriched = await Promise.all(live.map(async (m) => {
+        const row = {
+          id: m.id,
+          league: m.league || m.leagueSlug || 'LoL',
+          team1: m.team1,
+          team2: m.team2,
+          score1: m.score1 || 0,
+          score2: m.score2 || 0,
+          bestOf: m.bestOf || 3,
+          currentMap: (Number(m.score1 || 0) + Number(m.score2 || 0)) + 1,
+          status: m.status,
+          time: m.time || null,
+          mapWinners: [],
+          liveStats: null,
+          model: null,
+          markets: [],
+          patch: patchCtx,
+          bestEv: null,
+        };
+        for (let i=0; i<row.score1; i++) row.mapWinners.push('team1');
+        for (let i=0; i<row.score2; i++) row.mapWinners.push('team2');
+
+        let gameId = null;
+        if (Array.isArray(m.games)) {
+          const g = m.games.find(x => /in_?progress|inProgress/i.test(String(x.state || '')));
+          if (g) gameId = g.id || g.gameId || null;
+        }
+        if (!gameId && m.currentGameId) gameId = m.currentGameId;
+        if (!gameId && m.id && /^\d{16,}$/.test(String(m.id))) gameId = String(m.id);
+
+        let liveStats = null;
+        if (gameId) {
+          try {
+            const lg = await httpGet(`${baseUrl}/live-game?gameId=${encodeURIComponent(gameId)}`).catch(() => null);
+            if (lg && lg.status === 200) {
+              const ld = safeParse(lg.body, {});
+              const frames = Array.isArray(ld.frames) ? ld.frames : [];
+              const last = frames[frames.length - 1];
+              if (last && (last.blueTeam || last.redTeam)) {
+                let gameTimeSec = 0;
+                if (last.rfc460Timestamp && m.time) {
+                  gameTimeSec = Math.max(0, (new Date(last.rfc460Timestamp).getTime() - new Date(m.time).getTime()) / 1000);
+                  if (!isFinite(gameTimeSec) || gameTimeSec > 7200) gameTimeSec = 0;
+                }
+                const blue = last.blueTeam || {};
+                const red  = last.redTeam  || {};
+                liveStats = {
+                  hasLiveStats: true,
+                  gameTime: gameTimeSec,
+                  blueTeam: {
+                    name: blue.name || m.team1,
+                    totalGold: blue.totalGold || 0,
+                    totalKills: blue.totalKills || 0,
+                    towerKills: blue.towerKills || 0,
+                    dragons: Array.isArray(blue.dragons) ? blue.dragons.length : (blue.dragons || 0),
+                    dragonTypes: Array.isArray(blue.dragons) ? blue.dragons : [],
+                    barons: blue.barons || 0,
+                    inhibitors: blue.inhibitors || 0,
+                  },
+                  redTeam: {
+                    name: red.name || m.team2,
+                    totalGold: red.totalGold || 0,
+                    totalKills: red.totalKills || 0,
+                    towerKills: red.towerKills || 0,
+                    dragons: Array.isArray(red.dragons) ? red.dragons.length : (red.dragons || 0),
+                    dragonTypes: Array.isArray(red.dragons) ? red.dragons : [],
+                    barons: red.barons || 0,
+                    inhibitors: red.inhibitors || 0,
+                  }
+                };
+              }
+            } else if (lg && lg.status !== 200) {
+              feeds.riot = 'warn';
+            }
+          } catch(_) { feeds.riot = 'warn'; }
+        }
+        row.liveStats = liveStats;
+
+        let pMap = 0.5, modelConfidence = 0.20, modelFactors = [], modelReason = 'sem livestats';
+        if (lolMapModel && lolMapModel.predictLolMapWinner) {
+          try {
+            const pred = lolMapModel.predictLolMapWinner({
+              liveStats: liveStats || { hasLiveStats: false },
+              seriesScore: { team1: row.score1, team2: row.score2 },
+              baselineP: 0.5,
+              pickTeam: row.team1,
+              team1Name: row.team1,
+            });
+            pMap = pred.p;
+            modelConfidence = pred.confidence;
+            modelFactors = pred.factors || [];
+            modelReason = pred.reason;
+          } catch(e) { modelReason = 'erro modelo: ' + e.message; }
+        }
+        row.model = { pBlue: pMap, confidence: modelConfidence, factors: modelFactors, reason: modelReason };
+
+        const markets = [];
+        const bookmakerOdds = m.odds || {};
+        const mlT1 = bookmakerOdds.t1 || null;
+        const mlT2 = bookmakerOdds.t2 || null;
+
+        if (lolMarkets) {
+          try {
+            // seriesWinProb(pMap, bestOf) retorna number (P team1 vence serie).
+            // Condicionamos manualmente ao score atual via mapScoreDistribution
+            // pra refletir maps restantes ate first-to-N.
+            let pT1 = lolMarkets.seriesWinProb ? lolMarkets.seriesWinProb(pMap, row.bestOf) : pMap;
+            const needed = Math.ceil((row.bestOf || 3) / 2);
+            const remaining = (row.bestOf || 3) - row.score1 - row.score2;
+            if (remaining > 0 && (row.score1 > 0 || row.score2 > 0)) {
+              const mapsToT1 = needed - row.score1;
+              const mapsToT2 = needed - row.score2;
+              if (mapsToT1 <= 0) pT1 = 1;
+              else if (mapsToT2 <= 0) pT1 = 0;
+              else {
+                const subBo = (mapsToT1 + mapsToT2) - 1;
+                pT1 = lolMarkets.seriesWinProb(pMap, Math.max(1, subBo));
+              }
+            }
+            const pT2 = 1 - pT1;
+            markets.push({ market: 'Match Winner', side: row.team1, p: pT1, fairOdd: 1/Math.max(pT1, 0.001), marketOdd: mlT1 || null, ev: (mlT1 && pT1) ? (pT1 * mlT1 - 1) : null });
+            markets.push({ market: 'Match Winner', side: row.team2, p: pT2, fairOdd: 1/Math.max(pT2, 0.001), marketOdd: mlT2 || null, ev: (mlT2 && pT2) ? (pT2 * mlT2 - 1) : null });
+          } catch(_) {}
+
+          try {
+            const lines = row.bestOf === 5 ? [3.5, 4.5] : [2.5];
+            for (const line of lines) {
+              const t = lolMarkets.totalMapsProb ? lolMarkets.totalMapsProb(pMap, row.bestOf, line) : null;
+              if (t) {
+                markets.push({ market: `Total Maps ${line}`, side: 'over',  p: t.over,  fairOdd: 1/Math.max(t.over, 0.001),  marketOdd: null, ev: null });
+                markets.push({ market: `Total Maps ${line}`, side: 'under', p: t.under, fairOdd: 1/Math.max(t.under, 0.001), marketOdd: null, ev: null });
+              }
+            }
+          } catch(_) {}
+
+          try {
+            const lines = row.bestOf === 5 ? [-1.5, +1.5, -2.5, +2.5] : [-1.5, +1.5];
+            for (const line of lines) {
+              const h = lolMarkets.handicapProb ? lolMarkets.handicapProb(pMap, row.bestOf, line) : null;
+              if (h) {
+                markets.push({ market: `Handicap ${line>0?'+':''}${line} (t1)`, side: row.team1, p: h.team1, fairOdd: 1/Math.max(h.team1, 0.001), marketOdd: null, ev: null });
+                markets.push({ market: `Handicap ${-line>0?'+':''}${-line} (t2)`, side: row.team2, p: h.team2, fairOdd: 1/Math.max(h.team2, 0.001), marketOdd: null, ev: null });
+              }
+            }
+          } catch(_) {}
+
+          try {
+            const dist = lolMarkets.mapScoreDistribution ? lolMarkets.mapScoreDistribution(pMap, row.bestOf) : null;
+            if (dist) {
+              const entries = Object.entries(dist).sort((a,b) => b[1] - a[1]).slice(0, 4);
+              for (const [score, prob] of entries) {
+                markets.push({ market: 'Correct Score', side: score, p: prob, fairOdd: 1/Math.max(prob, 0.001), marketOdd: null, ev: null });
+              }
+            }
+          } catch(_) {}
+        }
+
+        for (const mk of markets) {
+          if (mk.ev == null) mk.status = 'inconc';
+          else if (mk.ev >= 0.03) mk.status = 'edge';
+          else if (mk.ev >= 0) mk.status = 'watch';
+          else if (mk.ev <= -0.03) mk.status = 'leak';
+          else mk.status = 'inconc';
+        }
+        row.markets = markets;
+        const evs = markets.map(x => x.ev).filter(x => x != null);
+        row.bestEv = evs.length ? Math.max.apply(null, evs) : null;
+        row.bookmaker = bookmakerOdds.bookmaker || null;
+
+        return row;
+      }));
+
+      const edges = [];
+      for (const m of enriched) {
+        if (!Array.isArray(m.markets)) continue;
+        for (const mk of m.markets) {
+          if (mk.ev != null && mk.ev >= 0.03) {
+            edges.push({ matchId: m.id, matchLabel: `${m.team1} vs ${m.team2}`, market: mk.market, side: mk.side, ev: mk.ev, p: mk.p, fairOdd: mk.fairOdd, marketOdd: mk.marketOdd });
+          }
+        }
+      }
+      edges.sort((a,b) => b.ev - a.ev);
+
+      sendJson(res, { matches: enriched, edges, feeds, ts: Date.now(), patch: patchCtx });
+    } catch(e) {
+      log('WARN', 'LOL-LIVE-DASH', `agg err: ${e.message}`);
+      sendJson(res, { error: e.message, matches: [], edges: [], feeds: { riot: 'down', panda: 'down', pinnacle: 'down', xcheck: 'down' } }, 500);
+    }
+    return;
+  }
+
   if (p === '/live-gameids') {
     try {
       const raw = parsed.query.matchId;
