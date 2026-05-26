@@ -11865,6 +11865,14 @@ async function autoAnalyzeMatch(token, match) {
         // Soft: nunca rejeita. Gate 0.5/0.6 downstream baixa confidence.
         log('INFO', 'AUTO', `P divergente modelo LoL (${_v.reason}) — Gate 0.5/0.6 ajusta confidence`);
       }
+      // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611.
+      // Bug histórico: Tennis Ben Shelton EV=468% (memory project_ai_audit_2026_05_22).
+      const _aiEvLol = require('./lib/ai-real-validation').aiRealMaxEvCheck('lol', parseFloat(tipResult[3]));
+      if (!_aiEvLol.ok) {
+        log('WARN', 'AUTO', `Tip rejeitada AI EV cap (${match.team1} vs ${match.team2}): ${_aiEvLol.reason}`);
+        try { _metrics.incr('ai_real_ev_capped', { sport: 'lol' }); } catch (_) {}
+        tipResult = null;
+      }
       // Gate divergência modelo vs Pinnacle (sharp anchor).
       if (tipResult) {
         const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
@@ -17675,6 +17683,13 @@ Máximo 200 palavras.`;
           tipMatch[cIdx] = _downgradeConf(before);
           log('INFO', 'AUTO-DOTA', `P divergente modelo (${_v.reason}) — conf ${before}→${tipMatch[cIdx]}`);
         }
+        // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611.
+        const _aiEvDota = require('./lib/ai-real-validation').aiRealMaxEvCheck('dota2', parseFloat(tipMatch[3]));
+        if (!_aiEvDota.ok) {
+          log('WARN', 'AUTO-DOTA', `Tip rejeitada AI EV cap (${match.team1} vs ${match.team2}): ${_aiEvDota.reason}`);
+          try { _metrics.incr('ai_real_ev_capped', { sport: 'dota2' }); } catch (_) {}
+          tipMatch = null;
+        }
         // Gate divergência modelo vs Pinnacle (sharp book — mantém hard-reject por ser market-truth).
         if (tipMatch) {
           const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
@@ -18759,6 +18774,13 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             log('INFO', 'AUTO-MMA', `P divergente modelo (${_vP.reason}) — conf ${before}→${tipMatch[cIdx]}`);
           } else if (_vP.diffPp != null) {
             log('DEBUG', 'AUTO-MMA', `P consistente (Δ${_vP.diffPp.toFixed(1)}pp): IA=${(_vP.textP*100).toFixed(1)}% modelo=${(_vP.modelP*100).toFixed(1)}%`);
+          }
+          // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611. MMA default cap=50.
+          const _aiEvMma = require('./lib/ai-real-validation').aiRealMaxEvCheck('mma', parseFloat(tipMatch[3]));
+          if (!_aiEvMma.ok) {
+            log('WARN', 'AUTO-MMA', `Tip rejeitada AI EV cap (${fight.team1} vs ${fight.team2}): ${_aiEvMma.reason}`);
+            try { _metrics.incr('ai_real_ev_capped', { sport: 'mma' }); } catch (_) {}
+            tipMatch = null;
           }
           // Gate divergência modelo vs Pinnacle (MMA Pinnacle é muito sharp, threshold menor).
           if (tipMatch) {
@@ -20439,6 +20461,14 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
             tipMatch2[cIdx] = _downgradeConf(before);
             log('INFO', 'AUTO-TENNIS', `P divergente modelo (${_v.reason}) — conf ${before}→${tipMatch2[cIdx]}`);
           }
+          // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611.
+          // Tennis foi onde Ben Shelton EV=468% apareceu (memory project_ai_audit_2026_05_22).
+          const _aiEvTennis = require('./lib/ai-real-validation').aiRealMaxEvCheck('tennis', parseFloat(tipMatch2[3]));
+          if (!_aiEvTennis.ok) {
+            log('WARN', 'AUTO-TENNIS', `Tip rejeitada AI EV cap (${match.team1} vs ${match.team2}): ${_aiEvTennis.reason}`);
+            try { _metrics.incr('ai_real_ev_capped', { sport: 'tennis' }); } catch (_) {}
+            tipMatch2 = null;
+          }
           if (tipMatch2) {
             // Gate divergência modelo vs Pinnacle (tennis Pinnacle é sharp em ATP/WTA).
             const _impPair = _impliedFromOdds(o);
@@ -21872,12 +21902,47 @@ Máximo 200 palavras.`;
           }
         }
 
+        // AI P validation (P0 fix 2026-05-26). Paridade com Dota/MMA/Tennis/CS.
+        // Soft downgrade conf quando AI |P:X% diverge do modelo > 8pp.
+        // Skip overrides — esses synthesizam tipMatchEff de model determinístico (não AI claim).
+        if (text && tipMatch && !_fbFromOverride) {
+          const _mktFbV = String(tipMatchEff[1] || '').toUpperCase();
+          let _modelPFbV = null;
+          if (_mktFbV === '1X2_H') _modelPFbV = (mlScore?.modelH || 0) / 100;
+          else if (_mktFbV === '1X2_D') _modelPFbV = (mlScore?.modelD || 0) / 100;
+          else if (_mktFbV === '1X2_A') _modelPFbV = (mlScore?.modelA || 0) / 100;
+          else if (_mktFbV === 'OVER_2.5') _modelPFbV = (mlScore?.over25Prob || 0) / 100;
+          else if (_mktFbV === 'UNDER_2.5') _modelPFbV = (100 - (mlScore?.over25Prob || 0)) / 100;
+          else if (_mktFbV === 'BTTS_YES') _modelPFbV = (mlScore?.bttsProb || 0) / 100;
+          else if (_mktFbV === 'BTTS_NO') _modelPFbV = (100 - (mlScore?.bttsProb || 0)) / 100;
+          if (Number.isFinite(_modelPFbV) && _modelPFbV > 0 && _modelPFbV < 1) {
+            const _vFb = _validateTipPvsModel(text, _modelPFbV);
+            if (!_vFb.valid) {
+              const before = String(tipMatchEff[6] || 'MÉDIA').toUpperCase();
+              tipMatchEff[6] = _downgradeConf(before);
+              log('INFO', 'AUTO-FOOTBALL', `P divergente modelo (${_vFb.reason}) — conf ${before}→${tipMatchEff[6]}`);
+            }
+          }
+        }
+
         const tipMarket = tipMatchEff[1].toUpperCase();
         const tipTeam   = tipMatchEff[2].trim();
         let   tipOdd    = parseFloat(tipMatchEff[3]);
         let   tipEV     = parseFloat(tipMatchEff[4]);
         const tipStake  = tipMatchEff[5];
         const tipConf   = tipMatchEff[6].toUpperCase();
+
+        // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611.
+        // Bug histórico: Tennis Ben Shelton EV=468% (memory project_ai_audit_2026_05_22).
+        // Skip overrides — esses derivam de model determinístico (não AI claim).
+        if (!_fbFromOverride) {
+          const _aiEvFb = require('./lib/ai-real-validation').aiRealMaxEvCheck('football', tipEV);
+          if (!_aiEvFb.ok) {
+            log('WARN', 'AUTO-FOOTBALL', `Tip rejeitada AI EV cap (${match.team1} vs ${match.team2}, ${tipMarket}): ${_aiEvFb.reason}`);
+            try { _metrics.incr('ai_real_ev_capped', { sport: 'football' }); } catch (_) {}
+            await new Promise(r => setTimeout(r, 2000)); continue;
+          }
+        }
 
         // Line shopping: football odds vêm de TheOddsAPI com múltiplos bookmakers
         // em match.odds._allOdds (1X2) e match.odds.ou25._allOdds (totals). Swap
@@ -23414,6 +23479,14 @@ Máximo 200 palavras.`;
             const before = aiConf || 'MÉDIA';
             aiConf = _downgradeConf(before);
             log('INFO', 'AUTO-CS', `P divergente modelo (${_v.reason}) — conf ${before}→${aiConf}`);
+          }
+          // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611.
+          const _aiEvCs = require('./lib/ai-real-validation').aiRealMaxEvCheck('cs', parseFloat(iaTip[3]));
+          if (!_aiEvCs.ok) {
+            analyzedCs.set(key, { ts: now, tipSent: false });
+            log('WARN', 'AUTO-CS', `Tip rejeitada AI EV cap (${match.team1} vs ${match.team2}): ${_aiEvCs.reason}`);
+            try { _metrics.incr('ai_real_ev_capped', { sport: 'cs' }); } catch (_) {}
+            continue;
           }
           aiReason = String(iaResp).split('TIP_ML:')[0].trim().slice(0, 160) || null;
           } // fim else (IA parsed tip flow)
