@@ -7003,9 +7003,13 @@ function describeMtGateSkip(sport, market, side, league, opts = {}) {
     if (_mtPermDisable.isBlocked(db, _sl, _ml, _sdl)) {
       return `mt_disabled — permanent disable [${sport}|${market}${side ? '|' + side : ''}]`;
     }
-    if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}|${league}]`;
-    if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}]`;
-    if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return `mt_disabled — leak guard runtime[${sport}|${market}]`;
+    // 2026-05-26: probe lowercase pra alinhar com map keys (line 6905 _marketLc).
+    // Sem isso, scanner que passa market camelCase (`handicapGames`/`totalGames`)
+    // não bate com chave lowercased — disable runtime nunca enforça. Tennis 5
+    // tips (25/05) escaparam por isso apesar de disable desde 21/05.
+    if (side && league && _marketTipsDisabledRuntime.has(`${_sl}|${_ml}|${_sdl}|${league}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}|${league}]`;
+    if (side && _marketTipsDisabledRuntime.has(`${_sl}|${_ml}|${_sdl}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}]`;
+    if (_marketTipsDisabledRuntime.has(`${_sl}|${_ml}`)) return `mt_disabled — leak guard runtime[${sport}|${market}]`;
     if (league) {
       try {
         if (_mtAutoPromote.isMtLeagueBlockedForMarket(sport, market, league)) {
@@ -7052,15 +7056,18 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
     // Precedência runtime: (market+side+league) > (market+side+tier) > (market+side) > market inteiro.
     // Tier-level inserido entre side e league: pega leak quando ligas individuais
     // têm sample <10 mas tier total >=20. Tier resolvido on-the-fly via league.
-    if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return false;
+    // 2026-05-26: probe lowercase pra alinhar com map keys (line 6905 _marketLc).
+    // Sem isso, scanner que passa market camelCase (`handicapGames`/`totalGames`)
+    // não bate com chave lowercased — disable runtime nunca enforça.
+    if (side && league && _marketTipsDisabledRuntime.has(`${_sl}|${_ml}|${_sdl}|${league}`)) return false;
     if (side && league) {
       try {
         const tierKey = `tier${_leagueTierLib.getLeagueTier(sport, league)}`;
-        if (_marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${tierKey}`)) return false;
+        if (_marketTipsDisabledRuntime.has(`${_sl}|${_ml}|${_sdl}|${tierKey}`)) return false;
       } catch (_) {}
     }
-    if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return false;
-    if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return false;
+    if (side && _marketTipsDisabledRuntime.has(`${_sl}|${_ml}|${_sdl}`)) return false;
+    if (_marketTipsDisabledRuntime.has(`${_sl}|${_ml}`)) return false;
     // MT auto-promote league block: liga (sport, market) com ROI muito negativo
     // bloqueada automaticamente pelo cron runMtAutoPromoteCycle. Mantém shadow
     // (segue logando), mas evita que tip vire real (DM + tabela tips).
