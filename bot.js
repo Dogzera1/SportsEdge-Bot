@@ -28059,8 +28059,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (_) {}
   };
-  setInterval(runPollStallCheck, 15 * 60 * 1000);
-  setTimeout(runPollStallCheck, 25 * 60 * 1000); // 25min pós-boot (dá tempo de 2 ciclos normais)
+  // 2026-05-26 (audit P1-5a): wrap _wrapCron — heartbeat + overlap guard + error capture
+  setInterval(_wrapCron('poll_stall_check', runPollStallCheck), 15 * 60 * 1000);
+  setTimeout(_wrapCron('poll_stall_check', runPollStallCheck), 25 * 60 * 1000); // 25min pós-boot (dá tempo de 2 ciclos normais)
 
   // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results.
   // Pre-sync garante match_results fresco independente do settleCompletedTips cron
@@ -28100,8 +28101,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // (gargalo pra promoção de market tips: precisa 30 settled antes de ATIVAR).
   // Override: MT_SETTLE_INTERVAL_MS no env.
   const MT_SETTLE_INTERVAL_MS = parseInt(process.env.MT_SETTLE_INTERVAL_MS || '600000', 10); // 10min default
-  setInterval(runShadowSettle, MT_SETTLE_INTERVAL_MS);
-  setTimeout(runShadowSettle, 5 * 60 * 1000); // primeira run em 5min pós-boot
+  // 2026-05-26 (audit P1-5b): wrap _wrapCron — heartbeat + overlap guard
+  setInterval(_wrapCron('shadow_settle', runShadowSettle), MT_SETTLE_INTERVAL_MS);
+  setTimeout(_wrapCron('shadow_settle', runShadowSettle), 5 * 60 * 1000); // primeira run em 5min pós-boot
 
   // Sprint 2.3 — Football MT auto-promote checker (cron 6h).
   // Quando football MT shadow acumula n≥30 settled com ROI≥+10% e CLV≥0,
@@ -30422,8 +30424,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'BR-EDGES-DM', e.message); }
   }
-  setInterval(() => runBrEdgesAutoDmCron(), 5 * 60 * 1000);
-  setTimeout(() => runBrEdgesAutoDmCron(), 9 * 60 * 1000);
+  // 2026-05-26 (audit P1-5c): wrap _wrapCron — heartbeat + overlap guard
+  setInterval(_wrapCron('br_edges_auto_dm', runBrEdgesAutoDmCron), 5 * 60 * 1000);
+  setTimeout(_wrapCron('br_edges_auto_dm', runBrEdgesAutoDmCron), 9 * 60 * 1000);
 
   // Scraper health monitor: cron 30min consulta execucoes_scraper no Supabase
   // e DMa admin quando casa muda de estado (saudavel→degradada→morta).
@@ -30639,10 +30642,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     }
   }
-  setInterval(() => runCashoutMonitor().catch(e => log('ERROR', 'CASHOUT', e.message)), 2 * 60 * 1000);
-  setTimeout(() => runCashoutMonitor().catch(() => {}), 90 * 1000); // primeiro check 90s pós-boot
+  // 2026-05-26 (audit P1-5d): wrap _wrapCron — heartbeat + overlap guard. .catch externo
+  // redundante (_wrapCron captura via heartbeat markCronHeartbeat result='error').
+  setInterval(_wrapCron('cashout_monitor', runCashoutMonitor), 2 * 60 * 1000);
+  setTimeout(_wrapCron('cashout_monitor', runCashoutMonitor), 90 * 1000); // primeiro check 90s pós-boot
   if (SPORTS.esports?.enabled) {
-    setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
+    // 2026-05-26 (audit P1-5e): wrap _wrapCron — heartbeat + overlap guard
+    setInterval(_wrapCron('live_notifications', checkLiveNotifications), LIVE_CHECK_INTERVAL);
   }
   // CLV e Refresh de Tips agora são chamados internamente pelo runAutoAnalysis
 
