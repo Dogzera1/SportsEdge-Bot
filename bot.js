@@ -10602,7 +10602,17 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     // <SPORT>_AI_REAL=true promove path AI shadow pra real tips.
     // Default OFF — set explícito reativa real emit + DM dispatch.
     const _aiRealEnv = process.env[`${sportU}_AI_REAL`];
-    const _aiReal = /^(1|true|yes)$/i.test(String(_aiRealEnv ?? ''));
+    let _aiReal = /^(1|true|yes)$/i.test(String(_aiRealEnv ?? ''));
+    // P1-5 fix 2026-05-26: respeitar <SPORT>_SHADOW=true mesmo quando AI_REAL=true.
+    // Sem isso, user com SHADOW + AI_REAL simultâneos grava shadow no DB (server
+    // _autoRouteToShadow ou record-tip força isShadow) MAS dispara DM (path 10648).
+    // Inconsistência runtime — DM real sem record real correspondente. Paridade com
+    // _isShadowDispatch usado em ML paths (commit ade938a) e _mtTryRecordAndShouldDm
+    // (commit e2325f2). SHADOW vence AI_REAL.
+    if (_aiReal && isBucketShadowed(sport)) {
+      _aiReal = false;
+      log('DEBUG', TAG, `AI_REAL=true mas ${sportU}_SHADOW=true → emit como shadow (DM suprimida)`);
+    }
     // 2026-05-22 audit: EV cap defensivo NO PATH REAL ONLY. P2-safe — shadow
     // continua puro, cap só ativa quando AI_REAL=true (decisão sintoma com
     // real evidence justified). Default 40 (lol/cs/dota/val/football),
