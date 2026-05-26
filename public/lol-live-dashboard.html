@@ -285,6 +285,47 @@ button { cursor: pointer; }
 .mc-meta .mc-edge.has::before {
   content: '◆ '; font-size: 8px;
 }
+.mc-meta .mc-blind {
+  color: var(--watch);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 9px;
+}
+.mc-meta .mc-blind::before {
+  content: '◌ '; font-size: 8px;
+}
+.match-card.blind {
+  opacity: 0.78;
+}
+.match-card.blind::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: repeating-linear-gradient(90deg, var(--watch) 0 6px, transparent 6px 12px);
+  opacity: 0.5;
+}
+
+/* Hero blind warning banner */
+.hero-blind-banner {
+  margin-top: var(--pad-3);
+  padding: 10px 14px;
+  background: linear-gradient(90deg, rgba(185,179,134,0.08), transparent);
+  border-left: 3px solid var(--watch);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--watch);
+  letter-spacing: 0.06em;
+  display: flex; gap: 14px; align-items: baseline;
+}
+.hero-blind-banner .hbb-tag {
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.hero-blind-banner .hbb-text {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
 
 /* ────────────────────────────────────────────────────────── detail */
 .detail-empty {
@@ -1195,8 +1236,13 @@ function renderMatches() {
   const root = document.getElementById('matchesList');
   root.innerHTML = '';
   if (!STATE.matches.length) {
-    root.appendChild(el('div', { class: 'detail-empty', style: 'padding:40px 16px' },
-      el('div', { class: 'hint' }, 'Nenhuma partida ao vivo')
+    root.appendChild(el('div', { style: 'padding:40px 14px; text-align:center; color: var(--ink-mute);' },
+      el('div', { class: 'hint', style: 'font-family:var(--font-mono);font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-mute);' }, 'sem partidas ao vivo'),
+      el('div', { style: 'margin-top:14px; font-family:var(--font-mono); font-size:10.5px; color:var(--ink-faint); line-height:1.6; letter-spacing:0.02em; text-transform:none;' },
+        'Aguardando ligas iniciarem. Schedule LCK/LPL/LEC/LCS via Riot esports-api. ',
+        el('br'),
+        'Próximas partidas em /lol-matches.'
+      )
     ));
     return;
   }
@@ -1206,9 +1252,16 @@ function renderMatches() {
     const t2Win = (m.score2 || 0) > (m.score1 || 0);
     const edgeForMatch = (m.bestEv != null) ? m.bestEv : null;
     const edgeClass = (edgeForMatch != null && edgeForMatch >= 0.03) ? 'has' : '';
-    const edgeText = (edgeForMatch != null && edgeForMatch >= 0.03) ? `EDGE ${fmt.ev(edgeForMatch,1)}` : 'no edge';
+    const blind = !!m.modelBlind;
+    const edgeText = blind ? 'sem livestats'
+      : (edgeForMatch != null && edgeForMatch >= 0.03) ? `EDGE ${fmt.ev(edgeForMatch,1)}` : 'no edge';
+    const edgeSpan = blind ? el('span', { class: 'mc-blind' }, edgeText)
+                           : el('span', { class: 'mc-edge ' + edgeClass }, edgeText);
+    const needed = Math.ceil((m.bestOf || 3) / 2);
+    const remaining = Math.max(0, (m.bestOf || 3) - (m.score1||0) - (m.score2||0));
+    const cardClasses = 'match-card' + (STATE.selectedId === m.id ? ' selected' : '') + (blind ? ' blind' : '');
 
-    const card = el('div', { class: 'match-card' + (STATE.selectedId === m.id ? ' selected' : ''), onclick: () => selectMatch(m.id) },
+    const card = el('div', { class: cardClasses, onclick: () => selectMatch(m.id) },
       el('div', { class: 'mc-league' },
         el('span', null, m.league || 'LoL'),
         el('span', { class: 'live-tag' }, 'LIVE')
@@ -1224,9 +1277,9 @@ function renderMatches() {
         ),
       ),
       el('div', { class: 'mc-meta' },
-        el('span', null, m.bestOf ? `BO${m.bestOf}` : 'BO?'),
-        el('span', null, m.liveStats?.gameTime ? `Map ${m.currentMap || 1} · ${fmt.time(m.liveStats.gameTime)}` : (m.currentMap ? `Map ${m.currentMap}` : 'pre-draft')),
-        el('span', { class: 'mc-edge ' + edgeClass }, edgeText)
+        el('span', null, m.bestOf ? `BO${m.bestOf} · ${remaining}m restantes` : 'BO?'),
+        el('span', null, m.liveStats && m.liveStats.gameTime ? `Map ${m.currentMap || 1} · ${fmt.time(m.liveStats.gameTime)}` : (m.currentMap ? `Map ${m.currentMap}` : 'pre-draft')),
+        edgeSpan
       )
     );
     root.appendChild(card);
@@ -1287,6 +1340,16 @@ function renderDetail(m) {
     )
   );
   root.appendChild(hero);
+
+  // Blind warning banner — when Riot livestats unavailable, model returns P=0.5
+  // baseline. EV calculado em cima desse P=0.5 é fantasia. Banner explica.
+  if (m.modelBlind) {
+    const banner = el('div', { class: 'hero-blind-banner' },
+      el('span', { class: 'hbb-tag' }, '◌ modelo cego'),
+      el('span', { class: 'hbb-text' }, 'Riot não expõe livestats pra esta liga. Modelo opera em baseline 50/50 — EV de Match Winner suprimido (evita fantasy edge). Pinnacle odd pode ser usada como referência sharp; análise técnica depende de feed externo.')
+    );
+    root.appendChild(banner);
+  }
 
   const wrap = el('div', { class: 'detail' });
 
@@ -1396,6 +1459,8 @@ function renderDetail(m) {
           el('div', { class: 'center' }),
           ev != null ? el('div', { class: 'fill ' + (ev>=0?'positive':'negative'), style: `width: ${Math.min(50, Math.abs(ev)*500)}%` }) : null
         );
+        const evCellText = ev == null ? (r.blind ? 'cego' : '—') : fmt.ev(ev);
+        const statusBadge = r.blind ? el('span', { class: 'status-badge inconc' }, 'cego') : el('span', { class: 'status-badge ' + status }, status);
         table.appendChild(el('div', { class: 'mt-row' },
           el('span', { class: 'mkt-name' }, r.market),
           el('span', { class: 'mkt-side' }, r.side || '—'),
@@ -1403,8 +1468,8 @@ function renderDetail(m) {
           el('span', { class: 'mkt-num' }, fmt.odd(r.fairOdd)),
           el('span', { class: 'mkt-num' }, fmt.odd(r.marketOdd)),
           edgeBar,
-          el('span', { class: 'mkt-num ev-cell ' + evClass }, ev == null ? '—' : fmt.ev(ev)),
-          el('span', null, el('span', { class: 'status-badge ' + status }, status))
+          el('span', { class: 'mkt-num ev-cell ' + evClass }, evCellText),
+          el('span', null, statusBadge)
         ));
       }
       return table;

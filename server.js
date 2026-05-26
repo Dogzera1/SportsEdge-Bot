@@ -5224,7 +5224,16 @@ const server = http.createServer(async (req, res) => {
       const lmR = await httpGet(`${baseUrl}/lol-matches`).catch(() => null);
       if (!lmR || lmR.status !== 200) feeds.panda = 'warn';
       const allMatches = (lmR && lmR.status === 200) ? safeParse(lmR.body, []) : [];
-      const live = (Array.isArray(allMatches) ? allMatches : []).filter(m => m && m.status === 'live');
+      // Filtra: status=live E serie nao completada (score abaixo do needed-to-win).
+      // /lol-matches as vezes flagga 'live' partidas com score 2-0 BO3 (lag propagacao
+      // pos-fim de serie). Sem este guard, exibe 'live' partidas que ja terminaram.
+      const live = (Array.isArray(allMatches) ? allMatches : [])
+        .filter(m => m && m.status === 'live')
+        .filter(m => {
+          const bo = Number(m.bestOf) || 3;
+          const needed = Math.ceil(bo / 2);
+          return Number(m.score1 || 0) < needed && Number(m.score2 || 0) < needed;
+        });
 
       let lolMapModel, lolMarkets, lolPatches;
       try { lolMapModel = require('./lib/lol-map-model'); } catch(_) {}
@@ -5342,6 +5351,12 @@ const server = http.createServer(async (req, res) => {
         const mlT1 = bookmakerOdds.t1 || null;
         const mlT2 = bookmakerOdds.t2 || null;
 
+        // GATE: sem livestats OU confidence baixa, modelo retorna baseline 0.5 (cego).
+        // Calcular EV em cima desse P=0.5 produz fantasy EV (ex 418%) quando book
+        // assimetrico. Bloqueia EV no Match Winner ate ter sinal real.
+        const modelIsBlind = !liveStats || !liveStats.hasLiveStats || modelConfidence < 0.25;
+        row.modelBlind = modelIsBlind;
+
         if (lolMarkets) {
           try {
             // seriesWinProb(pMap, bestOf) retorna number (P team1 vence serie).
@@ -5361,8 +5376,10 @@ const server = http.createServer(async (req, res) => {
               }
             }
             const pT2 = 1 - pT1;
-            markets.push({ market: 'Match Winner', side: row.team1, p: pT1, fairOdd: 1/Math.max(pT1, 0.001), marketOdd: mlT1 || null, ev: (mlT1 && pT1) ? (pT1 * mlT1 - 1) : null });
-            markets.push({ market: 'Match Winner', side: row.team2, p: pT2, fairOdd: 1/Math.max(pT2, 0.001), marketOdd: mlT2 || null, ev: (mlT2 && pT2) ? (pT2 * mlT2 - 1) : null });
+            const evT1 = (!modelIsBlind && mlT1 && pT1) ? (pT1 * mlT1 - 1) : null;
+            const evT2 = (!modelIsBlind && mlT2 && pT2) ? (pT2 * mlT2 - 1) : null;
+            markets.push({ market: 'Match Winner', side: row.team1, p: pT1, fairOdd: 1/Math.max(pT1, 0.001), marketOdd: mlT1 || null, ev: evT1, blind: modelIsBlind });
+            markets.push({ market: 'Match Winner', side: row.team2, p: pT2, fairOdd: 1/Math.max(pT2, 0.001), marketOdd: mlT2 || null, ev: evT2, blind: modelIsBlind });
           } catch(_) {}
 
           try {

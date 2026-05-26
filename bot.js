@@ -1091,8 +1091,9 @@ setInterval(() => {
 // API retorna unauth. Sem alerta DM, log Railway era único sinal — gap
 // 6-24h até alguém grepar. Cron lê gauge a cada 30min, DM admin se age<2h
 // + value=1. Throttle 6h pra não spam.
+// 2026-05-26 (audit arch P1-8): _wrapCron — heartbeat + overlap guard (paridade sofa_watchdog).
 let _pinnacleKeyDmedAt = 0;
-setInterval(() => {
+async function _pinnacleKeyWatchdogTick() {
   try {
     const snap = require('./lib/metrics').snapshot();
     const gauges = snap.gauges || {};
@@ -1115,7 +1116,9 @@ setInterval(() => {
       });
     }
   } catch (_) {}
-}, 30 * 60 * 1000).unref();
+}
+setInterval(_wrapCron('pinnacle_key_watchdog', _pinnacleKeyWatchdogTick), 30 * 60 * 1000).unref();
+setTimeout(_wrapCron('pinnacle_key_watchdog', _pinnacleKeyWatchdogTick), 10 * 60 * 1000).unref();
 
 // 2026-05-23: Sofascore proxy watchdog. Memory references chrome131→chrome124
 // (2026-05-16) e atual safari260 — provider rotaciona impersonate periodicamente.
