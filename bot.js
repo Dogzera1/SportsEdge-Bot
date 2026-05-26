@@ -7531,6 +7531,15 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
 // só permite DM quando a tip foi efetivamente gravada em `tips` (=conta na banca).
 // Comportamento legado (DM sempre + record-tip best-effort): MT_DM_REAL_ONLY=false.
 async function _mtTryRecordAndShouldDm({ sport, recordSport, match, tip, stake, isLive }) {
+  // 2026-05-26 fix arquitetural P5: respeita <SPORT>_SHADOW=true no gate MT.
+  // Antes, recordMarketTipAsRegular hardcoded isShadow:0 + caller não chamava
+  // _isShadowDispatch → tips MT escapavam do shadow flip cross-sport. Audit 7d
+  // confirmou 15 tips LoL reais apesar de LOL_SHADOW=true setado (eram MT).
+  // isBucketShadowed checa lib/sports + _splitBucketShadow (game-level env override).
+  // Cobre 14 callers MT cross-sport via fix único (P5).
+  if (isBucketShadowed(sport) || (recordSport && isBucketShadowed(recordSport))) {
+    return { tipId: null, allowDm: false, stakeFinal: null };
+  }
   const promoteEnabled = isMarketTipsPromoteEnabled(sport, tip?.market);
   const dmRealOnly = !/^(0|false|no)$/i.test(process.env.MT_DM_REAL_ONLY ?? 'true');
   // 2026-05-17: gates_evaluated fallback populator. Cobre LoL/Dota/Tennis/CS/Val/Basket
