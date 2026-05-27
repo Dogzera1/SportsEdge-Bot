@@ -1696,6 +1696,25 @@ function _readPostBody(req, res, cb, maxBytes) {
   req.on('error', () => { if (!overflow) { try { cb(null); } catch (_) {} } });
 }
 
+// SEC P0 2026-05-27: rate-limit helper para /*-result family.
+// Mitiga DoS via raffle pattern matchIds que drena Riot/PandaScore/Sofa quota.
+// 60 req/min per-IP é generoso pra uso normal (bot interno polls 1-2 req/min/endpoint).
+function _matchResultRateLimit(req, res, p) {
+  const ip = String(req.socket?.remoteAddress || '');
+  if (!ip) return true;
+  global._matchResultRateMap = global._matchResultRateMap || new Map();
+  const now = Date.now();
+  const cur = global._matchResultRateMap.get(ip) || { count: 0, windowStart: now };
+  if (now - cur.windowStart > 60_000) { cur.count = 0; cur.windowStart = now; }
+  cur.count++;
+  global._matchResultRateMap.set(ip, cur);
+  if (cur.count > 60) { sendJson(res, { ok: false, error: 'rate_limit', endpoint: p }, 429); return false; }
+  if (global._matchResultRateMap.size > 500) {
+    for (const [k, v] of global._matchResultRateMap) if (now - v.windowStart > 5*60_000) global._matchResultRateMap.delete(k);
+  }
+  return true;
+}
+
 async function theOddsGet(theOddsUrl) {
   return await theOddsQueue.enqueue(`theodds:${theOddsUrl}`, async () => {
     const ttlMsRaw = parseInt(process.env.HTTP_CACHE_THEODDS_TTL_MS || '', 10);
@@ -3976,6 +3995,9 @@ async function getPinnacleValorantMatches() {
       const isValGroup = group === 'valorant';
       const isValName = name.includes('valorant');
       const isValTournament = /(vct|champions tour|game changers|challengers|masters|red bull home ground)/i.test(name);
+      // SEC P0-F 2026-05-27 fix: blacklist CS/LoL/Dota leagues via NAME (não só group).
+      // Confirmed live: "CS2 - CCT Europe Challengers" entrava como Valorant via wildcard 'challengers'.
+      if (/^cs(?:2|:go)?\b|counter.?strike|league of legends|dota|starcraft|overwatch|rocket league/i.test(name)) return false;
       if (!isValGroup && !isValName) {
         if (!isValTournament) return false;
         if (group && /counter.?strike|league of legends|dota|starcraft|overwatch|rocket league/.test(group)) return false;
@@ -8685,6 +8707,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/match-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const raw = parsed.query.matchId || '';
     const game = parsed.query.game || 'lol';
     // 2026-05-25 (audit P0-2 settle_dispatch defense): resolveAlias para tips com
@@ -8723,6 +8746,7 @@ setInterval(load, 10000);
   // específico (em vez da série). Mirror /dota-result (server.js:7990+).
   // Cobre tips LoL ML per-mapa emitidas via Sprint 1 (LOL_ML_PER_MAP=true).
   if (p === '/ps-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const rawId = parsed.query.matchId || '';
     const mapMatch = rawId.match(/_MAP(\d+)$/);
     const mapN = mapMatch ? parseInt(mapMatch[1], 10) : null;
@@ -8788,6 +8812,7 @@ setInterval(load, 10000);
   // ── Resultado PandaScore Dota 2 (settlement de tips dota2_ps_*) ──
   // Suporta sufixo _MAP{N} — resolve winner do mapa específico (em vez da série)
   if (p === '/dota-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const rawId = parsed.query.matchId || '';
     const mapMatch = rawId.match(/_MAP(\d+)$/);
     const mapN = mapMatch ? parseInt(mapMatch[1], 10) : null;
@@ -9001,6 +9026,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/cs-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const rawId = parsed.query.matchId || '';
     const t1 = parsed.query.team1 || '';
     const t2 = parsed.query.team2 || '';
@@ -9018,6 +9044,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/valorant-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const rawId = parsed.query.matchId || '';
     const t1 = parsed.query.team1 || '';
     const t2 = parsed.query.team2 || '';
@@ -9036,6 +9063,7 @@ setInterval(load, 10000);
 
   // ── Resultado Darts (settlement via Sofascore event status) ──
   if (p === '/darts-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const rawId = parsed.query.matchId || '';
     // 2026-05-26 (audit P0-2 settle_dispatch): resolveAlias para tips agg_* (BR aggregator).
     const rawCanonical = rawId
@@ -9061,6 +9089,7 @@ setInterval(load, 10000);
   // match_id é `snooker_<pinMatchupId>` (Pinnacle). Sofascore tem ID próprio,
   // então buscamos via scheduled-events de snooker últimos 7 dias e casamos nomes.
   if (p === '/snooker-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const rawId = parsed.query.matchId || '';
     const t1 = parsed.query.team1 || '';
     const t2 = parsed.query.team2 || '';
@@ -9134,6 +9163,7 @@ setInterval(load, 10000);
 
   // ── Resultado Futebol (settlement via match_results DB + CSV dataset) ──
   if (p === '/football-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const matchId = (parsed.query.matchId || '').trim();
     const team1   = (parsed.query.team1   || '').trim();
     const team2   = (parsed.query.team2   || '').trim();
@@ -9474,6 +9504,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/basket-result') {
+    if (!_matchResultRateLimit(req, res, p)) return;
     const matchIdRaw = (parsed.query.matchId || '').trim();
     const team1   = (parsed.query.team1   || '').trim();
     const team2   = (parsed.query.team2   || '').trim();
@@ -9997,6 +10028,7 @@ setInterval(load, 10000);
 
   // ── Usuários ──
   if (p === '/users') {
+    if (!requireAdmin(req, res)) return;  // SEC P0 2026-05-27: PII (chat_ids Telegram) — admin only
     const subscribed = parsed.query.subscribed;
     const users = subscribed ? stmts.getSubscribedUsers.all() : db.prepare('SELECT * FROM users').all();
     sendJson(res, users);
@@ -29883,6 +29915,29 @@ load();
   }
 
   if (p === '/log-odds-history' && req.method === 'POST') {
+    // SEC P0 2026-05-27: token gate + rate-limit + bookmaker whitelist + outlier reject.
+    // Antes UNAUTH → atacante injeta Pinnacle odds falsas → CLV calib corrompida → tips
+    // em prices fora mercado. Vetor adversarial audit confirmado.
+    const tokenRequired = !/^(0|false|no)$/i.test(String(process.env.LOG_ODDS_TOKEN_REQUIRED ?? 'true'));
+    if (tokenRequired) {
+      const expected = String(process.env.LOG_ODDS_TOKEN || process.env.RECORD_TIP_TOKEN || '').trim();
+      const got = String(req.headers['x-log-odds-token'] || req.headers['x-record-tip-token'] || '').trim();
+      if (!expected || got !== expected) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    }
+    // Rate-limit per-IP 120/min (mirror /save-user pattern, generoso pra ingest legítimo)
+    const _ipLO = String(req.socket?.remoteAddress || '');
+    if (_ipLO) {
+      global._logOddsRateMap = global._logOddsRateMap || new Map();
+      const _nowLO = Date.now();
+      const curLO = global._logOddsRateMap.get(_ipLO) || { count: 0, windowStart: _nowLO };
+      if (_nowLO - curLO.windowStart > 60_000) { curLO.count = 0; curLO.windowStart = _nowLO; }
+      curLO.count++;
+      global._logOddsRateMap.set(_ipLO, curLO);
+      if (curLO.count > 120) { sendJson(res, { ok: false, error: 'rate_limit' }, 429); return; }
+      if (global._logOddsRateMap.size > 200) {
+        for (const [k, v] of global._logOddsRateMap) if (_nowLO - v.windowStart > 5*60_000) global._logOddsRateMap.delete(k);
+      }
+    }
     _readPostBody(req, res, (body) => {
       if (body == null) return;
       try {
@@ -29894,7 +29949,15 @@ load();
         const o1 = parseFiniteNumber(t.oddsP1);
         const o2 = parseFiniteNumber(t.oddsP2);
         const bm = clampStr(t.bookmaker, 60) || '?';
-        if (!matchKey || !p1 || !p2 || !o1 || !o2) { sendJson(res, { ok: false }); return; }
+        // Outlier reject: odds <1.05 ou >50 = fake/sanity-fail (Pinnacle nunca tem)
+        if (!matchKey || !p1 || !p2 || !o1 || !o2 || o1 < 1.05 || o1 > 50 || o2 < 1.05 || o2 > 50) {
+          sendJson(res, { ok: false, error: 'invalid_or_outlier' }); return;
+        }
+        // Bookmaker whitelist (anti-spoof, defense in depth)
+        const ALLOWED_BM = new Set(['?','pinnacle','bet365','betfair','betano','betsson','superbet','novibet','pixbet','sportingbet','stake','kto','blaze','rivalo']);
+        if (bm !== '?' && !ALLOWED_BM.has(bm.toLowerCase())) {
+          sendJson(res, { ok: false, error: 'bookmaker_not_whitelisted' }, 400); return;
+        }
         stmts.insertOddsHistory.run(sport, matchKey, p1, p2, o1, o2, bm);
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { ok: false, error: e.message }); }
@@ -36601,6 +36664,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
   // ── Bankroll endpoints ──
   if (p === '/bankroll') {
+    if (!requireAdmin(req, res)) return;  // SEC P0 2026-05-27: financial state — admin only
     const sport = parsed.query.sport || 'esports';
     const bk = stmts.getBankroll.get(sport);
     if (!bk) { sendJson(res, { error: 'Bankroll não inicializado' }, 500); return; }
