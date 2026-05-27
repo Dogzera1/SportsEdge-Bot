@@ -935,6 +935,26 @@
               }
             }
           }
+        },
+        "tier_quali_or_early": {
+          "bins": [
+            {
+              "lo": 0.3,
+              "hi": 0.92,
+              "mid": 0.5,
+              "n": 609,
+              "wins": 225,
+              "rawP": 0.3694,
+              "priorP": null,
+              "pCalib": 0.369,
+              "note": "manual flat-cap calib: pCalib = observed hit_rate 36.94% (n=609 d28 shadow); tier_quali_or_early (R1/R2/Qualifier) model overestimates favorites systematically — flat pCalib eliminates EV inflation"
+            }
+          ],
+          "coverage": [
+            0.3,
+            0.92
+          ],
+          "nTotal": 609
         }
       }
     },
