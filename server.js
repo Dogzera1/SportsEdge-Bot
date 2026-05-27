@@ -11260,6 +11260,117 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-27: backfill de tips MT tennis wrongly-settled como win/loss
+  // quando a partida foi walkover/RET/abandoned. Pinnacle/Betano voidam handicap/
+  // totals em retirement; bot marcava win pela math (parseTennisScore parsea games
+  // até o RET sem distinguir match completo). Fix arquitetural em commit 62c5f92
+  // (lib/tennis-mt-settle.js _MT_WALKOVER_RE guard) cobre tips futuras — este
+  // endpoint reverte as passadas.
+  //
+  // GET /admin/tennis-mt-revoid-walkover?days=30&apply=0&key=<KEY>  (dry-run)
+  // POST /admin/tennis-mt-revoid-walkover?days=30&apply=1&key=<KEY>  (executa)
+  //
+  // Idempotente: skip tips com audit row já marcando 'walkover-revoid'.
+  if (p === '/admin/tennis-mt-revoid-walkover') {
+    if (!requireAdmin(req, res)) return;
+    const apply = String(parsed.query.apply || '') === '1';
+    const days = Math.min(180, Math.max(1, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const _walkoverRe = /\b(retired|retirement|retire|retir|ret|w\.?o\.?|walkover|wo|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned|forfeit|forfeited)\b/i;
+      const candidates = db.prepare(`
+        SELECT id, market_type, tip_participant, participant1, participant2, event_name,
+               result, stake, stake_reais, profit_reais, odds, sent_at, match_id
+        FROM tips
+        WHERE sport = 'tennis'
+          AND market_type IN ('HANDICAP_GAMES', 'TOTAL_GAMES', 'HANDICAP_SETS', 'TIEBREAK_MATCH', 'TIEBREAK')
+          AND result IN ('win', 'loss')
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY sent_at DESC
+      `).all(days);
+
+      const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
+      const rows = getTennisSettleRowsCached(lookbackDays);
+      const findings = [];
+      let voidedN = 0;
+      let skippedAudit = 0;
+
+      for (const tip of candidates) {
+        const sentRaw = String(tip.sent_at || '').trim();
+        const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
+        const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
+        if (!best?.final_score) continue;
+        const score = String(best.final_score);
+        if (!_walkoverRe.test(score)) continue;
+
+        // Idempotency guard
+        const existingAudit = db.prepare(`
+          SELECT 1 FROM tip_settlement_audit
+          WHERE tip_id = ? AND reason = 'walkover-revoid' LIMIT 1
+        `).get(tip.id);
+        if (existingAudit) { skippedAudit++; continue; }
+
+        const oldProfitR = Number(tip.profit_reais) || 0;
+        const finding = {
+          tip_id: tip.id,
+          market_type: tip.market_type,
+          tip_participant: tip.tip_participant,
+          participants: `${tip.participant1} vs ${tip.participant2}`,
+          event: tip.event_name,
+          current_result: tip.result,
+          would_apply: 'void',
+          final_score: score,
+          prev_profit_reais: oldProfitR,
+          delta_bankroll: -oldProfitR,
+          sent_at: tip.sent_at,
+        };
+
+        if (apply) {
+          try {
+            db.transaction(() => {
+              const upd = db.prepare(`
+                UPDATE tips SET result = 'void', profit_reais = 0
+                WHERE id = ? AND result IN ('win','loss')
+              `).run(tip.id);
+              if (upd.changes === 0) return;
+              if (oldProfitR !== 0) {
+                db.prepare(`
+                  UPDATE bankroll SET current_banca = round(current_banca - ?, 2),
+                    updated_at = datetime('now') WHERE sport = 'tennis'
+                `).run(oldProfitR);
+              }
+              db.prepare(`
+                INSERT INTO tip_settlement_audit
+                  (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+                VALUES (?, 'tennis', ?, 'void', ?, 0, 'admin', 'walkover-revoid', '/admin/tennis-mt-revoid-walkover')
+              `).run(tip.id, tip.result, oldProfitR);
+            })();
+            voidedN++;
+            finding.applied = true;
+          } catch (e) {
+            finding.error = e.message;
+          }
+        }
+        findings.push(finding);
+      }
+
+      sendJson(res, {
+        ok: true,
+        days,
+        apply,
+        candidates_scanned: candidates.length,
+        walkover_matches: findings.length,
+        skipped_already_revoided: skippedAudit,
+        voided: voidedN,
+        sample: findings.slice(0, 50),
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   // Debug: tenta resolver cada tip unsettled de tennis e reporta o motivo da falha.
   // GET /tennis-settle-debug?days=30 → [{tip_id, p1, p2, sent_at, status, reason}]
   if (p === '/tennis-settle-debug') {
