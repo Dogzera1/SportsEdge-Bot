@@ -113,7 +113,8 @@
               "wins": 3,
               "rawP": 0.4286,
               "priorP": 0.6129,
-              "pCalib": 0.6202
+              "pCalib": 0.527,
+              "note": "manual unmerge — PAV grouped this bin with adjacent 0.55-0.70 producing uniform pCalib=0.6202, but observed hit 3/7=42.86% is 19pp below. pCalib=0.527 = beta-smoothed (rawP*n + priorP*alpha)/(n+alpha) preserving the bin's own signal"
             },
             {
               "lo": 0.75,
