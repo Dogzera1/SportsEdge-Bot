@@ -20584,6 +20584,21 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
         if (_detEvTn != null && Math.abs(_detEvTn - tipEvIa) >= 3) {
           log('INFO', 'EV-RECALC', `tennis ${match.team1} vs ${match.team2}: IA=${tipEvIa}% → modelo=${_detEvTn}% (P=${(_modelPPickTn*100).toFixed(1)}% @ ${tipOdd})`);
         }
+        // 2026-05-27 (P1+P2): WTA ML promote filter — research-based decision.
+        // Audit shadow 28d (n=465 WTA ML): EV 20-30% sweet spot (ROI +26%, n=126 cross-
+        // tournament). QUALI ROI -14% n=180. ATP overall -6%. Promove apenas universo
+        // robusto. Default OFF; ativa via TENNIS_ML_PROMOTE_FILTER=true. Reverter:
+        // deletar env (volta a shadow-only via _tennisMlShadow).
+        const _tennisMlPromoteFilter = (() => {
+          if (!/^(true|1|yes|on)$/i.test(String(process.env.TENNIS_ML_PROMOTE_FILTER ?? 'false'))) return false;
+          if (!/\bwta\b/i.test(String(match.league || ''))) return false;
+          if (_tennisQualifierShadow) return false;
+          const evNum = Number(tipEV);
+          const evMin = parseFloat(process.env.TENNIS_ML_PROMOTE_EV_MIN ?? '20');
+          const evMax = parseFloat(process.env.TENNIS_ML_PROMOTE_EV_MAX ?? '30');
+          return Number.isFinite(evNum) && evNum >= evMin && evNum < evMax;
+        })();
+        const _tennisMlShadowEffective = _tennisMlPromoteFilter ? false : _tennisMlShadow;
 
         if (!tipReasonTennis) {
           try {
@@ -20796,9 +20811,9 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
           modelP1: mlResultTennis.modelP1,
           modelP2: mlResultTennis.modelP2,
           modelPPick: modelPPick,
-          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')) + (_tennisMlShadow ? '+shadowonly' : ''),
+          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')) + (_tennisMlShadowEffective ? '+shadowonly' : (_tennisMlPromoteFilter ? '+promote-wta-main-ev' : '')),
           tipReason: tipReasonTennis,
-          isShadow: (_tennisMlShadow || tennisConfig.shadowMode) ? 1 : 0,
+          isShadow: (_tennisMlShadowEffective || tennisConfig.shadowMode) ? 1 : 0,
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: pickIsT1 ? 't1' : 't2',
@@ -20846,7 +20861,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
         // podia rotar pra shadow (_autoRouteToShadow) e DM disparava — _tennisMlShadow
         // local var não pegava rec.autoShadowed. Helper preserva research existente
         // (_tennisShadowOnly) + bloqueia server-side flip.
-        const _tennisShadowDispatched = _tennisMlShadow || _isShadowDispatch(rec, 'tennis');
+        const _tennisShadowDispatched = _tennisMlShadowEffective || _isShadowDispatch(rec, 'tennis');
         if (!_tennisShadowDispatched) {
           let _dmOkTen = false;
           for (const [userId, prefs] of subscribedUsers) {
@@ -20857,9 +20872,11 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
           fireAutoBetHook(db, { tipId: rec.tipId, eventId: match.id, marketId: 'ML', side: pickIsT1 ? 't1' : 't2', expectedOdd: parseFloat(tipOdd), evPct: parseFloat(tipEV), sport: 'tennis', league: match.league });
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
-        const shadowReason = _tennisMlShadow
+        const shadowReason = _tennisMlShadowEffective
           ? (_tennisShadowOnly ? ' [SHADOW non-top-tier]' : ' [SHADOW ml-validation]')
-          : (_isShadowDispatch(rec, 'tennis') ? (rec?.autoShadowed ? ' [SHADOW auto-rotated]' : ' [SHADOW server-flag]') : '');
+          : (_isShadowDispatch(rec, 'tennis')
+              ? (rec?.autoShadowed ? ' [SHADOW auto-rotated]' : ' [SHADOW server-flag]')
+              : (_tennisMlPromoteFilter ? ' [PROMOTED wta-main-ev]' : ''));
         log('INFO', 'AUTO-TENNIS', `Tip ${_tennisShadowDispatched ? 'shadow-only' : 'enviada'}${isLivePhase ? ' (LIVE)' : ''}${shadowReason}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         // CLV delayed pra live tennis (pregame já é pego pelo updater async normal)
         if (isLivePhase) scheduleLiveClvCapture('tennis', match, tipPlayer, match.id, tipOdd);
