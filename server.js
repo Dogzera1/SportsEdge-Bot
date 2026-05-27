@@ -11276,7 +11276,8 @@ setInterval(load, 10000);
     const apply = String(parsed.query.apply || '') === '1';
     const days = Math.min(180, Math.max(1, parseInt(parsed.query.days || '30', 10) || 30));
     try {
-      const _walkoverRe = /\b(retired|retirement|retire|retir|ret|w\.?o\.?|walkover|wo|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned|forfeit|forfeited)\b/i;
+      const { _MT_WALKOVER_RE: _walkoverRe, _appearsIncompleteTennisMatch } = require('./lib/tennis-mt-settle');
+      const _isWalkover = (score) => !!score && (_walkoverRe.test(String(score)) || _appearsIncompleteTennisMatch(score));
       const candidates = db.prepare(`
         SELECT id, market_type, tip_participant, participant1, participant2, event_name,
                result, stake, stake_reais, profit_reais, odds, sent_at, match_id
@@ -11311,12 +11312,12 @@ setInterval(load, 10000);
             current_result: tip.result,
             lookup_winner: best?.winner || null,
             lookup_final_score: best?.final_score || null,
-            walkover_match: best?.final_score ? _walkoverRe.test(String(best.final_score)) : null,
+            walkover_match: best?.final_score ? _isWalkover(best.final_score) : null,
           });
         }
         if (!best?.final_score) continue;
         const score = String(best.final_score);
-        if (!_walkoverRe.test(score)) continue;
+        if (!_isWalkover(score)) continue;
 
         // Idempotency guard
         const existingAudit = db.prepare(`
