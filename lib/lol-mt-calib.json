@@ -76,6 +76,17 @@
           "bins": [
             {
               "lo": 0.3,
+              "hi": 0.55,
+              "mid": 0.425,
+              "n": 0,
+              "wins": 0,
+              "rawP": null,
+              "priorP": null,
+              "pCalib": 0.425,
+              "note": "manual identity fallback — extends coverage below cluster mid 0.6153 without sample data; PAV merged 0.30-0.65 but real sample clustered 0.55-0.65 (n=29 rawP=0.6552)"
+            },
+            {
+              "lo": 0.55,
               "hi": 0.65,
               "mid": 0.6153,
               "n": 29,
