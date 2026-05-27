@@ -23916,7 +23916,7 @@ async function pollValorant(runOnce = false) {
         }
         // Usa VLR.currentMap quando PandaScore entregou null (partida em andamento de game N)
         const mapHint = match.currentMap || vlrLive?.currentMap || null;
-        const ctx = { bo, score1: match.score1, score2: match.score2, currentMap: mapHint };
+        const ctx = { bo, score1: match.score1, score2: match.score2, currentMap: mapHint, league: match.league };
         const elo = getValorantModel(db, match.team1, match.team2, impliedP1, impliedP2, ctx);
 
         // Min games Elo: default 3 (antes 5). VCL/Challengers têm times novos (0-4 games).
