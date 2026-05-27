@@ -11296,10 +11296,24 @@ setInterval(load, 10000);
       let voidedN = 0;
       let skippedAudit = 0;
 
+      const verbose = String(parsed.query.verbose || '') === '1';
+      const verboseAll = [];
       for (const tip of candidates) {
         const sentRaw = String(tip.sent_at || '').trim();
         const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
         const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
+        if (verbose) {
+          verboseAll.push({
+            tip_id: tip.id,
+            market_type: tip.market_type,
+            tip_participant: tip.tip_participant,
+            participants: `${tip.participant1} vs ${tip.participant2}`,
+            current_result: tip.result,
+            lookup_winner: best?.winner || null,
+            lookup_final_score: best?.final_score || null,
+            walkover_match: best?.final_score ? _walkoverRe.test(String(best.final_score)) : null,
+          });
+        }
         if (!best?.final_score) continue;
         const score = String(best.final_score);
         if (!_walkoverRe.test(score)) continue;
@@ -11364,6 +11378,7 @@ setInterval(load, 10000);
         skipped_already_revoided: skippedAudit,
         voided: voidedN,
         sample: findings.slice(0, 50),
+        ...(verbose ? { verbose_all: verboseAll } : {}),
       });
     } catch (e) {
       sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
