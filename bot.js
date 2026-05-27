@@ -22325,12 +22325,35 @@ Máximo 200 palavras.`;
           ? { pH: +fbModel.pH.toFixed(4), pD: +fbModel.pD.toFixed(4), pA: +fbModel.pA.toFixed(4) }
           : null;
         const _factors = mlScore?.method ? [{ label: 'Método', value: String(mlScore.method).slice(0, 40) }] : null;
+        // 2026-05-27 (P1+P2): Football ML promote filter — research shadow 28d.
+        // n=98 fb ML; EV 10-20% sweet spot ROI +20.11% gap +2.33pp (calib quase
+        // fechado). Whitelist top5 + UCL/UEL + Brasileirão A → projeção n=32
+        // ROI +24%. Brasileirão B (n=18 ROI -25%) fora. Default OFF; ativa via
+        // FOOTBALL_ML_PROMOTE_FILTER=true. REQUER FOOTBALL_SHADOW=false (caso
+        // contrário server rota via _autoRouteToShadow + isBucketShadowed).
+        // null = filter inativo (flow normal). true = promove. false = força shadow.
+        const _fbMlPromoteFilter = (() => {
+          if (!_isFootballMlEquivalent) return null;
+          if (!/^(true|1|yes|on)$/i.test(String(process.env.FOOTBALL_ML_PROMOTE_FILTER ?? 'false'))) return null;
+          const lg = String(match.league || '');
+          // Exclude false-positives no substring match (Russian Premier League etc).
+          // Mirror lib/league-rollup.js football exclude.
+          if (/(russian|indian|scottish|welsh)\s*premier|austrian\s*bundesliga|bundesliga\s*2/i.test(lg)) return false;
+          const wl = String(process.env.FOOTBALL_ML_PROMOTE_LEAGUES ?? 'premier league|la liga|bundesliga|serie a|ligue 1|champions league|europa league|brasileir.{1,4} s.rie a');
+          if (!new RegExp(wl, 'i').test(lg)) return false;
+          const evNum = Number(String(tipEV).replace(/[+%]/g, ''));
+          const evMin = parseFloat(process.env.FOOTBALL_ML_PROMOTE_EV_MIN ?? '10');
+          const evMax = parseFloat(process.env.FOOTBALL_ML_PROMOTE_EV_MAX ?? '20');
+          return Number.isFinite(evNum) && evNum >= evMin && evNum < evMax;
+        })();
         const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
           confidence: tipConf, isLive: false, market_type: _recordMarketType,
-          isShadow: fbConfig?.shadowMode ? 1 : 0,
+          isShadow: _fbMlPromoteFilter === true ? 0
+                  : _fbMlPromoteFilter === false ? 1
+                  : (fbConfig?.shadowMode ? 1 : 0),
           modelP1: fbModelP1, modelP2: fbModelP2, modelPPick: fbModelPPick,
           modelLabel: (elo ? 'football-elo+poisson' : 'football-poisson') + (_fbHybridText ? '+hybrid' : (_fbFromOverride ? '+override' : '')),
           tipReason: fbTipReason,
@@ -22365,10 +22388,13 @@ Máximo 200 palavras.`;
         // em vez de fbConfig.shadowMode (env sport-level). Server pode rotar tip pra
         // shadow via _autoRouteToShadow (ml_disabled, SHADOW_LEAGUES, ml_bucket_blocked)
         // — helper pega rec.autoShadowed que env-check ignorava.
-        if (_isShadowDispatch(recFb, 'football')) {
+        if (_fbMlPromoteFilter !== true && _isShadowDispatch(recFb, 'football')) {
           analyzedFootball.set(key, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} (DB log only)${recFb?.autoShadowed ? ' (auto-shadow)' : ''}`);
+          log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} (DB log only)${recFb?.autoShadowed ? ' (auto-shadow)' : ''}${_fbMlPromoteFilter === false ? ' (promote-filter-miss)' : ''}`);
           continue;
+        }
+        if (_fbMlPromoteFilter === true) {
+          log('INFO', 'AUTO-FOOTBALL', `[PROMOTED ml-top5-ev] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} | ${match.league}`);
         }
 
         // 2026-05-21: live odds drift guard cross-sport extension (lol/cs/dota/val
