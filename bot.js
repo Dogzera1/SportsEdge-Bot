@@ -3920,8 +3920,8 @@ async function runAutoAnalysis() {
             pickSide: _pickSideLs,
             sport: 'lol',
             isShadow: _perMapEnabled
-              ? (_perMapShadow ? 1 : (isBucketShadowed('lol') ? 1 : 0))
-              : (isBucketShadowed('lol') ? 1 : 0),
+              ? (_perMapShadow ? 1 : (isBucketShadowed('lol', match.league) ? 1 : 0))
+              : (isBucketShadowed('lol', match.league) ? 1 : 0),
             // tip_context_json fields (forensics):
             factors: result.factorActive || null,
             mlScore: Number.isFinite(result.mlScore) ? +result.mlScore.toFixed(2) : null,
@@ -4028,7 +4028,7 @@ async function runAutoAnalysis() {
             } catch (_) {}
           }
 
-          if (_isShadowDispatch(rec, 'lol')) {
+          if (_isShadowDispatch(rec, 'lol', match.league)) {
             log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
           } else {
             let _dmOkLolLs = false;
@@ -4141,7 +4141,7 @@ async function runAutoAnalysis() {
                   odds: String(hOdd), ev: String(hEV.toFixed(1)), stake: String(hStake),
                   confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP',
                   sport: 'lol',
-                  isShadow: isBucketShadowed('lol') ? 1 : 0,
+                  isShadow: isBucketShadowed('lol', match.league) ? 1 : 0,
                   gates_evaluated: _mlGatesLolH,
                 }, 'lol');
 
@@ -4153,7 +4153,7 @@ async function runAutoAnalysis() {
                   break;
                 }
 
-                if (_isShadowDispatch(recHa, 'lol')) {
+                if (_isShadowDispatch(recHa, 'lol', match.league)) {
                   log('INFO', 'AUTO', `[SHADOW] LoL HANDICAP ${favTeam} @ ${hOdd} — DM suprimida${recHa?.autoShadowed ? ' (auto-shadow)' : ''}`);
                 } else {
                   let _dmOkLolHa = false;
@@ -4474,7 +4474,7 @@ async function runAutoAnalysis() {
               lineShopOdds: result.o || null,
               pickSide: _pickSideUp,
               sport: 'lol',
-              isShadow: isBucketShadowed('lol') ? 1 : 0,
+              isShadow: isBucketShadowed('lol', match.league) ? 1 : 0,
               emissionSource: result.debugVars?.source || 'ml_only',
               gates_evaluated: _mlGatesLolUp,
             }, 'lol');
@@ -4512,7 +4512,7 @@ async function runAutoAnalysis() {
             });
 
             const _betBtnUp = _buildTipBetButton('lol', result.o, _pickSideUp, match, tipStakeAdj, tipOdd);
-            if (_isShadowDispatch(recUp, 'lol')) {
+            if (_isShadowDispatch(recUp, 'lol', match.league)) {
               log('INFO', 'AUTO-TIP', `[SHADOW] LoL upcoming ${tipTeam} @ ${tipOdd} — DM suprimida${recUp?.autoShadowed ? ' (auto-shadow)' : ''}`);
             } else {
               let _dmOkLolUp = false;
@@ -5899,9 +5899,16 @@ const _splitBucketShadow = new Set(); // sports split em auto-shadow
 for (const b of ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'mma', 'basket', 'darts', 'snooker', 'tabletennis']) {
   if (process.env[`${b.toUpperCase()}_SHADOW`] === 'true') _splitBucketShadow.add(b);
 }
-function isBucketShadowed(sport) {
-  if (SPORTS[sport]?.shadowMode) return true;
-  return _splitBucketShadow.has(sport);
+// ATTACK 9 (2026-05-27): aceita league opcional pra bypass via <SPORT>_REAL_LEAGUES
+// whitelist. Mirror do pattern val (bot.js:24508). Generic via lib/sports.js:143
+// isLeagueRealOverride. Backward compat: league=null preserva semantics antigos.
+// Caso de uso: LOL_SHADOW=true global + LOL_REAL_LEAGUES="LCK,LCK Challengers"
+// → LCK matches emit real, demais leagues lol seguem shadow.
+function isBucketShadowed(sport, league = null) {
+  const sportShadow = (SPORTS[sport]?.shadowMode) || _splitBucketShadow.has(sport);
+  if (!sportShadow) return false;
+  if (league && isLeagueRealOverride(sport, league)) return false;
+  return true;
 }
 
 // 2026-05-21 (audit P1): rastreia se Telegram DM dispatch teve sucesso (mig 121).
@@ -5921,10 +5928,10 @@ function _markDmDispatched(tipId) {
 // _autoRouteToShadow (ML_DISABLED / ML_TIER1 gates) — caller ignorava o flip
 // e disparava DM mesmo assim. Agora verifica rec.autoShadowed e rec.isShadow
 // retornados por /record-tip.
-function _isShadowDispatch(rec, sport) {
+function _isShadowDispatch(rec, sport, league = null) {
   if (rec?.autoShadowed === 1) return true;
   if (rec?.isShadow === 1) return true;
-  return isBucketShadowed(sport);
+  return isBucketShadowed(sport, league);
 }
 
 // League blocklist — substring match case-insensitive. Persistido em DB (table
