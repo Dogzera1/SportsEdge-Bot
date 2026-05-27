@@ -1,7 +1,7 @@
 {
   "version": 1,
   "sport": "tennis",
-  "fittedAt": "2026-05-27T18:35:26.605Z",
+  "fittedAt": "2026-05-27T18:39:39.130Z",
   "method": "pav_with_beta_smoothing",
   "target": "outcome (win/loss)",
   "prior": {
@@ -444,6 +444,35 @@
               ],
               "nTotal": 49,
               "sides": {
+                "away": {
+                  "bins": [
+                    {
+                      "lo": 0.3,
+                      "hi": 0.55,
+                      "mid": 0.4284,
+                      "n": 11,
+                      "wins": 2,
+                      "rawP": 0.1818,
+                      "priorP": 0.5577,
+                      "pCalib": 0.3401
+                    },
+                    {
+                      "lo": 0.55,
+                      "hi": 0.65,
+                      "mid": 0.5918,
+                      "n": 8,
+                      "wins": 3,
+                      "rawP": 0.375,
+                      "priorP": 0.5069,
+                      "pCalib": 0.4409
+                    }
+                  ],
+                  "coverage": [
+                    0.3,
+                    0.65
+                  ],
+                  "nTotal": 19
+                },
                 "home": {
                   "bins": [
                     {
@@ -1316,6 +1345,66 @@
             0.65
           ],
           "nTotal": 38,
+          "sides": {
+            "over": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.3908,
+                  "n": 18,
+                  "wins": 2,
+                  "rawP": 0.1111,
+                  "priorP": 0.4098,
+                  "pCalib": 0.203
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.65,
+                  "mid": 0.592,
+                  "n": 1,
+                  "wins": 1,
+                  "rawP": 1,
+                  "priorP": 0.4827,
+                  "pCalib": 0.5402
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.65
+              ],
+              "nTotal": 19
+            },
+            "under": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.3976,
+                  "n": 18,
+                  "wins": 8,
+                  "rawP": 0.4444,
+                  "priorP": 0.3628,
+                  "pCalib": 0.4193
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.65,
+                  "mid": 0.5753,
+                  "n": 1,
+                  "wins": 1,
+                  "rawP": 1,
+                  "priorP": 0.4643,
+                  "pCalib": 0.5238
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.65
+              ],
+              "nTotal": 19
+            }
+          },
           "formats": {
             "bo3": {
               "bins": [
@@ -1344,7 +1433,67 @@
                 0.3,
                 0.65
               ],
-              "nTotal": 38
+              "nTotal": 38,
+              "sides": {
+                "over": {
+                  "bins": [
+                    {
+                      "lo": 0.3,
+                      "hi": 0.55,
+                      "mid": 0.3908,
+                      "n": 18,
+                      "wins": 2,
+                      "rawP": 0.1111,
+                      "priorP": 0.4098,
+                      "pCalib": 0.203
+                    },
+                    {
+                      "lo": 0.55,
+                      "hi": 0.65,
+                      "mid": 0.592,
+                      "n": 1,
+                      "wins": 1,
+                      "rawP": 1,
+                      "priorP": 0.4827,
+                      "pCalib": 0.5402
+                    }
+                  ],
+                  "coverage": [
+                    0.3,
+                    0.65
+                  ],
+                  "nTotal": 19
+                },
+                "under": {
+                  "bins": [
+                    {
+                      "lo": 0.3,
+                      "hi": 0.55,
+                      "mid": 0.3976,
+                      "n": 18,
+                      "wins": 8,
+                      "rawP": 0.4444,
+                      "priorP": 0.3628,
+                      "pCalib": 0.4193
+                    },
+                    {
+                      "lo": 0.55,
+                      "hi": 0.65,
+                      "mid": 0.5753,
+                      "n": 1,
+                      "wins": 1,
+                      "rawP": 1,
+                      "priorP": 0.4643,
+                      "pCalib": 0.5238
+                    }
+                  ],
+                  "coverage": [
+                    0.3,
+                    0.65
+                  ],
+                  "nTotal": 19
+                }
+              }
             }
           }
         },
@@ -1552,23 +1701,23 @@
     },
     "post": {
       "label": "POST_calib",
-      "n": 426,
-      "wins": 133,
-      "hit": 31.2,
-      "roi": 7.6,
+      "n": 418,
+      "wins": 135,
+      "hit": 32.3,
+      "roi": 10.9,
       "roi_ci95": {
-        "lower": -9.4,
-        "upper": 24.6,
-        "se_pp": 8.67
+        "lower": -6.3,
+        "upper": 28.2,
+        "se_pp": 8.81
       },
-      "profit": 32.25,
-      "avgP": 0.382,
-      "avgEV": 37.6,
-      "brier": 0.2102,
-      "ece": 0.0802
+      "profit": 45.67,
+      "avgP": 0.388,
+      "avgEV": 39.3,
+      "brier": 0.2139,
+      "ece": 0.0759
     }
   },
   "meta": {
-    "note": "2026-05-27 18:30Z refit in-sample 120d (eval=0), preserved tier_quali_or_early manual cap from c4e590c"
+    "note": "2026-05-27 18:40Z refit in-sample 120d (eval=0, min_side_n=15) — bo5 sides preservados"
   }
 }
