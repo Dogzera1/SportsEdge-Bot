@@ -23246,7 +23246,11 @@ load();
   if (p === '/admin/dm-dispatch-audit' && req.method === 'GET') {
     if (!requireAdmin(req, res)) return;
     try {
-      const days = Math.min(7, Math.max(1, parseInt(parsed.query.days, 10) || 1));
+      // 2026-05-27 (audit P0-G): expandido days range 1→30, breakdown total + missing by_sport
+      // separado, plus wire_coverage info. Nota anterior afirmava "só LoL ML wire" — incorreto:
+      // _markDmDispatched cabeado em 14 paths cross-sport (LoL/CS/Dota/Val/Tennis/Football/MMA/
+      // Darts/Snooker/TT/Basket). Causa real NULL = _dmOkX gate (sendDM ZERO success).
+      const days = Math.min(30, Math.max(1, parseInt(parsed.query.days, 10) || 1));
       const cutoffStart = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
       const cutoffEnd = new Date(Date.now() - 5 * 60 * 1000).toISOString();
       const rows = db.prepare(`
@@ -23262,29 +23266,66 @@ load();
         ORDER BY sent_at DESC
         LIMIT 200
       `).all(cutoffStart, cutoffEnd);
-      const total = db.prepare(`
-        SELECT COUNT(*) AS n
+      // Total e by_sport completos (não só missing)
+      const totalRows = db.prepare(`
+        SELECT sport, COUNT(*) AS total,
+               SUM(CASE WHEN dm_dispatched_at IS NOT NULL THEN 1 ELSE 0 END) AS dispatched
         FROM tips
         WHERE COALESCE(is_shadow, 0) = 0
           AND COALESCE(archived, 0) = 0
           AND sent_at >= ?
-      `).get(cutoffStart)?.n || 0;
+        GROUP BY sport
+      `).all(cutoffStart);
+      const totalAll = totalRows.reduce((s, r) => s + r.total, 0);
+      const dispatchedAll = totalRows.reduce((s, r) => s + (r.dispatched || 0), 0);
       const bySport = {};
-      for (const r of rows) {
-        const s = r.sport || 'unknown';
-        bySport[s] = (bySport[s] || 0) + 1;
+      for (const r of totalRows) {
+        bySport[r.sport || 'unknown'] = {
+          total: r.total,
+          dispatched: r.dispatched || 0,
+          missing: r.total - (r.dispatched || 0),
+          coverage_pct: r.total > 0 ? +((r.dispatched || 0) / r.total * 100).toFixed(1) : 0,
+        };
       }
+      // Sample subscribed users count per sport (diagnóstico raiz pra NULL)
+      let subscriberSummary = {};
+      try {
+        const subRows = db.prepare(`
+          SELECT user_id, sport_prefs FROM users WHERE subscribed = 1
+        `).all();
+        subscriberSummary = { total_subscribed: subRows.length };
+        const perSport = {};
+        for (const u of subRows) {
+          let prefs = [];
+          try { prefs = JSON.parse(u.sport_prefs || '[]'); } catch (_) {}
+          if (Array.isArray(prefs)) {
+            for (const sp of prefs) perSport[sp] = (perSport[sp] || 0) + 1;
+          }
+        }
+        subscriberSummary.by_sport_pref = perSport;
+      } catch (_) {}
       sendJson(res, {
         ok: true,
         window_days: days,
         cutoff_start: cutoffStart,
         cutoff_end: cutoffEnd,
-        total_real_tips_in_window: total,
-        missing_dm_count: rows.length,
-        missing_pct: total > 0 ? +(rows.length / total * 100).toFixed(2) : 0,
+        total_real_tips_in_window: totalAll,
+        total_dispatched: dispatchedAll,
+        missing_dm_count: totalAll - dispatchedAll,
+        missing_pct: totalAll > 0 ? +((totalAll - dispatchedAll) / totalAll * 100).toFixed(2) : 0,
         by_sport: bySport,
-        sample: rows.slice(0, 50),
-        note: 'tips real (is_shadow=0) com sent_at >5min mas dm_dispatched_at IS NULL. Pode indicar Telegram outage OR caller bug. Wire helper bot.js _markDmDispatched pendente extensão cross-sport (atualmente só LoL ML wire — outros sports retornam aqui false-positive).',
+        subscriber_summary: subscriberSummary,
+        sample_missing: rows.slice(0, 50),
+        wire_coverage: {
+          status: 'cross-sport (14 paths bot.js)',
+          paths: ['lol_live_ml(L4056)', 'lol_handicap(L4164)', 'lol_pre_ml(L4527)',
+                  'dota_ml(L18055)', 'dota_map(L18294)', 'mma_ml(L19123)',
+                  'tennis_ml(L20849)', 'football_ml(L22389)', 'tabletennis_ml(L22661)',
+                  'cs_ml(L23721)', 'valorant_ml(L24631)', 'darts_ml(L24988)',
+                  'snooker_ml(L25257)', 'basket_ml(L25692)'],
+          gated_by: '_dmOkX (true só se >=1 sendDM success no loop subscribedUsers)',
+        },
+        diagnosis_hint: 'Se sport X tem coverage_pct=0 + subscriber_summary.by_sport_pref[X] > 0, sendDM provavelmente falhando (token wrong, bot blocked, Telegram outage). Se by_sport_pref[X]=0, expected: zero subscribers = zero DM attempts = _dmOkX nunca flips true. NÃO é bug de instrumentação — wire está OK.',
       });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
