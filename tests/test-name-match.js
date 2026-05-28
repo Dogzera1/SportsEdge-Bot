@@ -68,4 +68,35 @@ module.exports = function runTests(t) {
     const r = nameMatches('', 'Fnatic');
     t.assert(!r.match && r.method === 'none', `got ${JSON.stringify(r)}`);
   });
+
+  // 2026-05-28: P0 LoL #4607 regression — Academy/Reserves/Youth são ROSTERS
+  // diferentes, não suffixes. Pré-fix: token_prefix bate via ORG_SUFFIX_TOKENS.
+  // Pós-fix: token_prefix falha + substring rejeita (len<minSubstrLen=4).
+  t.test('NÃO casar "T1" com "T1 Academy" (rosters diferentes — P0 #4607)', () => {
+    const r = nameMatches('T1', 'T1 Academy', { aliases: LOL_ALIASES_SAMPLE });
+    t.assert(!r.match, `falso positivo: ${JSON.stringify(r)} — academy é roster diferente`);
+  });
+
+  t.test('NÃO casar "FaZe" com "FaZe Academy" (CS academy roster)', () => {
+    const r = nameMatches('FaZe', 'FaZe Academy');
+    t.assert(!r.match, `falso positivo: ${JSON.stringify(r)}`);
+  });
+
+  t.test('NÃO casar "NAVI" com "NAVI Junior" (developmental squad — minSubstrScore reject)', () => {
+    // Nota: 'junior' NÃO está em ORG_SUFFIX_TOKENS, então token_prefix falha por
+    // remainder não-vazio. Substring 'navi' (4) ⊂ 'navijunior' (10), score=0.4 < 0.5 → reject.
+    const r = nameMatches('NAVI', 'NAVI Junior');
+    t.assert(!r.match, `falso positivo: ${JSON.stringify(r)}`);
+  });
+
+  // Token_prefix legítimo ainda funciona pra suffixes reais
+  t.test('AINDA casar "UCAM" com "UCAM Esports Club" (suffix legitimo)', () => {
+    const r = nameMatches('UCAM', 'UCAM Esports Club');
+    t.assert(r.match && r.method === 'token_prefix', `regression: ${JSON.stringify(r)}`);
+  });
+
+  t.test('AINDA casar "Misa" com "Misa Esports" (suffix legitimo)', () => {
+    const r = nameMatches('Misa', 'Misa Esports');
+    t.assert(r.match && r.method === 'token_prefix', `regression: ${JSON.stringify(r)}`);
+  });
 };
