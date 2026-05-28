@@ -39900,6 +39900,19 @@ server.listen(PORT, '0.0.0.0', () => {
     try { stmts.cleanOldOdds.run(); } catch (e) { /* prepared stmt pode falhar; cron heartbeat captura */ throw e; }
   }), 6 * 60 * 60 * 1000);
 
+  // 2026-05-28 (audit P0 banco): retention unificado nas 6 log tables sem
+  // cleanup (tip_factor_log, bankroll_drift_log, mt/ml_auto_promote_log,
+  // analytics_alerts, paper_trades). Default 90d, override DB_RETENTION_*_DAYS.
+  setInterval(_wrapServerCron('db_retention', () => {
+    const { runDbRetentionCycle } = require('./lib/db-retention');
+    runDbRetentionCycle(db, log);
+  }), 24 * 60 * 60 * 1000);
+  // Boot-fire delayed para não competir com migrations/load inicial.
+  setTimeout(_wrapServerCron('db_retention', () => {
+    const { runDbRetentionCycle } = require('./lib/db-retention');
+    runDbRetentionCycle(db, log);
+  }), 10 * 60 * 1000).unref();
+
   // 2026-05-07 (audit P2): cache eviction sweep — TTL/cap em mapOddsCache,
   // oddsCache. Antes nenhum cache evictava → memory leak slow burn
   // (Railway 512MB cap). 10min cycle = baixo overhead.
