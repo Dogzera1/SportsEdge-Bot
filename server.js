@@ -8077,26 +8077,37 @@ const server = http.createServer(async (req, res) => {
       if (body == null) return;
       try {
         if (!ADMIN_KEY) { sendJson(res, { ok: false, error: 'admin_key_not_configured' }, 503); return; }
+        // 2026-05-28 (audit adversarial P0): unifica /admin/login no Map canônico
+        // _adminFailureMap (threshold/window/lock via ADMIN_LOCKOUT_* envs).
+        // Antes usava global._adminLoginFails paralelo com threshold hardcoded >10
+        // → IP locked via requireAdmin podia ainda tentar /admin/login. Agora
+        // _isAdminLocked check ANTES do timing compare bloqueia atacante já flagged.
+        const ip = getClientIp(req);
+        if (_isAdminLocked(ip)) {
+          _appendAdminAudit(req, false, 'ip_locked_login');
+          const entry = _adminFailureMap.get(ip);
+          sendJson(res, { ok: false, error: 'ip_locked_too_many_failures', retry_after_min: entry ? Math.ceil((entry.lockedUntil - Date.now()) / 60000) : null }, 429);
+          return;
+        }
         const { key } = safeParse(body, {});
         const provided = String(key || '').trim();
         // Compare timing-safe — defense vs side-channel timing attack.
         const ok = provided.length === ADMIN_KEY.length
           && require('crypto').timingSafeEqual(Buffer.from(provided), Buffer.from(ADMIN_KEY));
         if (!ok) {
-          // Rate-limit per IP em login fail
-          const ip = getClientIp(req);
-          global._adminLoginFails = global._adminLoginFails || new Map();
-          const cur = global._adminLoginFails.get(ip) || { n: 0, since: Date.now() };
-          if (Date.now() - cur.since > 15 * 60 * 1000) { cur.n = 0; cur.since = Date.now(); }
-          cur.n++;
-          global._adminLoginFails.set(ip, cur);
-          if (cur.n > 10) {
-            sendJson(res, { ok: false, error: 'rate_limit_login_fails' }, 429);
+          _recordAdminFail(ip, '/admin/login');
+          _appendAdminAudit(req, false, 'invalid_key');
+          // Resposta pode ser 429 se _recordAdminFail acabou de lockar
+          if (_isAdminLocked(ip)) {
+            const entry = _adminFailureMap.get(ip);
+            sendJson(res, { ok: false, error: 'ip_locked_too_many_failures', retry_after_min: entry ? Math.ceil((entry.lockedUntil - Date.now()) / 60000) : null }, 429);
             return;
           }
           sendJson(res, { ok: false, error: 'invalid_key' }, 401);
           return;
         }
+        _recordAdminSuccess(ip);
+        _appendAdminAudit(req, true, 'login_ok');
         const sid = _genSessionToken();
         const csrfToken = _genSessionToken();
         _adminSessions.set(sid, {
