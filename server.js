@@ -38069,7 +38069,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       if (body == null) return;
       try {
         const sport = parsed.query.sport || 'esports';
-        const { matchId, clvOdds, tipParticipant } = safeParse(body, {});
+        const { matchId, clvOdds, tipParticipant, regime } = safeParse(body, {});
         const mid = clampStr(matchId, 128);
         const clv = parseFiniteNumber(clvOdds);
         if (!mid) { badRequest(res, 'matchId obrigatório'); return; }
@@ -38079,9 +38079,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // só atualiza se houver exatamente 1 tip pendente — caso contrário recusa pra
         // evitar contaminação cross-tip.
         const tp = clampStr(tipParticipant, 128) || null;
+        // 2026-05-28: regime 'near' sobrescreve clv_odds (tracking até o close —
+        // bot.js:30999); far/live/unknown e callers legacy (sem regime) ficam set-once.
+        const _nearOverwrite = String(regime || '') === 'near';
         if (tp) {
-          stmts.updateTipCLV.run(clv, mid, sport, tp);
-          sendJson(res, { ok: true, scoped: 'match+side' });
+          (_nearOverwrite ? stmts.updateTipCLVNear : stmts.updateTipCLV).run(clv, mid, sport, tp);
+          sendJson(res, { ok: true, scoped: 'match+side', overwrite: _nearOverwrite });
         } else {
           const tips = db.prepare(`SELECT id, tip_participant FROM tips WHERE match_id = ? AND sport = ?`).all(mid, sport);
           if (tips.length === 1) {

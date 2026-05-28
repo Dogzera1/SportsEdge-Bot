@@ -31211,7 +31211,10 @@ async function checkCLV(caches = {}) {
           }
           const changed = !prevClv || Math.abs(clvN - prevClv) >= 0.005;
           // 2026-05-03 FIX: incluir tip_participant pra escopar updateTipCLV à tip exata.
-          await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN, tipParticipant: tip.tip_participant }, sport).catch(() => {});
+          // 2026-05-28: passar regime — near sobrescreve (tracking até close). O guard
+          // clv_captured_at IS NULL no server travava o re-capture near no 1º odd da
+          // janela (ou no open-proxy far), defeating "última fica como close".
+          await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN, tipParticipant: tip.tip_participant, regime }, sport).catch(() => {});
           // Near-regime re-captura a cada ciclo; só loga INFO quando odd muda pra evitar spam.
           // 2026-05-05: dedup por (sport,match_id,tip_participant,clvN) — em prod existem
           // ~30 tips shadow basket por match (Thunder×Lakers/Pistons×Cavaliers no log de
