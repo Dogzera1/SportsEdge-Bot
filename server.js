@@ -23877,11 +23877,24 @@ load();
         return arr;
       };
 
+      // 2026-05-28 (audit P0 granularidade): maxBinWidth força grid fino antes do
+      // merge. Antes hardcoded [0.30, 0.55, ...] tinha bin[0] width 0.25 (2.5× P1
+      // teto 0.10) → LoL TOTAL bin 0.30-0.55 colapsava p_model heterogêneo num
+      // único pCalib (memory lol_total_calib_bin_pendency). Grid 0.05 default
+      // gera ~14 bins de 0.30→1.0; merge step ainda atua quando sample<minBin.
+      const MAX_BIN_WIDTH = Math.max(0.02, Math.min(0.25,
+        parseFloat(parsed.query.maxBinWidth || process.env.MT_REFIT_MAX_BIN_WIDTH || '0.05')));
+      const _buildEdges = () => {
+        const arr = [];
+        for (let e = 0.30; e < 1.0 - 1e-6; e += MAX_BIN_WIDTH) arr.push(+e.toFixed(4));
+        arr.push(1.001);
+        return arr;
+      };
       const fitMarket = (marketName, extraFilter = null) => {
         let lst = tips.filter(t => t.market === marketName);
         if (typeof extraFilter === 'function') lst = lst.filter(extraFilter);
         if (lst.length < 12) return { skip: 'insufficient_sample', n: lst.length };
-        const edges = [0.30, 0.55, 0.65, 0.70, 0.75, 0.80, 0.85, 0.92, 1.001];
+        const edges = _buildEdges();
         const bins = [];
         for (let i = 0; i < edges.length - 1; i++) {
           const lo = edges[i], hi = edges[i + 1];
@@ -23920,6 +23933,14 @@ load();
           });
         }
         merged = pav(merged);
+        // 2026-05-28: WARN telemetria se merge resultou em bin >1.5× MAX_BIN_WIDTH.
+        // Não rejeita (insuficient sample é signal real), mas sinaliza pra
+        // operador considerar minBin menor OR aceitar resolução reduzida.
+        const wideBins = merged.filter(b => (b.hi - b.lo) > MAX_BIN_WIDTH * 1.5);
+        if (wideBins.length) {
+          try { log('WARN', 'MT-REFIT-WIDEBIN',
+            `${sport}/${marketName}: ${wideBins.length} bin(s) > ${(MAX_BIN_WIDTH*1.5).toFixed(2)} width após merge — sample insuficiente em sub-buckets`); } catch (_) {}
+        }
         return {
           bins: merged.map(b => ({
             lo: +b.lo.toFixed(4), hi: +b.hi.toFixed(4), mid: +b.mid.toFixed(4),
@@ -23929,6 +23950,8 @@ load();
           })),
           coverage: [merged[0].lo, merged[merged.length - 1].hi],
           nTotal: lst.length,
+          maxBinWidth: MAX_BIN_WIDTH,
+          wideBinsAfterMerge: wideBins.length,
         };
       };
 
