@@ -28241,7 +28241,7 @@ load();
 
       const { predictTrainedEsports, hasTrainedModel } = require('./lib/esports-model-trained');
       const { buildTrainedContext } = require('./lib/esports-runtime-features');
-      const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis, getTennisRecentMomentum } = require('./lib/tennis-model-trained');
+      const { predictTrainedTennis, predictTrainedTennisSymmetric, hasTrainedModel: hasTrainedTennis, getTennisRecentMomentum } = require('./lib/tennis-model-trained');
       const { getTennisElo, extractSurface } = require('./lib/tennis-ml');
 
       // Puxa tips pendentes de 1 ou N sports
@@ -28277,7 +28277,7 @@ load();
             const winStreakDiff = (m1?.streak || 0) - (m2?.streak || 0);
             const wrLast10Diff = (m1?.wrLast10 != null && m2?.wrLast10 != null)
               ? (m1.wrLast10 - m2.wrLast10) : 0;
-            pred = predictTrainedTennis({
+            pred = predictTrainedTennisSymmetric({
               eloOverall1: elo.eloOverall1 || elo.elo1, eloOverall2: elo.eloOverall2 || elo.elo2,
               eloSurface1: elo.eloSurface1 || elo.elo1, eloSurface2: elo.eloSurface2 || elo.elo2,
               gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2,
@@ -28376,7 +28376,7 @@ load();
 
       const { predictTrainedEsports, hasTrainedModel } = require('./lib/esports-model-trained');
       const { buildTrainedContext } = require('./lib/esports-runtime-features');
-      const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis, getTennisRecentMomentum } = require('./lib/tennis-model-trained');
+      const { predictTrainedTennis, predictTrainedTennisSymmetric, hasTrainedModel: hasTrainedTennis, getTennisRecentMomentum } = require('./lib/tennis-model-trained');
       const { getTennisElo, extractSurface } = require('./lib/tennis-ml');
 
       const where = sport === 'all'
@@ -28405,7 +28405,7 @@ load();
             const winStreakDiff = (m1?.streak || 0) - (m2?.streak || 0);
             const wrLast10Diff = (m1?.wrLast10 != null && m2?.wrLast10 != null)
               ? (m1.wrLast10 - m2.wrLast10) : 0;
-            pred = predictTrainedTennis({
+            pred = predictTrainedTennisSymmetric({
               eloOverall1: elo.eloOverall1 || elo.elo1, eloOverall2: elo.eloOverall2 || elo.elo2,
               eloSurface1: elo.eloSurface1 || elo.elo1, eloSurface2: elo.eloSurface2 || elo.elo2,
               gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2, surface,
