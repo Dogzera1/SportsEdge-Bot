@@ -26543,6 +26543,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     // cresce 5-10x tips/dia. Default 60d (preserva analysis window).
     const _shadowDays = Math.max(14, Math.min(180, parseInt(process.env.MARKET_TIPS_SHADOW_RETENTION_DAYS || '45', 10) || 45));
     const _tipFactorDays = Math.max(14, Math.min(180, parseInt(process.env.TIP_FACTOR_LOG_RETENTION_DAYS || '60', 10) || 60));
+    // 2026-05-28 audit-banco P1: telemetria live grande sem retenção contribuía pro
+    // bloat (freelist 219MB / DB 387MB). dota_live_snapshots (12k, alto volume) 30d;
+    // demais events de detecção 60d. 2 envs genéricas (evita overfeaturing P3).
+    const _liveTelemetryDays = Math.max(7, Math.min(180, parseInt(process.env.LIVE_TELEMETRY_RETENTION_DAYS || '60', 10) || 60));
+    const _dotaSnapDays = Math.max(7, Math.min(90, parseInt(process.env.DOTA_LIVE_SNAPSHOTS_RETENTION_DAYS || '30', 10) || 30));
     const targets = [
       { table: 'ml_gate_rejected_audit', col: 'rejected_at', days: _mlgraDays, extraWhere: '' },
       { table: 'analytics_alerts',       col: 'fired_at',    days: _alertsDays, extraWhere: " AND status != 'open'" },
@@ -26550,6 +26555,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       { table: 'polymarket_paper_trades',col: 'copied_at',   days: _polyDays, extraWhere: '' },
       { table: 'market_tips_shadow',     col: 'created_at',  days: _shadowDays, extraWhere: '' },
       { table: 'tip_factor_log',         col: 'logged_at',   days: _tipFactorDays, extraWhere: '' },
+      { table: 'dota_live_snapshots',    col: 'captured_at', days: _dotaSnapDays, extraWhere: '' },
+      { table: 'super_odd_events',       col: 'detected_at', days: _liveTelemetryDays, extraWhere: '' },
+      { table: 'book_bug_events',        col: 'detected_at', days: _liveTelemetryDays, extraWhere: '' },
+      { table: 'velocity_events',        col: 'detected_at', days: _liveTelemetryDays, extraWhere: '' },
+      { table: 'arb_events',             col: 'detected_at', days: _liveTelemetryDays, extraWhere: '' },
+      { table: 'stale_line_events',      col: 'detected_at', days: _liveTelemetryDays, extraWhere: '' },
+      { table: 'bookmaker_delta_samples',col: 'captured_at', days: _liveTelemetryDays, extraWhere: '' },
     ];
     for (const t of targets) {
       try {
@@ -26559,6 +26571,17 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
       } catch (e) { log('DEBUG', 'CLEANUP', `${t.table} retention skip: ${e.message}`); }
     }
+    // 2026-05-28 audit-banco P1: reclama páginas liberadas pelos DELETEs (e por todas
+    // as retenções). No-op enquanto auto_vacuum=NONE — só ativa após 1 VACUUM full
+    // inicial mudar o modo p/ INCREMENTAL (ver lib/database.js). Cap 10k páginas
+    // (~40MB) por ciclo evita lock longo; o grosso dos 219MB sai no VACUUM full manual.
+    try {
+      db.pragma('incremental_vacuum(10000)');
+      const flist = db.pragma('freelist_count', { simple: true });
+      if (Number.isFinite(flist) && flist > 0) {
+        log('INFO', 'CLEANUP', `incremental_vacuum: freelist ${flist} páginas (~${Math.round(flist * 4 / 1024)}MB) restantes`);
+      }
+    } catch (_) {}
   }
   setInterval(_wrapCron('audit_tables_retention', runAuditTablesRetention), 60 * 60 * 1000);
   setTimeout(_wrapCron('audit_tables_retention', runAuditTablesRetention), 30 * 60 * 1000);
