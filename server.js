@@ -13333,6 +13333,46 @@ setInterval(load, 10000);
         ).get(tip.match_id) || null;
       } catch (_) {}
 
+      // 2026-05-28: fuzzy_match_candidates — replica EXATA SQL Tentativa 2 do
+      // runSettleSweep (server.js:4898-4909). Quando match_result NULL via
+      // match_id exato MAS tip foi settled, esses candidates são o que o settle
+      // path achou. Surface pra investigar false-settle (P0 LoL #4607 root cause).
+      try {
+        const _gameDerived = (() => {
+          const s = String(tip.sport || '').toLowerCase();
+          if (s === 'tennis' || s === 'football' || s === 'darts' || s === 'snooker' || s === 'mma') return s;
+          if (s === 'esports') {
+            const mid = String(tip.match_id || '');
+            const ev = String(tip.event_name || '').toLowerCase();
+            if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2';
+            if (mid.startsWith('cs_') || ev.includes('cs:go') || ev.includes('counter-strike')) return 'cs';
+            if (mid.startsWith('valorant_') || ev.includes('valorant')) return 'valorant';
+            return 'lol';
+          }
+          return s;
+        })();
+        if (tip.participant1 && tip.participant2 && tip.sent_at) {
+          const t1 = `%${tip.participant1}%`;
+          const t2 = `%${tip.participant2}%`;
+          out.fuzzy_match_candidates = db.prepare(`
+            SELECT match_id, game, team1, team2, winner, final_score, league, resolved_at
+              FROM match_results
+             WHERE game = ?
+               AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+                 OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+               AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+             ORDER BY resolved_at DESC LIMIT 10
+          `).all(_gameDerived, t1, t2, t2, t1, tip.sent_at, tip.sent_at);
+          out.fuzzy_match_debug = {
+            game: _gameDerived,
+            t1_pattern: t1,
+            t2_pattern: t2,
+            window_lower: `${tip.sent_at} -4 days`,
+            window_upper: `${tip.sent_at} +6 days`,
+          };
+        }
+      } catch (e) { out.fuzzy_match_error = e.message; }
+
       // Voided entry — se tip foi rejeitada como voided_odds
       try {
         const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
