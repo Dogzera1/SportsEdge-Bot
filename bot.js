@@ -10594,7 +10594,11 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       const _tipP = (Number.isFinite(_tipPStated) && _tipPStated > 0 && _tipPStated < 1)
         ? _tipPStated : _tipPImplied;
       const _diffPp = Math.abs(_tipP - modelPPick) * 100;
-      const _defaultMax = sport === 'mma' ? 20 : 15;
+      // 2026-05-28 (audit cluster RG R2): tennis default 15→8 pra alinhar com
+      // prompt refit b17b710 (P_IA ∈ [modelP-5,+5]). MMA mantém 20 (modelo só
+      // histórico, IA diverge legitimamente). 4 tips RG R2 EV 60-96% passaram
+      // com cap 15 — driver investigado, ainda assim default tighter é defensável.
+      const _defaultMax = sport === 'mma' ? 20 : sport === 'tennis' ? 8 : 15;
       const _maxPp = parseFloat(
         process.env[`${sportU}_AI_P_MAX_DIVERGENCE_PP`]
         ?? process.env.AI_P_MAX_DIVERGENCE_PP
@@ -10603,6 +10607,16 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       if (Number.isFinite(_maxPp) && _maxPp > 0 && _diffPp > _maxPp) {
         try { _metrics.incr('ai_shadow_p_divergent', { sport }); } catch (_) {}
         log('WARN', TAG, `skip P divergente: AI=${(_tipP*100).toFixed(1)}% vs modelo=${(modelPPick*100).toFixed(1)}% diff=${_diffPp.toFixed(1)}pp > max=${_maxPp}pp [${match.team1} vs ${match.team2}]`);
+        return;
+      }
+      // 2026-05-28 HARD CEILING universal (defense-in-depth): se EV>50% E
+      // diff>20pp simultaneamente, SEMPRE skip independente de env override.
+      // Cobre regressão caso TENNIS_AI_P_MAX_DIVERGENCE_PP=999 acidental ou
+      // gate principal falhe por field-name mismatch. Pattern Berrettini #4649
+      // (EV 96.6% diff 46pp) + cluster RG R2 #4603/4622/4638.
+      if (tipEvNum > 50 && _diffPp > 20) {
+        try { _metrics.incr('ai_shadow_p_hard_ceiling', { sport }); } catch (_) {}
+        log('WARN', TAG, `skip HARD CEILING: EV=${tipEvNum.toFixed(1)}% + diff=${_diffPp.toFixed(1)}pp (AI=${(_tipP*100).toFixed(1)}% modelo=${(modelPPick*100).toFixed(1)}%) [${match.team1} vs ${match.team2}]`);
         return;
       }
       // Soft downgrade: 8pp < diff <= maxPp → baixa conf um nível (LoL pattern _downgradeConf)
@@ -20487,6 +20501,26 @@ Máximo 200 palavras. Raciocínio breve antes da decisão. NUNCA omita SEM_EDGE 
             const before = (tipMatch2[cIdx] || 'MÉDIA').toUpperCase();
             tipMatch2[cIdx] = _downgradeConf(before);
             log('INFO', 'AUTO-TENNIS', `P divergente modelo (${_v.reason}) — conf ${before}→${tipMatch2[cIdx]}`);
+          }
+          // 2026-05-28 HARD CEILING tennis emit real (paridade _runAiShadow):
+          // skip se EV>50 + P-diff>20pp. Defense-in-depth contra Ben Shelton/
+          // Berrettini cluster pattern (EV 96.6% vs model 48%).
+          // _validateTipPvsModel retorna textP quando consegue extrair "|P:" do text.
+          // Quando ausente (validador retorna no_text_p), usa implied via EV+odd
+          // como fallback pra hard ceiling — não pode falhar silently.
+          const _hcEv = parseFloat(tipMatch2[3]);
+          const _hcOdd = parseFloat(String(tipMatch2[2]).replace(',', '.'));
+          let _hcTipP = (_v && typeof _v.textP === 'number') ? _v.textP : null;
+          if (!Number.isFinite(_hcTipP) && Number.isFinite(_hcEv) && Number.isFinite(_hcOdd) && _hcOdd > 1) {
+            _hcTipP = (1 + _hcEv / 100) / _hcOdd;
+          }
+          if (Number.isFinite(_modelPV) && Number.isFinite(_hcTipP) && Number.isFinite(_hcEv)) {
+            const _hcDiffPp = Math.abs(_hcTipP - _modelPV) * 100;
+            if (_hcEv > 50 && _hcDiffPp > 20) {
+              try { _metrics.incr('ai_real_p_hard_ceiling', { sport: 'tennis' }); } catch (_) {}
+              log('WARN', 'AUTO-TENNIS', `skip HARD CEILING: EV=${_hcEv.toFixed(1)}% + diff=${_hcDiffPp.toFixed(1)}pp (AI=${(_hcTipP*100).toFixed(1)}% vs modelo=${(_modelPV*100).toFixed(1)}%) [${match.team1} vs ${match.team2}]`);
+              tipMatch2 = null;
+            }
           }
           // AI real-emit EV cap (P0 fix 2026-05-26). Paridade com _runAiShadow:10611.
           // Tennis foi onde Ben Shelton EV=468% apareceu (memory project_ai_audit_2026_05_22).
