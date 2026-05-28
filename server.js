@@ -4941,6 +4941,29 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         } catch (_) {}
       }
 
+      // 2026-05-28 Layer 2 (P0 LoL #4607 defense-in-depth): valida liga em
+      // fuzzy fallback. Tentativa 2/3 podem retornar row de liga developmental
+      // (Challengers/Academy/Reserves/Youth) quando real match não resolveu
+      // ainda — fuzzy SQL %LIKE% + nameMatches substring leakam pra long team
+      // names (Hanwha Life Esports vs ...Challengers score 0.61). Reject
+      // quando tip.event_name e row.league discordam em dev-marker. Tentativa 1
+      // (exact match_id hit) skipped — match_id é authoritative.
+      // Layer 1 fix em lib/name-match.js (commit 3f108f9) cobre token_prefix
+      // false positives ('academy' removido de ORG_SUFFIX_TOKENS). Esta camada
+      // pega substring leaks pra long names.
+      if (row && tip.event_name && row.league) {
+        const fromFuzzy = !canonicalMatchId || row.match_id !== canonicalMatchId;
+        if (fromFuzzy) {
+          const DEV_LEAGUE_MARKERS = /(challengers?|academy|reserves|youth|amateur|junior)/i;
+          const tipIsDev = DEV_LEAGUE_MARKERS.test(tip.event_name);
+          const rowIsDev = DEV_LEAGUE_MARKERS.test(row.league);
+          if (tipIsDev !== rowIsDev) {
+            log('DEBUG', 'SETTLE-SWEEP', `${sport} tip=${tip.id} fuzzy rejected: tip="${tip.event_name}" row="${row.league}" dev-mismatch`);
+            row = null;
+          }
+        }
+      }
+
       if (!row?.winner) {
         if (isMapMarket) info.skipped_map++;
         else info.not_found++;
