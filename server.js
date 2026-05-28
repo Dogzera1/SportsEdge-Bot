@@ -1557,7 +1557,7 @@ function _readLiveBotGauges() {
 function _refreshTransientAlerts(cachedAlerts, g) {
   // Filtra alerts gauge-dependentes (re-avaliados); preserva resto (sport_silent,
   // theodds_quota, feed_*, oddspapi_*, db_error, analysis_stale, etc).
-  const TRANSIENT_IDS = new Set(['bot_restart_loop', 'db_integrity_failed', 'db_size_high']);
+  const TRANSIENT_IDS = new Set(['bot_restart_loop', 'db_integrity_failed', 'db_size_high', 'analysis_stale']);
   const out = (cachedAlerts || []).filter(a => !TRANSIENT_IDS.has(a?.id));
   if (g.db_integrity_ok === 0) {
     out.push({ id: 'db_integrity_failed', severity: 'critical', msg: 'PRAGMA integrity_check retornou erro — investigar urgente' });
@@ -1570,6 +1570,17 @@ function _refreshTransientAlerts(cachedAlerts, g) {
   const uptime = g.bot_uptime_s;
   if (Number.isFinite(rapid1h) && rapid1h >= 5 && Number.isFinite(uptime) && uptime < 600) {
     out.push({ id: 'bot_restart_loop', severity: 'warning', msg: `${rapid1h} boots na última hora (${g.bot_boot_count_24h ?? '?'} em 24h, uptime ${uptime}s) — checar crash recorrente` });
+  }
+  // 2026-05-28 (audit): analysis_stale re-avaliado LIVE (era congelado no snapshot
+  // do boot, quando _botHbTs=0 → status 'degraded' eterno mesmo com bot saudável).
+  // Fonte: heartbeat do bot via bridge /metrics/ingest (sem custo DB).
+  {
+    const botHb = (global._externalHeartbeats && global._externalHeartbeats.bot && global._externalHeartbeats.bot.lastIngestTs) || 0;
+    const aTs = lastAnalysisAt ? new Date(lastAnalysisAt).getTime() : botHb;
+    if (!aTs || (Date.now() - aTs > 2 * 60 * 60 * 1000)) {
+      const since = lastAnalysisAt || (botHb ? new Date(botHb).toISOString() : 'nunca');
+      out.push({ id: 'analysis_stale', severity: 'warning', msg: `Sem heartbeat de análise há >2h (última: ${since})` });
+    }
   }
   return out;
 }
@@ -8224,8 +8235,15 @@ const server = http.createServer(async (req, res) => {
           cacheAgeMs,
         });
       } else {
+        // 2026-05-28 (audit): re-derivar `status` dos liveAlerts. O status cacheado
+        // congelava 'degraded' do boot (analysis_stale era avaliado 1x). Sem DB pesado
+        // — usa o alert db_error já presente no cache como proxy de !dbOk (fiel ao
+        // design stale-while-revalidate que evita query no cached path).
+        const _liveStatus = liveAlerts.some(a => a && a.id === 'db_error') ? 'error'
+          : (liveAlerts.some(a => a && (a.severity === 'critical' || a.id === 'analysis_stale')) ? 'degraded' : 'ok');
         sendJson(res, {
           ..._healthCache.response,
+          status: _liveStatus,
           alerts: liveAlerts,
           botGauges: liveBotGauges,
           cached: true,
