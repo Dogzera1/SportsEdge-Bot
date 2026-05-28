@@ -4251,6 +4251,18 @@ function isAdminRequest(req) {
   return false;
 }
 
+// 2026-05-28 (audit P0 adversarial): guard p/ endpoints IPC state-changing
+// (/settle, /record-tip, /match-result) que bot.js chama via loopback (SERVER
+// 127.0.0.1, bot.js:228) mas ficam expostos no URL público Railway. Permite
+// loopback OU admin key. Mesmo padrão de /metrics/ingest (server.js ~8688).
+// Retorna false + responde 403 quando bloqueia (caller deve `return`).
+function requireLoopbackOrAdmin(req, res) {
+  const remote = String(req.socket?.remoteAddress || '');
+  const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  if (!isLoopback && !isAdminRequest(req)) { sendJson(res, { ok: false, error: 'forbidden' }, 403); return false; }
+  return true;
+}
+
 // 2026-05-07 (audit #9 phase 1): query.key fallback DEPRECATED — vaza em logs
 // Railway, browser history, Referer header, qualquer outbound URL. Site
 // malicioso pode embed `<img src="prod/admin/destrutivo?key=LEAKED">` se key
@@ -4322,7 +4334,7 @@ function _adminCsrfValid(req) {
 // - mt-block-league + mt-unblock-league + mt-disable + mt-restore: blocklist mutations
 // - mt-promote: muta runtime env + settings table
 // Esses agora bloqueiam ?key= query, exigindo header x-admin-key.
-const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote|\/admin\/reanalyze-void|\/admin\/match-result-sources-cleanup)/;
+const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote|\/admin\/reanalyze-void|\/admin\/match-result-sources-cleanup|\/admin\/upsert-match-result)/;
 function _isDestructive(req) {
   try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }
@@ -8235,7 +8247,14 @@ const server = http.createServer(async (req, res) => {
     const esportsOddsAgeMin = lastEsportsOddsUpdate > 0 ? Math.round((Date.now() - lastEsportsOddsUpdate) / 60000) : null;
     const oddspapiBackoffSec = esportsBackoffUntil > Date.now() ? Math.round((esportsBackoffUntil - Date.now()) / 1000) : 0;
     const theOddsQuota = oddsApiQuotaStatus();
-    const stale = !lastAnalysisAt || (Date.now() - new Date(lastAnalysisAt).getTime() > 2 * 60 * 60 * 1000);
+    // 2026-05-28 (audit): lastAnalysisAt só seria setado via POST /record-analysis,
+    // que o bot nunca chama → stale eterno → status 'degraded' permanente + alerts=[]
+    // (o push do alert exigia lastAnalysisAt truthy) mascarando alertas reais.
+    // Fallback de liveness: heartbeat do bot via /metrics/ingest (prefix 'bot',
+    // enviado a cada ciclo de métricas). Bot vivo → fresh; bot morto → stale (correto).
+    const _botHbTs = (global._externalHeartbeats && global._externalHeartbeats.bot && global._externalHeartbeats.bot.lastIngestTs) || 0;
+    const _analysisTs = lastAnalysisAt ? new Date(lastAnalysisAt).getTime() : _botHbTs;
+    const stale = !_analysisTs || (Date.now() - _analysisTs > 2 * 60 * 60 * 1000);
 
     // ── Alertas críticos (consumidos pelo bot via polling) ──
     const alerts = [];
@@ -8254,8 +8273,9 @@ const server = http.createServer(async (req, res) => {
     if (ODDSPAPI_KEY && lastEsportsOddsUpdate === 0 && Date.now() - _serverStartTs > 30 * 60 * 1000) {
       alerts.push({ id: 'oddspapi_never_synced', severity: 'critical', msg: 'OddsPapi nunca sincronizou desde o boot (>30min) — verifique chave/quota' });
     }
-    if (stale && lastAnalysisAt) {
-      alerts.push({ id: 'analysis_stale', severity: 'warning', msg: `Nenhuma análise há >2h (última: ${lastAnalysisAt})` });
+    if (stale) {
+      const _staleSince = lastAnalysisAt || (_botHbTs ? new Date(_botHbTs).toISOString() : 'nunca');
+      alerts.push({ id: 'analysis_stale', severity: 'warning', msg: `Sem heartbeat de análise há >2h (última: ${_staleSince})` });
     }
 
     // Gauges úteis bridge'd do bot.js (db_integrity_ok, db_size_mb, bot_uptime_s).
@@ -8771,6 +8791,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/match-result') {
+    if (!requireLoopbackOrAdmin(req, res)) return; // 2026-05-28 P1: persiste match_results; bot loopback ou admin (winner vem do feed)
     if (!_matchResultRateLimit(req, res, p)) return;
     const raw = parsed.query.matchId || '';
     const game = parsed.query.game || 'lol';
@@ -28909,6 +28930,7 @@ load();
   }
 
   if (p === '/record-tip' && req.method === 'POST') {
+    if (!requireLoopbackOrAdmin(req, res)) return; // 2026-05-28 P0: injeta tips reais; bot chama via loopback. Token gate abaixo é camada 2.
     // 2026-05-18 (SEG-3 adversarial audit fix): shared-secret token gate.
     // Antes /record-tip era PUBLIC unauth — attacker via Railway URL podia
     // injetar tips arbitrárias bypassando bot.js. Opt-in pra backward compat:
@@ -35061,6 +35083,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   }
 
   if (p === '/settle' && req.method === 'POST') {
+    if (!requireLoopbackOrAdmin(req, res)) return; // 2026-05-28 P0: settla tips reais + updateBankroll; só bot loopback ou admin
     _readPostBody(req, res, (body) => {
       if (body == null) return;
       const _settleT0 = Date.now();
@@ -40030,6 +40053,10 @@ server.listen(PORT, '0.0.0.0', () => {
     } catch (e) { log('ERROR', 'SETTLE-SWEEP', `boot: ${e.message}`); }
   }, 2 * 60 * 1000);
   setInterval(_wrapServerCron('settle_sweep_cycle', () => {
+    // 2026-05-28 (audit P1): server não tinha guard de memória (só o bot). Pula o
+    // ciclo se memória crítica cross-process — settle é idempotente, recupera no
+    // próximo. Evita OLAP empurrar o container-kill em pico de RSS (DB 387MB + 2 procs).
+    try { if (require('./lib/mem-shared').isAnyProcessCritical()) { log('WARN', 'SETTLE-SWEEP', 'ciclo pulado — memória crítica cross-process'); return; } } catch (_) {}
     const r = runSettleSweep({ days: sweepDays });
     if (r.total_settled > 0) {
       log('INFO', 'SETTLE-SWEEP', `cycle: swept=${r.total_swept} settled=${r.total_settled} skipped_map=${r.total_skipped_map} not_found=${r.total_not_found}`);
@@ -40056,11 +40083,16 @@ server.listen(PORT, '0.0.0.0', () => {
         // longo — arquivava 31+ tips reais como zombies em 7d. Alinha com dedup
         // zombie cleanup threshold (commit 87ffd50). Quando Bug 1 (settle) for
         // resolvido, considerar voltar threshold pra valor menor.
+        // 2026-05-28 (audit P1): guard match_end_at — NÃO arquivar tip MT pré-match
+        // cujo jogo ainda é FUTURO (ex football TOTAL enviado 7d antes do match em
+        // 31/05). Sem isso, sent_at>168h arquivava tips válidas como zombies antes
+        // de poderem settlar. Espelha o critério de /void-old-pending (server.js:28860).
         const r = db.prepare(
           `UPDATE tips SET archived = 1
            WHERE result IS NULL
              AND (archived IS NULL OR archived = 0)
              AND sent_at <= datetime('now', '-168 hours')
+             AND (match_end_at IS NULL OR match_end_at < datetime('now'))
              AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})
              AND upper(COALESCE(market_type, '')) NOT LIKE 'TOTAL_KILLS_MAP%'`
         ).run(...ML_MARKETS_LIST);
@@ -40071,6 +40103,7 @@ server.listen(PORT, '0.0.0.0', () => {
            WHERE result IS NULL
              AND (archived IS NULL OR archived = 0)
              AND sent_at <= datetime('now', '-168 hours')
+             AND (match_end_at IS NULL OR match_end_at < datetime('now'))
              AND upper(COALESCE(market_type, '')) LIKE 'TOTAL_KILLS_MAP%'`
         ).run();
         const total = r.changes + rk.changes;
