@@ -4964,6 +4964,36 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         }
       }
 
+      // 2026-05-28 (audit P0 banco — FASE 2 da mig 109): multi-source quorum
+      // check. match_results.winner é last-writer-wins; se 2+ sources gravaram
+      // winners diferentes pro mesmo (match_id, game), tip pode estar settling
+      // contra resultado fraudulento ou refresh stale. Query latest winner per
+      // source via match_result_sources; se ≥2 sources discordam → quarantine.
+      // Legacy (sem rows em match_result_sources) → proceed (single-source OK).
+      // Opt-out: SETTLE_QUORUM_DISABLED=true.
+      if (row && row.match_id && row.winner
+          && !/^(1|true|yes)$/i.test(String(process.env.SETTLE_QUORUM_DISABLED || ''))) {
+        try {
+          const srcs = db.prepare(
+            `SELECT lower(trim(winner)) AS w FROM (
+               SELECT winner, source, max(recorded_at) AS r
+                 FROM match_result_sources
+                WHERE match_id = ? AND game = ?
+                GROUP BY source
+             )`
+          ).all(row.match_id, sport);
+          if (srcs.length >= 2) {
+            const distinct = new Set(srcs.map(s => s.w).filter(Boolean));
+            if (distinct.size >= 2) {
+              log('WARN', 'SETTLE-AMBIGUOUS', `${sport} tip=${tip.id} match=${row.match_id} sources disagree: [${[...distinct].join('|')}] (n_sources=${srcs.length}) — quarantine`);
+              try { require('./lib/metrics').incr('settle_ambiguous', { sport }); } catch (_) {}
+              info.quarantine++;
+              continue;
+            }
+          }
+        } catch (_) { /* mig 109 ausente em DB legacy → fail-open */ }
+      }
+
       if (!row?.winner) {
         if (isMapMarket) info.skipped_map++;
         else info.not_found++;
