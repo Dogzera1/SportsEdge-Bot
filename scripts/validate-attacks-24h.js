@@ -41,7 +41,9 @@ function req(path) {
   const ten7 = tenReal.data?.performance;
   console.log('=== Tennis REAL 7d (only sport in real) ===');
   if (ten7) {
-    console.log(`  n=${tenReal.data?.volume?.settled} ROI=${ten7.roi_pct}% profit=${ten7.profit_reais}u`);
+    // 2026-05-28: API retorna profit_reais (BRL). Label R$ pra evitar confusion
+    // com "u" quando banca cruza tier (uv ≠ R$1.00). ROI% é units-agnostic.
+    console.log(`  n=${tenReal.data?.volume?.settled} ROI=${ten7.roi_pct}% profit=R$${ten7.profit_reais}`);
     console.log(`  Baseline 2026-05-27: ${BASELINE_27MAY_PRE_ATTACKS.tennis_real_7d_roi}%`);
     const delta = ten7.roi_pct - BASELINE_27MAY_PRE_ATTACKS.tennis_real_7d_roi;
     console.log(`  Delta: ${delta > 0 ? '+' : ''}${delta.toFixed(1)}pp ${delta > 5 ? '✅ IMPROVEMENT' : delta > 0 ? '↗ marginal' : '↘ no improvement yet'}`);
@@ -52,6 +54,7 @@ function req(path) {
   const tqe = (tenShadow.data?.by_tier || []).find(t => t.tier === 'tier_quali_or_early' && t.market === 'handicapGames');
   console.log('\n=== Tennis tier_quali_or_early HG SHADOW 14d (ATTACK 3 target) ===');
   if (tqe) {
+    // MT shadow endpoint retorna total_profit em units (profit_units)
     console.log(`  n=${tqe.n_settled} ROI=${tqe.roi_pct}% profit=${tqe.total_profit}u hit=${tqe.hit_rate}%`);
     console.log(`  Baseline d28 pre: -8.3% n=609 profit=-59.87u`);
     console.log(`  Expected post-ATTACK-3: tip emit drop in this tier (flat-cap pCalib=0.369 reduces EV)`);
@@ -80,7 +83,11 @@ function req(path) {
   console.log('\n=== Tennis REAL 7d by market ===');
   const tenMkts = tenRealMkt.data?.groups || [];
   for (const g of tenMkts) {
-    console.log(`  ${g.market_type}: n=${g.n_settled || g.n} ROI=${g.roi_pct}% profit=${g.profit_units || g.profit_reais}`);
+    // profit_units (units) prioritário; profit_reais (BRL) marca label R$ pra disambiguar
+    const profitLabel = (g.profit_units != null)
+      ? `${g.profit_units}u`
+      : `R$${g.profit_reais}`;
+    console.log(`  ${g.market_type}: n=${g.n_settled || g.n} ROI=${g.roi_pct}% profit=${profitLabel}`);
   }
 
   // 6. Bot health

@@ -96,9 +96,23 @@ async function main() {
       else if (result === 'loss') { g.losses++; g.settled++; }
       else if (result === 'void') { g.voids++; }
       else g.pending++;
-      const profit = Number(t.profit_reais ?? t.profit_units ?? t.profit ?? 0);
-      const staked = Number(t.stake_reais ?? t.stake_units ?? t.staked ?? 0) ||
-                     parseFloat(String(t.stake || '0').replace('u','')) || 0;
+      // 2026-05-28: normaliza pra units. ML retorna profit_reais (BRL via stake_reais
+      // × (odds-1) com uv tier-aware) + stake (text "Xu"). MT shadow já vem em units
+      // (profit_units/stake_units). Sem normalização, grupos sem `source` no key
+      // misturam escalas quando banca cruzou tier (uv ≠ R$1.00).
+      const _su = parseFloat(String(t.stake || '').replace(/u/gi, '').replace(',', '.')) || 0;
+      const _sr = Number(t.stake_reais);
+      const profit = (t.profit_units != null && Number.isFinite(Number(t.profit_units)))
+        ? Number(t.profit_units)
+        : (() => {
+            const pr = Number(t.profit_reais);
+            if (!Number.isFinite(pr)) return Number(t.profit ?? 0);
+            if (Number.isFinite(_sr) && _sr > 0 && _su > 0) return pr * _su / _sr;
+            return pr; // legacy (uv=R$1.00) — BRL == units
+          })();
+      const staked = (t.stake_units != null && Number.isFinite(Number(t.stake_units)))
+        ? Number(t.stake_units)
+        : (_su > 0 ? _su : Number(t.staked ?? _sr ?? 0));
       g.profit += profit;
       g.staked += staked;
       const ev = Number(t.ev || 0);
