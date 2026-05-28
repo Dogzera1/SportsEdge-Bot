@@ -18706,7 +18706,7 @@ load();
             // Atualiza e segue (skip o resto do pipeline match_results)
             // Shadow tips: settled mas NÃO mexem em bankroll.
             const tx = db.transaction(() => {
-              db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
+              db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ? AND result IS NULL`)
                 .run(result, stakeR, profitR, t.id);
               if (profitR !== 0 && !t.is_shadow) {
                 // 2026-05-14: round(...,2) consistency — outros 10 UPDATE bankroll paths usam round().
@@ -18953,7 +18953,7 @@ load();
           // Atualiza tip + bankroll na mesma transaction.
           // Shadow tips: settled mas NÃO mexem em bankroll.
           const tx = db.transaction(() => {
-            db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
+            db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ? AND result IS NULL`)
               .run(result, stakeR, profitR, t.id);
             if (profitR !== 0 && !t.is_shadow) {
               // 2026-05-14: round(...,2) consistency — outros 10 UPDATE bankroll paths usam round().
@@ -26823,7 +26823,7 @@ load();
         const profitR = result === 'win' ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
         if (apply) {
           db.transaction(() => {
-            db.prepare(`UPDATE tips SET result=?, settled_at=datetime('now'), stake_reais=?, profit_reais=? WHERE id=?`)
+            db.prepare(`UPDATE tips SET result=?, settled_at=datetime('now'), stake_reais=?, profit_reais=? WHERE id=? AND result IS NULL`)
               .run(result, stakeR, profitR, t.id);
             // 2026-05-17 P2 fix: skip bankroll UPDATE pra shadow (consistent com
             // outros settle paths + commit 21e33e1). Plus: round() defensive.
