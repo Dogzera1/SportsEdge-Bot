@@ -9,6 +9,9 @@ const { runGateAttribution } = require('../lib/gate-attribution');
 
 function _setupDb() {
   const db = new Database(':memory:');
+  // 2026-05-28: `stake` text column adicionada — gate-attribution agora normaliza
+  // ML profit_reais (BRL) → units via per-tip ratio stake_units/stake_reais. Sem
+  // stake column, CASE cai pro ELSE preservando comportamento legacy (BRL puro).
   db.exec(`
     CREATE TABLE tips (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -16,6 +19,7 @@ function _setupDb() {
       event_name TEXT,
       odds REAL,
       ev REAL,
+      stake TEXT,
       stake_reais REAL DEFAULT 0,
       profit_reais REAL DEFAULT 0,
       result TEXT,
