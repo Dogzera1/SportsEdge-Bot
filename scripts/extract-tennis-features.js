@@ -343,11 +343,14 @@ for (const r of matches) {
     && sp1.games.all >= 10 && sp2.games.all >= 10; // aquecimento mínimo
 
   if (shouldOutput) {
+    const dateStr = new Date(now).toISOString().slice(0, 10);
+    const tourney = (r.tourney_name || '').replace(/,/g, ' ');
+    const p1s = p1.replace(/,/g, ' ');
+    const p2s = p2.replace(/,/g, ' ');
+    // Row original (p1 alfabético)
     out.push([
-      new Date(now).toISOString().slice(0, 10),
-      r._tour, (r.tourney_name || '').replace(/,/g, ' '),
-      surface, bestOf, isSlam, isMasters,
-      p1.replace(/,/g, ' '), p2.replace(/,/g, ' '),
+      dateStr, r._tour, tourney, surface, bestOf, isSlam, isMasters,
+      p1s, p2s,
       eloDiffOverall.toFixed(2), eloDiffSurface.toFixed(2), eloDiffBlend.toFixed(2),
       rankDiff, rpLogRatio.toFixed(4),
       ageDiff.toFixed(2), heightDiff,
@@ -358,6 +361,27 @@ for (const r of matches) {
       nSignals,
       winStreakDiff, wrLast10Diff.toFixed(4), eloDiffSq.toFixed(2),
       p1Won,
+    ]);
+    kept++;
+    // 2026-05-28 (audit P1): data augmentation p1↔p2 swap (mirror row).
+    // Modelo aprende invariância de orientação por construção — runtime feed
+    // ordena por favorito, treino estava por alfabético → assimetria 7.5pp em
+    // Bo5 clay RG (audit 2026-05-28). Dobra dataset, custo CPU treino dobra.
+    // Todas features DIFF/RATIO/STREAK são signed → negar. n_signals/surface/bestOf
+    // são simétricos → manter. y flip 0↔1.
+    out.push([
+      dateStr, r._tour, tourney, surface, bestOf, isSlam, isMasters,
+      p2s, p1s,
+      (-eloDiffOverall).toFixed(2), (-eloDiffSurface).toFixed(2), (-eloDiffBlend).toFixed(2),
+      -rankDiff, (-rpLogRatio).toFixed(4),
+      (-ageDiff).toFixed(2), -heightDiff,
+      (-servePctDiff).toFixed(4),
+      -fatigueMin7Diff, -matches14Diff, -daysSinceDiff,
+      -h2hSurfaceDiff, -h2hOverallDiff,
+      sp2.games[surface], sp1.games[surface],
+      nSignals,
+      -winStreakDiff, (-wrLast10Diff).toFixed(4), (-eloDiffSq).toFixed(2),
+      1 - p1Won,
     ]);
     kept++;
   } else {
