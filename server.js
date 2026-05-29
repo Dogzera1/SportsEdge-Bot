@@ -17174,6 +17174,14 @@ setInterval(load, 60000);
   // expor valores. Use case: user setou LOL_SHADOW=false + LOL_ML_DISABLED=false
   // mas LoL ML continua shadow → checa que outros envs (LOL_AI_SHADOW,
   // LOL_SHADOW_LEAGUES, LOL_ML_TIER1_LEAGUES, ESPORTS_SHADOW) estão setados.
+  // 2026-05-29 audit ingestão: expõe quota The Odds API pra monitoria. Antes só
+  // surgia em alerta ≥80% (server.js:8285) — sem read endpoint pra checar a qualquer hora.
+  if (p === '/admin/odds-quota' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    sendJson(res, { ok: true, ...oddsApiQuotaStatus() });
+    return;
+  }
+
   if (p === '/admin/sport-shadow-envs' && (req.method === 'GET' || req.method === 'POST')) {
     if (!requireAdmin(req, res)) return;
     const sport = String(parsed.query.sport || '').toLowerCase().trim();
