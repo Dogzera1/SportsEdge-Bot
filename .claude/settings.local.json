@@ -318,11 +318,12 @@
       "Bash(DB_PATH=sportsedge.db node scripts/sync-tennis-stats.js)",
       "Bash(railway run *)",
       "Bash(railway ssh *)",
-      "Bash(base64 -w0 scripts/rebalance-bankroll-1000.js)"
+      "Bash(base64 -w0 scripts/rebalance-bankroll-1000.js)",
+      "Skill(update-config)"
     ]
   },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "supabase"
-  ],
-  "enableAllProjectMcpServers": true
+  ]
 }

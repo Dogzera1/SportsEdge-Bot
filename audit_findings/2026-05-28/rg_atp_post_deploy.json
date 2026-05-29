@@ -1,0 +1,99 @@
+{
+  "health_build": {
+    "code_sha": "e4a7fb5",
+    "boot_at": "2026-05-28T18:48:41.918Z",
+    "uptime_s": 179
+  },
+  "commit_short": null,
+  "cutoff_iso": "2026-05-28T17:30:00Z",
+  "deploys_recentes_esperados": [
+    "5425c21",
+    "35da3d2",
+    "e4a7fb5"
+  ],
+  "total_tennis_2d": 99,
+  "atp_rg_ml_post_deploy": 3,
+  "p1_home": {
+    "n": 0
+  },
+  "p2_away": {
+    "n": 3,
+    "avg_ev": 43.73,
+    "avg_odd": 2.51,
+    "avg_p_model": 0.37,
+    "p_model_extracted_n": 1,
+    "is_shadow": 3,
+    "is_real": 0,
+    "confidence_breakdown": {
+      "BAIXA": 1,
+      "ALTA": 2
+    }
+  },
+  "unknown_side": {
+    "n": 0
+  },
+  "ratios": {
+    "avg_ev_p1_over_p2": null,
+    "avg_pmodel_p1_over_p2": null,
+    "avg_odd_p1_over_p2": null
+  },
+  "baseline_pre_deploy": {
+    "p1_home": {
+      "n": 120,
+      "roi_pct": -34,
+      "gap_calib_pp": -74,
+      "avg_ev": 39.79
+    },
+    "p2_away": {
+      "n": 109,
+      "roi_pct": 30,
+      "avg_ev": 29.61
+    },
+    "ratio_avg_ev_p1_over_p2": 1.344
+  },
+  "verdict": "INSUFFICIENT_SAMPLE — revalidate em 24-48h",
+  "sample_tips": [
+    {
+      "id": 4652,
+      "sent_at": "2026-05-28 18:50:53",
+      "event": "ATP French Open - R3",
+      "p1": "Karen Khachanov",
+      "p2": "Jesper De Jong",
+      "pick": "Jesper De Jong",
+      "side": "p2",
+      "odds": 3.33,
+      "ev": 21.7,
+      "conf": "BAIXA",
+      "is_shadow": 1,
+      "p_model": 0.37
+    },
+    {
+      "id": 4651,
+      "sent_at": "2026-05-28 18:49:55",
+      "event": "ATP French Open - R2",
+      "p1": "Raphael Collignon",
+      "p2": "Ben Shelton",
+      "pick": "Ben Shelton",
+      "side": "p2",
+      "odds": 2.13,
+      "ev": 12.9,
+      "conf": "ALTA",
+      "is_shadow": 1,
+      "p_model": null
+    },
+    {
+      "id": 4649,
+      "sent_at": "2026-05-28 18:46:40",
+      "event": "ATP French Open - R2",
+      "p1": "Arthur Rinderknech",
+      "p2": "Matteo Berrettini",
+      "pick": "Matteo Berrettini",
+      "side": "p2",
+      "odds": 2.07,
+      "ev": 96.6,
+      "conf": "ALTA",
+      "is_shadow": 1,
+      "p_model": null
+    }
+  ]
+}

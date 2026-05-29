@@ -1,0 +1,1 @@
+{"ok":true,"ts":"2026-05-25T16:49:48.268Z","armed":false,"reasons":["n=14 < 50","hit IC95 lower=38.8% < 50%"],"stats":{"n":14,"wins":9,"losses":5,"roi":47.12,"hit":64.3,"hit_ic95_lower":38.8,"hit_ic95_upper":83.7,"clv":36.83,"clv_n":12,"profit":3.77,"staked":8},"cfg":{"days":30,"minN":50,"minRoi":10,"minIcLowerHit":0.5,"includeArchived":false}}

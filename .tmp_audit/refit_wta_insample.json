@@ -1,0 +1,1551 @@
+﻿{
+    "version":  1,
+    "sport":  "tennis",
+    "fittedAt":  "2026-05-27T18:35:26.605Z",
+    "method":  "pav_with_beta_smoothing",
+    "target":  "outcome (win/loss)",
+    "prior":  {
+                  "source":  "p_implied_close",
+                  "vig":  0.025,
+                  "alpha":  8
+              },
+    "minBin":  6,
+    "nSamples":  1291,
+    "n_train":  1291,
+    "n_eval":  1291,
+    "train_window_days":  120,
+    "eval_window_days":  0,
+    "eval_mode":  "in_sample_legacy",
+    "filter":  "all",
+    "markets":  {
+                    "handicapGames":  {
+                                          "bins":  [
+                                                       {
+                                                           "lo":  0.3,
+                                                           "hi":  0.55,
+                                                           "mid":  0.4231,
+                                                           "n":  535,
+                                                           "wins":  155,
+                                                           "rawP":  0.2897,
+                                                           "priorP":  0.449,
+                                                           "pCalib":  0.2921
+                                                       },
+                                                       {
+                                                           "lo":  0.55,
+                                                           "hi":  0.65,
+                                                           "mid":  0.6112,
+                                                           "n":  253,
+                                                           "wins":  101,
+                                                           "rawP":  0.3992,
+                                                           "priorP":  0.4781,
+                                                           "pCalib":  0.3997
+                                                       },
+                                                       {
+                                                           "lo":  0.65,
+                                                           "hi":  0.85,
+                                                           "mid":  0.6993,
+                                                           "n":  31,
+                                                           "wins":  11,
+                                                           "rawP":  0.3548,
+                                                           "priorP":  0.4948,
+                                                           "pCalib":  0.3997
+                                                       }
+                                                   ],
+                                          "coverage":  [
+                                                           0.3,
+                                                           0.85
+                                                       ],
+                                          "nTotal":  823,
+                                          "tiers":  {
+                                                        "atp_challenger":  {
+                                                                               "bins":  [
+                                                                                            {
+                                                                                                "lo":  0.3,
+                                                                                                "hi":  0.55,
+                                                                                                "mid":  0.4138,
+                                                                                                "n":  210,
+                                                                                                "wins":  54,
+                                                                                                "rawP":  0.2571,
+                                                                                                "priorP":  0.4426,
+                                                                                                "pCalib":  0.2639
+                                                                                            },
+                                                                                            {
+                                                                                                "lo":  0.55,
+                                                                                                "hi":  0.85,
+                                                                                                "mid":  0.6334,
+                                                                                                "n":  35,
+                                                                                                "wins":  10,
+                                                                                                "rawP":  0.2857,
+                                                                                                "priorP":  0.4835,
+                                                                                                "pCalib":  0.3225
+                                                                                            }
+                                                                                        ],
+                                                                               "coverage":  [
+                                                                                                0.3,
+                                                                                                0.85
+                                                                                            ],
+                                                                               "nTotal":  248,
+                                                                               "sides":  {
+                                                                                             "away":  {
+                                                                                                          "bins":  [
+                                                                                                                       {
+                                                                                                                           "lo":  0.3,
+                                                                                                                           "hi":  0.55,
+                                                                                                                           "mid":  0.4229,
+                                                                                                                           "n":  116,
+                                                                                                                           "wins":  28,
+                                                                                                                           "rawP":  0.2414,
+                                                                                                                           "priorP":  0.5046,
+                                                                                                                           "pCalib":  0.2584
+                                                                                                                       },
+                                                                                                                       {
+                                                                                                                           "lo":  0.55,
+                                                                                                                           "hi":  0.8,
+                                                                                                                           "mid":  0.6255,
+                                                                                                                           "n":  21,
+                                                                                                                           "wins":  6,
+                                                                                                                           "rawP":  0.2857,
+                                                                                                                           "priorP":  0.4988,
+                                                                                                                           "pCalib":  0.3445
+                                                                                                                       }
+                                                                                                                   ],
+                                                                                                          "coverage":  [
+                                                                                                                           0.3,
+                                                                                                                           0.8
+                                                                                                                       ],
+                                                                                                          "nTotal":  140
+                                                                                                      },
+                                                                                             "home":  {
+                                                                                                          "bins":  [
+                                                                                                                       {
+                                                                                                                           "lo":  0.3,
+                                                                                                                           "hi":  0.55,
+                                                                                                                           "mid":  0.4027,
+                                                                                                                           "n":  94,
+                                                                                                                           "wins":  26,
+                                                                                                                           "rawP":  0.2766,
+                                                                                                                           "priorP":  0.3843,
+                                                                                                                           "pCalib":  0.285
+                                                                                                                       },
+                                                                                                                       {
+                                                                                                                           "lo":  0.55,
+                                                                                                                           "hi":  0.85,
+                                                                                                                           "mid":  0.6452,
+                                                                                                                           "n":  14,
+                                                                                                                           "wins":  4,
+                                                                                                                           "rawP":  0.2857,
+                                                                                                                           "priorP":  0.463,
+                                                                                                                           "pCalib":  0.3502
+                                                                                                                       }
+                                                                                                                   ],
+                                                                                                          "coverage":  [
+                                                                                                                           0.3,
+                                                                                                                           0.85
+                                                                                                                       ],
+                                                                                                          "nTotal":  108
+                                                                                                      }
+                                                                                         },
+                                                                               "formats":  {
+                                                                                               "bo3":  {
+                                                                                                           "bins":  [
+                                                                                                                        {
+                                                                                                                            "lo":  0.3,
+                                                                                                                            "hi":  0.55,
+                                                                                                                            "mid":  0.4138,
+                                                                                                                            "n":  210,
+                                                                                                                            "wins":  54,
+                                                                                                                            "rawP":  0.2571,
+                                                                                                                            "priorP":  0.4426,
+                                                                                                                            "pCalib":  0.2639
+                                                                                                                        },
+                                                                                                                        {
+                                                                                                                            "lo":  0.55,
+                                                                                                                            "hi":  0.85,
+                                                                                                                            "mid":  0.6334,
+                                                                                                                            "n":  35,
+                                                                                                                            "wins":  10,
+                                                                                                                            "rawP":  0.2857,
+                                                                                                                            "priorP":  0.4835,
+                                                                                                                            "pCalib":  0.3225
+                                                                                                                        }
+                                                                                                                    ],
+                                                                                                           "coverage":  [
+                                                                                                                            0.3,
+                                                                                                                            0.85
+                                                                                                                        ],
+                                                                                                           "nTotal":  248,
+                                                                                                           "sides":  {
+                                                                                                                         "away":  {
+                                                                                                                                      "bins":  [
+                                                                                                                                                   {
+                                                                                                                                                       "lo":  0.3,
+                                                                                                                                                       "hi":  0.55,
+                                                                                                                                                       "mid":  0.4229,
+                                                                                                                                                       "n":  116,
+                                                                                                                                                       "wins":  28,
+                                                                                                                                                       "rawP":  0.2414,
+                                                                                                                                                       "priorP":  0.5046,
+                                                                                                                                                       "pCalib":  0.2584
+                                                                                                                                                   },
+                                                                                                                                                   {
+                                                                                                                                                       "lo":  0.55,
+                                                                                                                                                       "hi":  0.8,
+                                                                                                                                                       "mid":  0.6255,
+                                                                                                                                                       "n":  21,
+                                                                                                                                                       "wins":  6,
+                                                                                                                                                       "rawP":  0.2857,
+                                                                                                                                                       "priorP":  0.4988,
+                                                                                                                                                       "pCalib":  0.3445
+                                                                                                                                                   }
+                                                                                                                                               ],
+                                                                                                                                      "coverage":  [
+                                                                                                                                                       0.3,
+                                                                                                                                                       0.8
+                                                                                                                                                   ],
+                                                                                                                                      "nTotal":  140
+                                                                                                                                  },
+                                                                                                                         "home":  {
+                                                                                                                                      "bins":  [
+                                                                                                                                                   {
+                                                                                                                                                       "lo":  0.3,
+                                                                                                                                                       "hi":  0.55,
+                                                                                                                                                       "mid":  0.4027,
+                                                                                                                                                       "n":  94,
+                                                                                                                                                       "wins":  26,
+                                                                                                                                                       "rawP":  0.2766,
+                                                                                                                                                       "priorP":  0.3843,
+                                                                                                                                                       "pCalib":  0.285
+                                                                                                                                                   },
+                                                                                                                                                   {
+                                                                                                                                                       "lo":  0.55,
+                                                                                                                                                       "hi":  0.85,
+                                                                                                                                                       "mid":  0.6452,
+                                                                                                                                                       "n":  14,
+                                                                                                                                                       "wins":  4,
+                                                                                                                                                       "rawP":  0.2857,
+                                                                                                                                                       "priorP":  0.463,
+                                                                                                                                                       "pCalib":  0.3502
+                                                                                                                                                   }
+                                                                                                                                               ],
+                                                                                                                                      "coverage":  [
+                                                                                                                                                       0.3,
+                                                                                                                                                       0.85
+                                                                                                                                                   ],
+                                                                                                                                      "nTotal":  108
+                                                                                                                                  }
+                                                                                                                     }
+                                                                                                       }
+                                                                                           }
+                                                                           },
+                                                        "atp_main":  {
+                                                                         "bins":  [
+                                                                                      {
+                                                                                          "lo":  0.3,
+                                                                                          "hi":  0.55,
+                                                                                          "mid":  0.4397,
+                                                                                          "n":  153,
+                                                                                          "wins":  51,
+                                                                                          "rawP":  0.3333,
+                                                                                          "priorP":  0.4482,
+                                                                                          "pCalib":  0.339
+                                                                                      },
+                                                                                      {
+                                                                                          "lo":  0.55,
+                                                                                          "hi":  0.7,
+                                                                                          "mid":  0.6101,
+                                                                                          "n":  136,
+                                                                                          "wins":  58,
+                                                                                          "rawP":  0.4265,
+                                                                                          "priorP":  0.4871,
+                                                                                          "pCalib":  0.4298
+                                                                                      }
+                                                                                  ],
+                                                                         "coverage":  [
+                                                                                          0.3,
+                                                                                          0.7
+                                                                                      ],
+                                                                         "nTotal":  290,
+                                                                         "sides":  {
+                                                                                       "away":  {
+                                                                                                    "bins":  [
+                                                                                                                 {
+                                                                                                                     "lo":  0.3,
+                                                                                                                     "hi":  0.55,
+                                                                                                                     "mid":  0.4386,
+                                                                                                                     "n":  70,
+                                                                                                                     "wins":  28,
+                                                                                                                     "rawP":  0.4,
+                                                                                                                     "priorP":  0.4994,
+                                                                                                                     "pCalib":  0.4102
+                                                                                                                 },
+                                                                                                                 {
+                                                                                                                     "lo":  0.55,
+                                                                                                                     "hi":  0.65,
+                                                                                                                     "mid":  0.6154,
+                                                                                                                     "n":  75,
+                                                                                                                     "wins":  35,
+                                                                                                                     "rawP":  0.4667,
+                                                                                                                     "priorP":  0.5028,
+                                                                                                                     "pCalib":  0.4701
+                                                                                                                 }
+                                                                                                             ],
+                                                                                                    "coverage":  [
+                                                                                                                     0.3,
+                                                                                                                     0.65
+                                                                                                                 ],
+                                                                                                    "nTotal":  145
+                                                                                                },
+                                                                                       "home":  {
+                                                                                                    "bins":  [
+                                                                                                                 {
+                                                                                                                     "lo":  0.3,
+                                                                                                                     "hi":  0.55,
+                                                                                                                     "mid":  0.4407,
+                                                                                                                     "n":  83,
+                                                                                                                     "wins":  23,
+                                                                                                                     "rawP":  0.2771,
+                                                                                                                     "priorP":  0.4125,
+                                                                                                                     "pCalib":  0.289
+                                                                                                                 },
+                                                                                                                 {
+                                                                                                                     "lo":  0.55,
+                                                                                                                     "hi":  0.7,
+                                                                                                                     "mid":  0.6035,
+                                                                                                                     "n":  61,
+                                                                                                                     "wins":  23,
+                                                                                                                     "rawP":  0.377,
+                                                                                                                     "priorP":  0.4691,
+                                                                                                                     "pCalib":  0.3877
+                                                                                                                 }
+                                                                                                             ],
+                                                                                                    "coverage":  [
+                                                                                                                     0.3,
+                                                                                                                     0.7
+                                                                                                                 ],
+                                                                                                    "nTotal":  145
+                                                                                                }
+                                                                                   },
+                                                                         "formats":  {
+                                                                                         "bo3":  {
+                                                                                                     "bins":  [
+                                                                                                                  {
+                                                                                                                      "lo":  0.3,
+                                                                                                                      "hi":  0.55,
+                                                                                                                      "mid":  0.4452,
+                                                                                                                      "n":  119,
+                                                                                                                      "wins":  42,
+                                                                                                                      "rawP":  0.3529,
+                                                                                                                      "priorP":  0.4547,
+                                                                                                                      "pCalib":  0.3593
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "lo":  0.55,
+                                                                                                                      "hi":  0.7,
+                                                                                                                      "mid":  0.6124,
+                                                                                                                      "n":  121,
+                                                                                                                      "wins":  52,
+                                                                                                                      "rawP":  0.4298,
+                                                                                                                      "priorP":  0.4862,
+                                                                                                                      "pCalib":  0.4333
+                                                                                                                  }
+                                                                                                              ],
+                                                                                                     "coverage":  [
+                                                                                                                      0.3,
+                                                                                                                      0.7
+                                                                                                                  ],
+                                                                                                     "nTotal":  241,
+                                                                                                     "sides":  {
+                                                                                                                   "away":  {
+                                                                                                                                "bins":  [
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.3,
+                                                                                                                                                 "hi":  0.55,
+                                                                                                                                                 "mid":  0.4405,
+                                                                                                                                                 "n":  59,
+                                                                                                                                                 "wins":  26,
+                                                                                                                                                 "rawP":  0.4407,
+                                                                                                                                                 "priorP":  0.4899,
+                                                                                                                                                 "pCalib":  0.4466
+                                                                                                                                             },
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.55,
+                                                                                                                                                 "hi":  0.65,
+                                                                                                                                                 "mid":  0.6183,
+                                                                                                                                                 "n":  67,
+                                                                                                                                                 "wins":  32,
+                                                                                                                                                 "rawP":  0.4776,
+                                                                                                                                                 "priorP":  0.5023,
+                                                                                                                                                 "pCalib":  0.4802
+                                                                                                                                             }
+                                                                                                                                         ],
+                                                                                                                                "coverage":  [
+                                                                                                                                                 0.3,
+                                                                                                                                                 0.65
+                                                                                                                                             ],
+                                                                                                                                "nTotal":  126
+                                                                                                                            },
+                                                                                                                   "home":  {
+                                                                                                                                "bins":  [
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.3,
+                                                                                                                                                 "hi":  0.55,
+                                                                                                                                                 "mid":  0.4498,
+                                                                                                                                                 "n":  60,
+                                                                                                                                                 "wins":  16,
+                                                                                                                                                 "rawP":  0.2667,
+                                                                                                                                                 "priorP":  0.4246,
+                                                                                                                                                 "pCalib":  0.2852
+                                                                                                                                             },
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.55,
+                                                                                                                                                 "hi":  0.7,
+                                                                                                                                                 "mid":  0.6051,
+                                                                                                                                                 "n":  54,
+                                                                                                                                                 "wins":  20,
+                                                                                                                                                 "rawP":  0.3704,
+                                                                                                                                                 "priorP":  0.4676,
+                                                                                                                                                 "pCalib":  0.3829
+                                                                                                                                             }
+                                                                                                                                         ],
+                                                                                                                                "coverage":  [
+                                                                                                                                                 0.3,
+                                                                                                                                                 0.7
+                                                                                                                                             ],
+                                                                                                                                "nTotal":  115
+                                                                                                                            }
+                                                                                                               }
+                                                                                                 },
+                                                                                         "bo5":  {
+                                                                                                     "bins":  [
+                                                                                                                  {
+                                                                                                                      "lo":  0.3,
+                                                                                                                      "hi":  0.55,
+                                                                                                                      "mid":  0.4206,
+                                                                                                                      "n":  34,
+                                                                                                                      "wins":  9,
+                                                                                                                      "rawP":  0.2647,
+                                                                                                                      "priorP":  0.4269,
+                                                                                                                      "pCalib":  0.2956
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "lo":  0.55,
+                                                                                                                      "hi":  0.65,
+                                                                                                                      "mid":  0.5916,
+                                                                                                                      "n":  15,
+                                                                                                                      "wins":  6,
+                                                                                                                      "rawP":  0.4,
+                                                                                                                      "priorP":  0.4945,
+                                                                                                                      "pCalib":  0.4329
+                                                                                                                  }
+                                                                                                              ],
+                                                                                                     "coverage":  [
+                                                                                                                      0.3,
+                                                                                                                      0.65
+                                                                                                                  ],
+                                                                                                     "nTotal":  49,
+                                                                                                     "sides":  {
+                                                                                                                   "home":  {
+                                                                                                                                "bins":  [
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.3,
+                                                                                                                                                 "hi":  0.55,
+                                                                                                                                                 "mid":  0.4169,
+                                                                                                                                                 "n":  23,
+                                                                                                                                                 "wins":  7,
+                                                                                                                                                 "rawP":  0.3043,
+                                                                                                                                                 "priorP":  0.3838,
+                                                                                                                                                 "pCalib":  0.3249
+                                                                                                                                             },
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.55,
+                                                                                                                                                 "hi":  0.65,
+                                                                                                                                                 "mid":  0.5915,
+                                                                                                                                                 "n":  7,
+                                                                                                                                                 "wins":  3,
+                                                                                                                                                 "rawP":  0.4286,
+                                                                                                                                                 "priorP":  0.4811,
+                                                                                                                                                 "pCalib":  0.4566
+                                                                                                                                             }
+                                                                                                                                         ],
+                                                                                                                                "coverage":  [
+                                                                                                                                                 0.3,
+                                                                                                                                                 0.65
+                                                                                                                                             ],
+                                                                                                                                "nTotal":  30
+                                                                                                                            }
+                                                                                                               }
+                                                                                                 }
+                                                                                     }
+                                                                     },
+                                                        "wta125k":  {
+                                                                        "bins":  [
+                                                                                     {
+                                                                                         "lo":  0.3,
+                                                                                         "hi":  0.55,
+                                                                                         "mid":  0.4077,
+                                                                                         "n":  35,
+                                                                                         "wins":  9,
+                                                                                         "rawP":  0.2571,
+                                                                                         "priorP":  0.4315,
+                                                                                         "pCalib":  0.2896
+                                                                                     },
+                                                                                     {
+                                                                                         "lo":  0.55,
+                                                                                         "hi":  0.65,
+                                                                                         "mid":  0.5922,
+                                                                                         "n":  19,
+                                                                                         "wins":  8,
+                                                                                         "rawP":  0.4211,
+                                                                                         "priorP":  0.5064,
+                                                                                         "pCalib":  0.4464
+                                                                                     }
+                                                                                 ],
+                                                                        "coverage":  [
+                                                                                         0.3,
+                                                                                         0.65
+                                                                                     ],
+                                                                        "nTotal":  54,
+                                                                        "sides":  {
+                                                                                      "home":  {
+                                                                                                   "bins":  [
+                                                                                                                {
+                                                                                                                    "lo":  0.3,
+                                                                                                                    "hi":  0.55,
+                                                                                                                    "mid":  0.408,
+                                                                                                                    "n":  21,
+                                                                                                                    "wins":  6,
+                                                                                                                    "rawP":  0.2857,
+                                                                                                                    "priorP":  0.3861,
+                                                                                                                    "pCalib":  0.3134
+                                                                                                                },
+                                                                                                                {
+                                                                                                                    "lo":  0.55,
+                                                                                                                    "hi":  0.65,
+                                                                                                                    "mid":  0.5907,
+                                                                                                                    "n":  11,
+                                                                                                                    "wins":  5,
+                                                                                                                    "rawP":  0.4545,
+                                                                                                                    "priorP":  0.5031,
+                                                                                                                    "pCalib":  0.475
+                                                                                                                }
+                                                                                                            ],
+                                                                                                   "coverage":  [
+                                                                                                                    0.3,
+                                                                                                                    0.65
+                                                                                                                ],
+                                                                                                   "nTotal":  32
+                                                                                               },
+                                                                                      "away":  {
+                                                                                                   "bins":  [
+                                                                                                                {
+                                                                                                                    "lo":  0.3,
+                                                                                                                    "hi":  0.55,
+                                                                                                                    "mid":  0.4073,
+                                                                                                                    "n":  14,
+                                                                                                                    "wins":  3,
+                                                                                                                    "rawP":  0.2143,
+                                                                                                                    "priorP":  0.5241,
+                                                                                                                    "pCalib":  0.327
+                                                                                                                },
+                                                                                                                {
+                                                                                                                    "lo":  0.55,
+                                                                                                                    "hi":  0.65,
+                                                                                                                    "mid":  0.5943,
+                                                                                                                    "n":  8,
+                                                                                                                    "wins":  3,
+                                                                                                                    "rawP":  0.375,
+                                                                                                                    "priorP":  0.5111,
+                                                                                                                    "pCalib":  0.4431
+                                                                                                                }
+                                                                                                            ],
+                                                                                                   "coverage":  [
+                                                                                                                    0.3,
+                                                                                                                    0.65
+                                                                                                                ],
+                                                                                                   "nTotal":  22
+                                                                                               }
+                                                                                  },
+                                                                        "formats":  {
+                                                                                        "bo3":  {
+                                                                                                    "bins":  [
+                                                                                                                 {
+                                                                                                                     "lo":  0.3,
+                                                                                                                     "hi":  0.55,
+                                                                                                                     "mid":  0.4077,
+                                                                                                                     "n":  35,
+                                                                                                                     "wins":  9,
+                                                                                                                     "rawP":  0.2571,
+                                                                                                                     "priorP":  0.4315,
+                                                                                                                     "pCalib":  0.2896
+                                                                                                                 },
+                                                                                                                 {
+                                                                                                                     "lo":  0.55,
+                                                                                                                     "hi":  0.65,
+                                                                                                                     "mid":  0.5922,
+                                                                                                                     "n":  19,
+                                                                                                                     "wins":  8,
+                                                                                                                     "rawP":  0.4211,
+                                                                                                                     "priorP":  0.5064,
+                                                                                                                     "pCalib":  0.4464
+                                                                                                                 }
+                                                                                                             ],
+                                                                                                    "coverage":  [
+                                                                                                                     0.3,
+                                                                                                                     0.65
+                                                                                                                 ],
+                                                                                                    "nTotal":  54,
+                                                                                                    "sides":  {
+                                                                                                                  "home":  {
+                                                                                                                               "bins":  [
+                                                                                                                                            {
+                                                                                                                                                "lo":  0.3,
+                                                                                                                                                "hi":  0.55,
+                                                                                                                                                "mid":  0.408,
+                                                                                                                                                "n":  21,
+                                                                                                                                                "wins":  6,
+                                                                                                                                                "rawP":  0.2857,
+                                                                                                                                                "priorP":  0.3861,
+                                                                                                                                                "pCalib":  0.3134
+                                                                                                                                            },
+                                                                                                                                            {
+                                                                                                                                                "lo":  0.55,
+                                                                                                                                                "hi":  0.65,
+                                                                                                                                                "mid":  0.5907,
+                                                                                                                                                "n":  11,
+                                                                                                                                                "wins":  5,
+                                                                                                                                                "rawP":  0.4545,
+                                                                                                                                                "priorP":  0.5031,
+                                                                                                                                                "pCalib":  0.475
+                                                                                                                                            }
+                                                                                                                                        ],
+                                                                                                                               "coverage":  [
+                                                                                                                                                0.3,
+                                                                                                                                                0.65
+                                                                                                                                            ],
+                                                                                                                               "nTotal":  32
+                                                                                                                           },
+                                                                                                                  "away":  {
+                                                                                                                               "bins":  [
+                                                                                                                                            {
+                                                                                                                                                "lo":  0.3,
+                                                                                                                                                "hi":  0.55,
+                                                                                                                                                "mid":  0.4073,
+                                                                                                                                                "n":  14,
+                                                                                                                                                "wins":  3,
+                                                                                                                                                "rawP":  0.2143,
+                                                                                                                                                "priorP":  0.5241,
+                                                                                                                                                "pCalib":  0.327
+                                                                                                                                            },
+                                                                                                                                            {
+                                                                                                                                                "lo":  0.55,
+                                                                                                                                                "hi":  0.65,
+                                                                                                                                                "mid":  0.5943,
+                                                                                                                                                "n":  8,
+                                                                                                                                                "wins":  3,
+                                                                                                                                                "rawP":  0.375,
+                                                                                                                                                "priorP":  0.5111,
+                                                                                                                                                "pCalib":  0.4431
+                                                                                                                                            }
+                                                                                                                                        ],
+                                                                                                                               "coverage":  [
+                                                                                                                                                0.3,
+                                                                                                                                                0.65
+                                                                                                                                            ],
+                                                                                                                               "nTotal":  22
+                                                                                                                           }
+                                                                                                              }
+                                                                                                }
+                                                                                    }
+                                                                    },
+                                                        "wta_main":  {
+                                                                         "bins":  [
+                                                                                      {
+                                                                                          "lo":  0.3,
+                                                                                          "hi":  0.55,
+                                                                                          "mid":  0.4225,
+                                                                                          "n":  137,
+                                                                                          "wins":  41,
+                                                                                          "rawP":  0.2993,
+                                                                                          "priorP":  0.465,
+                                                                                          "pCalib":  0.3084
+                                                                                      },
+                                                                                      {
+                                                                                          "lo":  0.55,
+                                                                                          "hi":  0.65,
+                                                                                          "mid":  0.6168,
+                                                                                          "n":  69,
+                                                                                          "wins":  26,
+                                                                                          "rawP":  0.3768,
+                                                                                          "priorP":  0.4535,
+                                                                                          "pCalib":  0.3848
+                                                                                      },
+                                                                                      {
+                                                                                          "lo":  0.65,
+                                                                                          "hi":  0.75,
+                                                                                          "mid":  0.6938,
+                                                                                          "n":  25,
+                                                                                          "wins":  10,
+                                                                                          "rawP":  0.4,
+                                                                                          "priorP":  0.4944,
+                                                                                          "pCalib":  0.4229
+                                                                                      }
+                                                                                  ],
+                                                                         "coverage":  [
+                                                                                          0.3,
+                                                                                          0.75
+                                                                                      ],
+                                                                         "nTotal":  231,
+                                                                         "sides":  {
+                                                                                       "away":  {
+                                                                                                    "bins":  [
+                                                                                                                 {
+                                                                                                                     "lo":  0.3,
+                                                                                                                     "hi":  0.55,
+                                                                                                                     "mid":  0.4128,
+                                                                                                                     "n":  54,
+                                                                                                                     "wins":  12,
+                                                                                                                     "rawP":  0.2222,
+                                                                                                                     "priorP":  0.521,
+                                                                                                                     "pCalib":  0.2608
+                                                                                                                 },
+                                                                                                                 {
+                                                                                                                     "lo":  0.55,
+                                                                                                                     "hi":  0.65,
+                                                                                                                     "mid":  0.6156,
+                                                                                                                     "n":  36,
+                                                                                                                     "wins":  16,
+                                                                                                                     "rawP":  0.4444,
+                                                                                                                     "priorP":  0.4818,
+                                                                                                                     "pCalib":  0.4396
+                                                                                                                 },
+                                                                                                                 {
+                                                                                                                     "lo":  0.65,
+                                                                                                                     "hi":  0.75,
+                                                                                                                     "mid":  0.6938,
+                                                                                                                     "n":  25,
+                                                                                                                     "wins":  10,
+                                                                                                                     "rawP":  0.4,
+                                                                                                                     "priorP":  0.4944,
+                                                                                                                     "pCalib":  0.4396
+                                                                                                                 }
+                                                                                                             ],
+                                                                                                    "coverage":  [
+                                                                                                                     0.3,
+                                                                                                                     0.75
+                                                                                                                 ],
+                                                                                                    "nTotal":  115
+                                                                                                },
+                                                                                       "home":  {
+                                                                                                    "bins":  [
+                                                                                                                 {
+                                                                                                                     "lo":  0.3,
+                                                                                                                     "hi":  0.55,
+                                                                                                                     "mid":  0.4289,
+                                                                                                                     "n":  83,
+                                                                                                                     "wins":  29,
+                                                                                                                     "rawP":  0.3494,
+                                                                                                                     "priorP":  0.4346,
+                                                                                                                     "pCalib":  0.3484
+                                                                                                                 },
+                                                                                                                 {
+                                                                                                                     "lo":  0.55,
+                                                                                                                     "hi":  0.65,
+                                                                                                                     "mid":  0.6181,
+                                                                                                                     "n":  33,
+                                                                                                                     "wins":  10,
+                                                                                                                     "rawP":  0.303,
+                                                                                                                     "priorP":  0.4261,
+                                                                                                                     "pCalib":  0.3484
+                                                                                                                 }
+                                                                                                             ],
+                                                                                                    "coverage":  [
+                                                                                                                     0.3,
+                                                                                                                     0.65
+                                                                                                                 ],
+                                                                                                    "nTotal":  116
+                                                                                                }
+                                                                                   },
+                                                                         "formats":  {
+                                                                                         "bo3":  {
+                                                                                                     "bins":  [
+                                                                                                                  {
+                                                                                                                      "lo":  0.3,
+                                                                                                                      "hi":  0.55,
+                                                                                                                      "mid":  0.4225,
+                                                                                                                      "n":  137,
+                                                                                                                      "wins":  41,
+                                                                                                                      "rawP":  0.2993,
+                                                                                                                      "priorP":  0.465,
+                                                                                                                      "pCalib":  0.3084
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "lo":  0.55,
+                                                                                                                      "hi":  0.65,
+                                                                                                                      "mid":  0.6168,
+                                                                                                                      "n":  69,
+                                                                                                                      "wins":  26,
+                                                                                                                      "rawP":  0.3768,
+                                                                                                                      "priorP":  0.4535,
+                                                                                                                      "pCalib":  0.3848
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "lo":  0.65,
+                                                                                                                      "hi":  0.75,
+                                                                                                                      "mid":  0.6938,
+                                                                                                                      "n":  25,
+                                                                                                                      "wins":  10,
+                                                                                                                      "rawP":  0.4,
+                                                                                                                      "priorP":  0.4944,
+                                                                                                                      "pCalib":  0.4229
+                                                                                                                  }
+                                                                                                              ],
+                                                                                                     "coverage":  [
+                                                                                                                      0.3,
+                                                                                                                      0.75
+                                                                                                                  ],
+                                                                                                     "nTotal":  231,
+                                                                                                     "sides":  {
+                                                                                                                   "away":  {
+                                                                                                                                "bins":  [
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.3,
+                                                                                                                                                 "hi":  0.55,
+                                                                                                                                                 "mid":  0.4128,
+                                                                                                                                                 "n":  54,
+                                                                                                                                                 "wins":  12,
+                                                                                                                                                 "rawP":  0.2222,
+                                                                                                                                                 "priorP":  0.521,
+                                                                                                                                                 "pCalib":  0.2608
+                                                                                                                                             },
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.55,
+                                                                                                                                                 "hi":  0.65,
+                                                                                                                                                 "mid":  0.6156,
+                                                                                                                                                 "n":  36,
+                                                                                                                                                 "wins":  16,
+                                                                                                                                                 "rawP":  0.4444,
+                                                                                                                                                 "priorP":  0.4818,
+                                                                                                                                                 "pCalib":  0.4396
+                                                                                                                                             },
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.65,
+                                                                                                                                                 "hi":  0.75,
+                                                                                                                                                 "mid":  0.6938,
+                                                                                                                                                 "n":  25,
+                                                                                                                                                 "wins":  10,
+                                                                                                                                                 "rawP":  0.4,
+                                                                                                                                                 "priorP":  0.4944,
+                                                                                                                                                 "pCalib":  0.4396
+                                                                                                                                             }
+                                                                                                                                         ],
+                                                                                                                                "coverage":  [
+                                                                                                                                                 0.3,
+                                                                                                                                                 0.75
+                                                                                                                                             ],
+                                                                                                                                "nTotal":  115
+                                                                                                                            },
+                                                                                                                   "home":  {
+                                                                                                                                "bins":  [
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.3,
+                                                                                                                                                 "hi":  0.55,
+                                                                                                                                                 "mid":  0.4289,
+                                                                                                                                                 "n":  83,
+                                                                                                                                                 "wins":  29,
+                                                                                                                                                 "rawP":  0.3494,
+                                                                                                                                                 "priorP":  0.4346,
+                                                                                                                                                 "pCalib":  0.3484
+                                                                                                                                             },
+                                                                                                                                             {
+                                                                                                                                                 "lo":  0.55,
+                                                                                                                                                 "hi":  0.65,
+                                                                                                                                                 "mid":  0.6181,
+                                                                                                                                                 "n":  33,
+                                                                                                                                                 "wins":  10,
+                                                                                                                                                 "rawP":  0.303,
+                                                                                                                                                 "priorP":  0.4261,
+                                                                                                                                                 "pCalib":  0.3484
+                                                                                                                                             }
+                                                                                                                                         ],
+                                                                                                                                "coverage":  [
+                                                                                                                                                 0.3,
+                                                                                                                                                 0.65
+                                                                                                                                             ],
+                                                                                                                                "nTotal":  116
+                                                                                                                            }
+                                                                                                               }
+                                                                                                 }
+                                                                                     }
+                                                                     }
+                                                    }
+                                      },
+                    "totalGames":  {
+                                       "bins":  [
+                                                    {
+                                                        "lo":  0.3,
+                                                        "hi":  0.55,
+                                                        "mid":  0.4323,
+                                                        "n":  420,
+                                                        "wins":  149,
+                                                        "rawP":  0.3548,
+                                                        "priorP":  0.416,
+                                                        "pCalib":  0.3559
+                                                    },
+                                                    {
+                                                        "lo":  0.55,
+                                                        "hi":  0.7,
+                                                        "mid":  0.5959,
+                                                        "n":  48,
+                                                        "wins":  22,
+                                                        "rawP":  0.4583,
+                                                        "priorP":  0.4808,
+                                                        "pCalib":  0.4615
+                                                    }
+                                                ],
+                                       "coverage":  [
+                                                        0.3,
+                                                        0.7
+                                                    ],
+                                       "nTotal":  468,
+                                       "tiers":  {
+                                                     "atp_challenger":  {
+                                                                            "bins":  [
+                                                                                         {
+                                                                                             "lo":  0.3,
+                                                                                             "hi":  0.55,
+                                                                                             "mid":  0.4159,
+                                                                                             "n":  170,
+                                                                                             "wins":  55,
+                                                                                             "rawP":  0.3235,
+                                                                                             "priorP":  0.403,
+                                                                                             "pCalib":  0.3271
+                                                                                         },
+                                                                                         {
+                                                                                             "lo":  0.55,
+                                                                                             "hi":  0.7,
+                                                                                             "mid":  0.6023,
+                                                                                             "n":  6,
+                                                                                             "wins":  1,
+                                                                                             "rawP":  0.1667,
+                                                                                             "priorP":  0.5173,
+                                                                                             "pCalib":  0.367
+                                                                                         }
+                                                                                     ],
+                                                                            "coverage":  [
+                                                                                             0.3,
+                                                                                             0.7
+                                                                                         ],
+                                                                            "nTotal":  176,
+                                                                            "sides":  {
+                                                                                          "over":  {
+                                                                                                       "bins":  [
+                                                                                                                    {
+                                                                                                                        "lo":  0.3,
+                                                                                                                        "hi":  0.55,
+                                                                                                                        "mid":  0.3921,
+                                                                                                                        "n":  50,
+                                                                                                                        "wins":  10,
+                                                                                                                        "rawP":  0.2,
+                                                                                                                        "priorP":  0.4115,
+                                                                                                                        "pCalib":  0.2292
+                                                                                                                    },
+                                                                                                                    {
+                                                                                                                        "lo":  0.55,
+                                                                                                                        "hi":  0.7,
+                                                                                                                        "mid":  0.6177,
+                                                                                                                        "n":  2,
+                                                                                                                        "wins":  1,
+                                                                                                                        "rawP":  0.5,
+                                                                                                                        "priorP":  0.5666,
+                                                                                                                        "pCalib":  0.5533
+                                                                                                                    }
+                                                                                                                ],
+                                                                                                       "coverage":  [
+                                                                                                                        0.3,
+                                                                                                                        0.7
+                                                                                                                    ],
+                                                                                                       "nTotal":  52
+                                                                                                   },
+                                                                                          "under":  {
+                                                                                                        "bins":  [
+                                                                                                                     {
+                                                                                                                         "lo":  0.3,
+                                                                                                                         "hi":  0.55,
+                                                                                                                         "mid":  0.4258,
+                                                                                                                         "n":  120,
+                                                                                                                         "wins":  45,
+                                                                                                                         "rawP":  0.375,
+                                                                                                                         "priorP":  0.3996,
+                                                                                                                         "pCalib":  0.375
+                                                                                                                     },
+                                                                                                                     {
+                                                                                                                         "lo":  0.55,
+                                                                                                                         "hi":  0.7,
+                                                                                                                         "mid":  0.5946,
+                                                                                                                         "n":  4,
+                                                                                                                         "wins":  0,
+                                                                                                                         "rawP":  0,
+                                                                                                                         "priorP":  0.4949,
+                                                                                                                         "pCalib":  0.375
+                                                                                                                     }
+                                                                                                                 ],
+                                                                                                        "coverage":  [
+                                                                                                                         0.3,
+                                                                                                                         0.7
+                                                                                                                     ],
+                                                                                                        "nTotal":  124
+                                                                                                    }
+                                                                                      },
+                                                                            "formats":  {
+                                                                                            "bo3":  {
+                                                                                                        "bins":  [
+                                                                                                                     {
+                                                                                                                         "lo":  0.3,
+                                                                                                                         "hi":  0.55,
+                                                                                                                         "mid":  0.4159,
+                                                                                                                         "n":  170,
+                                                                                                                         "wins":  55,
+                                                                                                                         "rawP":  0.3235,
+                                                                                                                         "priorP":  0.403,
+                                                                                                                         "pCalib":  0.3271
+                                                                                                                     },
+                                                                                                                     {
+                                                                                                                         "lo":  0.55,
+                                                                                                                         "hi":  0.7,
+                                                                                                                         "mid":  0.6023,
+                                                                                                                         "n":  6,
+                                                                                                                         "wins":  1,
+                                                                                                                         "rawP":  0.1667,
+                                                                                                                         "priorP":  0.5173,
+                                                                                                                         "pCalib":  0.367
+                                                                                                                     }
+                                                                                                                 ],
+                                                                                                        "coverage":  [
+                                                                                                                         0.3,
+                                                                                                                         0.7
+                                                                                                                     ],
+                                                                                                        "nTotal":  176,
+                                                                                                        "sides":  {
+                                                                                                                      "over":  {
+                                                                                                                                   "bins":  [
+                                                                                                                                                {
+                                                                                                                                                    "lo":  0.3,
+                                                                                                                                                    "hi":  0.55,
+                                                                                                                                                    "mid":  0.3921,
+                                                                                                                                                    "n":  50,
+                                                                                                                                                    "wins":  10,
+                                                                                                                                                    "rawP":  0.2,
+                                                                                                                                                    "priorP":  0.4115,
+                                                                                                                                                    "pCalib":  0.2292
+                                                                                                                                                },
+                                                                                                                                                {
+                                                                                                                                                    "lo":  0.55,
+                                                                                                                                                    "hi":  0.7,
+                                                                                                                                                    "mid":  0.6177,
+                                                                                                                                                    "n":  2,
+                                                                                                                                                    "wins":  1,
+                                                                                                                                                    "rawP":  0.5,
+                                                                                                                                                    "priorP":  0.5666,
+                                                                                                                                                    "pCalib":  0.5533
+                                                                                                                                                }
+                                                                                                                                            ],
+                                                                                                                                   "coverage":  [
+                                                                                                                                                    0.3,
+                                                                                                                                                    0.7
+                                                                                                                                                ],
+                                                                                                                                   "nTotal":  52
+                                                                                                                               },
+                                                                                                                      "under":  {
+                                                                                                                                    "bins":  [
+                                                                                                                                                 {
+                                                                                                                                                     "lo":  0.3,
+                                                                                                                                                     "hi":  0.55,
+                                                                                                                                                     "mid":  0.4258,
+                                                                                                                                                     "n":  120,
+                                                                                                                                                     "wins":  45,
+                                                                                                                                                     "rawP":  0.375,
+                                                                                                                                                     "priorP":  0.3996,
+                                                                                                                                                     "pCalib":  0.375
+                                                                                                                                                 },
+                                                                                                                                                 {
+                                                                                                                                                     "lo":  0.55,
+                                                                                                                                                     "hi":  0.7,
+                                                                                                                                                     "mid":  0.5946,
+                                                                                                                                                     "n":  4,
+                                                                                                                                                     "wins":  0,
+                                                                                                                                                     "rawP":  0,
+                                                                                                                                                     "priorP":  0.4949,
+                                                                                                                                                     "pCalib":  0.375
+                                                                                                                                                 }
+                                                                                                                                             ],
+                                                                                                                                    "coverage":  [
+                                                                                                                                                     0.3,
+                                                                                                                                                     0.7
+                                                                                                                                                 ],
+                                                                                                                                    "nTotal":  124
+                                                                                                                                }
+                                                                                                                  }
+                                                                                                    }
+                                                                                        }
+                                                                        },
+                                                     "atp_main":  {
+                                                                      "bins":  [
+                                                                                   {
+                                                                                       "lo":  0.3,
+                                                                                       "hi":  0.55,
+                                                                                       "mid":  0.431,
+                                                                                       "n":  92,
+                                                                                       "wins":  25,
+                                                                                       "rawP":  0.2717,
+                                                                                       "priorP":  0.4277,
+                                                                                       "pCalib":  0.2842
+                                                                                   },
+                                                                                   {
+                                                                                       "lo":  0.55,
+                                                                                       "hi":  0.65,
+                                                                                       "mid":  0.5851,
+                                                                                       "n":  4,
+                                                                                       "wins":  1,
+                                                                                       "rawP":  0.25,
+                                                                                       "priorP":  0.3874,
+                                                                                       "pCalib":  0.3416
+                                                                                   }
+                                                                               ],
+                                                                      "coverage":  [
+                                                                                       0.3,
+                                                                                       0.65
+                                                                                   ],
+                                                                      "nTotal":  96,
+                                                                      "sides":  {
+                                                                                    "under":  {
+                                                                                                  "bins":  [
+                                                                                                               {
+                                                                                                                   "lo":  0.3,
+                                                                                                                   "hi":  0.55,
+                                                                                                                   "mid":  0.4406,
+                                                                                                                   "n":  61,
+                                                                                                                   "wins":  20,
+                                                                                                                   "rawP":  0.3279,
+                                                                                                                   "priorP":  0.4239,
+                                                                                                                   "pCalib":  0.339
+                                                                                                               },
+                                                                                                               {
+                                                                                                                   "lo":  0.55,
+                                                                                                                   "hi":  0.65,
+                                                                                                                   "mid":  0.5827,
+                                                                                                                   "n":  3,
+                                                                                                                   "wins":  1,
+                                                                                                                   "rawP":  0.3333,
+                                                                                                                   "priorP":  0.3836,
+                                                                                                                   "pCalib":  0.3699
+                                                                                                               }
+                                                                                                           ],
+                                                                                                  "coverage":  [
+                                                                                                                   0.3,
+                                                                                                                   0.65
+                                                                                                               ],
+                                                                                                  "nTotal":  64
+                                                                                              },
+                                                                                    "over":  {
+                                                                                                 "bins":  [
+                                                                                                              {
+                                                                                                                  "lo":  0.3,
+                                                                                                                  "hi":  0.55,
+                                                                                                                  "mid":  0.4122,
+                                                                                                                  "n":  31,
+                                                                                                                  "wins":  5,
+                                                                                                                  "rawP":  0.1613,
+                                                                                                                  "priorP":  0.4355,
+                                                                                                                  "pCalib":  0.2175
+                                                                                                              },
+                                                                                                              {
+                                                                                                                  "lo":  0.55,
+                                                                                                                  "hi":  0.65,
+                                                                                                                  "mid":  0.592,
+                                                                                                                  "n":  1,
+                                                                                                                  "wins":  0,
+                                                                                                                  "rawP":  0,
+                                                                                                                  "priorP":  0.3996,
+                                                                                                                  "pCalib":  0.3552
+                                                                                                              }
+                                                                                                          ],
+                                                                                                 "coverage":  [
+                                                                                                                  0.3,
+                                                                                                                  0.65
+                                                                                                              ],
+                                                                                                 "nTotal":  32
+                                                                                             }
+                                                                                },
+                                                                      "formats":  {
+                                                                                      "bo3":  {
+                                                                                                  "bins":  [
+                                                                                                               {
+                                                                                                                   "lo":  0.3,
+                                                                                                                   "hi":  0.55,
+                                                                                                                   "mid":  0.4287,
+                                                                                                                   "n":  84,
+                                                                                                                   "wins":  23,
+                                                                                                                   "rawP":  0.2738,
+                                                                                                                   "priorP":  0.4233,
+                                                                                                                   "pCalib":  0.2857
+                                                                                                               },
+                                                                                                               {
+                                                                                                                   "lo":  0.55,
+                                                                                                                   "hi":  0.65,
+                                                                                                                   "mid":  0.5834,
+                                                                                                                   "n":  3,
+                                                                                                                   "wins":  0,
+                                                                                                                   "rawP":  0,
+                                                                                                                   "priorP":  0.3486,
+                                                                                                                   "pCalib":  0.2857
+                                                                                                               }
+                                                                                                           ],
+                                                                                                  "coverage":  [
+                                                                                                                   0.3,
+                                                                                                                   0.65
+                                                                                                               ],
+                                                                                                  "nTotal":  87,
+                                                                                                  "sides":  {
+                                                                                                                "under":  {
+                                                                                                                              "bins":  [
+                                                                                                                                           {
+                                                                                                                                               "lo":  0.3,
+                                                                                                                                               "hi":  0.55,
+                                                                                                                                               "mid":  0.4408,
+                                                                                                                                               "n":  56,
+                                                                                                                                               "wins":  19,
+                                                                                                                                               "rawP":  0.3393,
+                                                                                                                                               "priorP":  0.4176,
+                                                                                                                                               "pCalib":  0.3461
+                                                                                                                                           },
+                                                                                                                                           {
+                                                                                                                                               "lo":  0.55,
+                                                                                                                                               "hi":  0.65,
+                                                                                                                                               "mid":  0.5791,
+                                                                                                                                               "n":  2,
+                                                                                                                                               "wins":  0,
+                                                                                                                                               "rawP":  0,
+                                                                                                                                               "priorP":  0.3277,
+                                                                                                                                               "pCalib":  0.3461
+                                                                                                                                           }
+                                                                                                                                       ],
+                                                                                                                              "coverage":  [
+                                                                                                                                               0.3,
+                                                                                                                                               0.65
+                                                                                                                                           ],
+                                                                                                                              "nTotal":  58
+                                                                                                                          },
+                                                                                                                "over":  {
+                                                                                                                             "bins":  [
+                                                                                                                                          {
+                                                                                                                                              "lo":  0.3,
+                                                                                                                                              "hi":  0.55,
+                                                                                                                                              "mid":  0.4045,
+                                                                                                                                              "n":  28,
+                                                                                                                                              "wins":  4,
+                                                                                                                                              "rawP":  0.1429,
+                                                                                                                                              "priorP":  0.4353,
+                                                                                                                                              "pCalib":  0.2079
+                                                                                                                                          },
+                                                                                                                                          {
+                                                                                                                                              "lo":  0.55,
+                                                                                                                                              "hi":  0.65,
+                                                                                                                                              "mid":  0.592,
+                                                                                                                                              "n":  1,
+                                                                                                                                              "wins":  0,
+                                                                                                                                              "rawP":  0,
+                                                                                                                                              "priorP":  0.3996,
+                                                                                                                                              "pCalib":  0.3552
+                                                                                                                                          }
+                                                                                                                                      ],
+                                                                                                                             "coverage":  [
+                                                                                                                                              0.3,
+                                                                                                                                              0.65
+                                                                                                                                          ],
+                                                                                                                             "nTotal":  29
+                                                                                                                         }
+                                                                                                            }
+                                                                                              }
+                                                                                  }
+                                                                  },
+                                                     "wta125k":  {
+                                                                     "bins":  [
+                                                                                  {
+                                                                                      "lo":  0.3,
+                                                                                      "hi":  0.55,
+                                                                                      "mid":  0.3942,
+                                                                                      "n":  36,
+                                                                                      "wins":  10,
+                                                                                      "rawP":  0.2778,
+                                                                                      "priorP":  0.3849,
+                                                                                      "pCalib":  0.2973
+                                                                                  },
+                                                                                  {
+                                                                                      "lo":  0.55,
+                                                                                      "hi":  0.65,
+                                                                                      "mid":  0.5837,
+                                                                                      "n":  2,
+                                                                                      "wins":  2,
+                                                                                      "rawP":  1,
+                                                                                      "priorP":  0.4733,
+                                                                                      "pCalib":  0.5786
+                                                                                  }
+                                                                              ],
+                                                                     "coverage":  [
+                                                                                      0.3,
+                                                                                      0.65
+                                                                                  ],
+                                                                     "nTotal":  38,
+                                                                     "formats":  {
+                                                                                     "bo3":  {
+                                                                                                 "bins":  [
+                                                                                                              {
+                                                                                                                  "lo":  0.3,
+                                                                                                                  "hi":  0.55,
+                                                                                                                  "mid":  0.3942,
+                                                                                                                  "n":  36,
+                                                                                                                  "wins":  10,
+                                                                                                                  "rawP":  0.2778,
+                                                                                                                  "priorP":  0.3849,
+                                                                                                                  "pCalib":  0.2973
+                                                                                                              },
+                                                                                                              {
+                                                                                                                  "lo":  0.55,
+                                                                                                                  "hi":  0.65,
+                                                                                                                  "mid":  0.5837,
+                                                                                                                  "n":  2,
+                                                                                                                  "wins":  2,
+                                                                                                                  "rawP":  1,
+                                                                                                                  "priorP":  0.4733,
+                                                                                                                  "pCalib":  0.5786
+                                                                                                              }
+                                                                                                          ],
+                                                                                                 "coverage":  [
+                                                                                                                  0.3,
+                                                                                                                  0.65
+                                                                                                              ],
+                                                                                                 "nTotal":  38
+                                                                                             }
+                                                                                 }
+                                                                 },
+                                                     "wta_main":  {
+                                                                      "bins":  [
+                                                                                   {
+                                                                                       "lo":  0.3,
+                                                                                       "hi":  0.55,
+                                                                                       "mid":  0.4673,
+                                                                                       "n":  122,
+                                                                                       "wins":  59,
+                                                                                       "rawP":  0.4836,
+                                                                                       "priorP":  0.4369,
+                                                                                       "pCalib":  0.4807
+                                                                                   },
+                                                                                   {
+                                                                                       "lo":  0.55,
+                                                                                       "hi":  0.65,
+                                                                                       "mid":  0.5967,
+                                                                                       "n":  36,
+                                                                                       "wins":  18,
+                                                                                       "rawP":  0.5,
+                                                                                       "priorP":  0.4881,
+                                                                                       "pCalib":  0.4978
+                                                                                   }
+                                                                               ],
+                                                                      "coverage":  [
+                                                                                       0.3,
+                                                                                       0.65
+                                                                                   ],
+                                                                      "nTotal":  158,
+                                                                      "sides":  {
+                                                                                    "under":  {
+                                                                                                  "bins":  [
+                                                                                                               {
+                                                                                                                   "lo":  0.3,
+                                                                                                                   "hi":  0.55,
+                                                                                                                   "mid":  0.4524,
+                                                                                                                   "n":  58,
+                                                                                                                   "wins":  29,
+                                                                                                                   "rawP":  0.5,
+                                                                                                                   "priorP":  0.4203,
+                                                                                                                   "pCalib":  0.4862
+                                                                                                               },
+                                                                                                               {
+                                                                                                                   "lo":  0.55,
+                                                                                                                   "hi":  0.65,
+                                                                                                                   "mid":  0.5864,
+                                                                                                                   "n":  13,
+                                                                                                                   "wins":  6,
+                                                                                                                   "rawP":  0.4615,
+                                                                                                                   "priorP":  0.4773,
+                                                                                                                   "pCalib":  0.4862
+                                                                                                               }
+                                                                                                           ],
+                                                                                                  "coverage":  [
+                                                                                                                   0.3,
+                                                                                                                   0.65
+                                                                                                               ],
+                                                                                                  "nTotal":  71
+                                                                                              },
+                                                                                    "over":  {
+                                                                                                 "bins":  [
+                                                                                                              {
+                                                                                                                  "lo":  0.3,
+                                                                                                                  "hi":  0.55,
+                                                                                                                  "mid":  0.4808,
+                                                                                                                  "n":  64,
+                                                                                                                  "wins":  30,
+                                                                                                                  "rawP":  0.4688,
+                                                                                                                  "priorP":  0.4531,
+                                                                                                                  "pCalib":  0.467
+                                                                                                              },
+                                                                                                              {
+                                                                                                                  "lo":  0.55,
+                                                                                                                  "hi":  0.65,
+                                                                                                                  "mid":  0.6025,
+                                                                                                                  "n":  23,
+                                                                                                                  "wins":  12,
+                                                                                                                  "rawP":  0.5217,
+                                                                                                                  "priorP":  0.4945,
+                                                                                                                  "pCalib":  0.5147
+                                                                                                              }
+                                                                                                          ],
+                                                                                                 "coverage":  [
+                                                                                                                  0.3,
+                                                                                                                  0.65
+                                                                                                              ],
+                                                                                                 "nTotal":  87
+                                                                                             }
+                                                                                },
+                                                                      "formats":  {
+                                                                                      "bo3":  {
+                                                                                                  "bins":  [
+                                                                                                               {
+                                                                                                                   "lo":  0.3,
+                                                                                                                   "hi":  0.55,
+                                                                                                                   "mid":  0.4673,
+                                                                                                                   "n":  122,
+                                                                                                                   "wins":  59,
+                                                                                                                   "rawP":  0.4836,
+                                                                                                                   "priorP":  0.4369,
+                                                                                                                   "pCalib":  0.4807
+                                                                                                               },
+                                                                                                               {
+                                                                                                                   "lo":  0.55,
+                                                                                                                   "hi":  0.65,
+                                                                                                                   "mid":  0.5967,
+                                                                                                                   "n":  36,
+                                                                                                                   "wins":  18,
+                                                                                                                   "rawP":  0.5,
+                                                                                                                   "priorP":  0.4881,
+                                                                                                                   "pCalib":  0.4978
+                                                                                                               }
+                                                                                                           ],
+                                                                                                  "coverage":  [
+                                                                                                                   0.3,
+                                                                                                                   0.65
+                                                                                                               ],
+                                                                                                  "nTotal":  158,
+                                                                                                  "sides":  {
+                                                                                                                "under":  {
+                                                                                                                              "bins":  [
+                                                                                                                                           {
+                                                                                                                                               "lo":  0.3,
+                                                                                                                                               "hi":  0.55,
+                                                                                                                                               "mid":  0.4524,
+                                                                                                                                               "n":  58,
+                                                                                                                                               "wins":  29,
+                                                                                                                                               "rawP":  0.5,
+                                                                                                                                               "priorP":  0.4203,
+                                                                                                                                               "pCalib":  0.4862
+                                                                                                                                           },
+                                                                                                                                           {
+                                                                                                                                               "lo":  0.55,
+                                                                                                                                               "hi":  0.65,
+                                                                                                                                               "mid":  0.5864,
+                                                                                                                                               "n":  13,
+                                                                                                                                               "wins":  6,
+                                                                                                                                               "rawP":  0.4615,
+                                                                                                                                               "priorP":  0.4773,
+                                                                                                                                               "pCalib":  0.4862
+                                                                                                                                           }
+                                                                                                                                       ],
+                                                                                                                              "coverage":  [
+                                                                                                                                               0.3,
+                                                                                                                                               0.65
+                                                                                                                                           ],
+                                                                                                                              "nTotal":  71
+                                                                                                                          },
+                                                                                                                "over":  {
+                                                                                                                             "bins":  [
+                                                                                                                                          {
+                                                                                                                                              "lo":  0.3,
+                                                                                                                                              "hi":  0.55,
+                                                                                                                                              "mid":  0.4808,
+                                                                                                                                              "n":  64,
+                                                                                                                                              "wins":  30,
+                                                                                                                                              "rawP":  0.4688,
+                                                                                                                                              "priorP":  0.4531,
+                                                                                                                                              "pCalib":  0.467
+                                                                                                                                          },
+                                                                                                                                          {
+                                                                                                                                              "lo":  0.55,
+                                                                                                                                              "hi":  0.65,
+                                                                                                                                              "mid":  0.6025,
+                                                                                                                                              "n":  23,
+                                                                                                                                              "wins":  12,
+                                                                                                                                              "rawP":  0.5217,
+                                                                                                                                              "priorP":  0.4945,
+                                                                                                                                              "pCalib":  0.5147
+                                                                                                                                          }
+                                                                                                                                      ],
+                                                                                                                             "coverage":  [
+                                                                                                                                              0.3,
+                                                                                                                                              0.65
+                                                                                                                                          ],
+                                                                                                                             "nTotal":  87
+                                                                                                                         }
+                                                                                                            }
+                                                                                              }
+                                                                                  }
+                                                                  }
+                                                 }
+                                   }
+                },
+    "backtest":  {
+                     "eval_window":  "in_sample_legacy",
+                     "pre":  {
+                                 "label":  "PRE_raw",
+                                 "n":  1211,
+                                 "wins":  403,
+                                 "hit":  33.3,
+                                 "roi":  -9.4,
+                                 "roi_ci95":  {
+                                                  "lower":  -17.4,
+                                                  "upper":  -1.4,
+                                                  "se_pp":  4.09
+                                              },
+                                 "profit":  -113.53,
+                                 "avgP":  0.476,
+                                 "avgEV":  33.7,
+                                 "brier":  0.2407,
+                                 "ece":  0.1433
+                             },
+                     "post":  {
+                                  "label":  "POST_calib",
+                                  "n":  426,
+                                  "wins":  133,
+                                  "hit":  31.2,
+                                  "roi":  7.6,
+                                  "roi_ci95":  {
+                                                   "lower":  -9.4,
+                                                   "upper":  24.6,
+                                                   "se_pp":  8.67
+                                               },
+                                  "profit":  32.25,
+                                  "avgP":  0.382,
+                                  "avgEV":  37.6,
+                                  "brier":  0.2102,
+                                  "ece":  0.0802
+                              }
+                 }
+}
