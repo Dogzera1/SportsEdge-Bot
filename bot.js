@@ -2796,7 +2796,13 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   // protege mesmo se Kelly + multipliers escalarem desordenadamente.
   const sportCapKey = `${String(sport || '').toUpperCase()}_MAX_STAKE_UNITS`;
   const perSportCap = parseFloat(process.env[sportCapKey] || '');
-  const globalCap = parseFloat(process.env.MAX_STAKE_UNITS || '');
+  // 2026-05-29 audit B#1: default 4u (era '' = sem cap). O clamp final (L2812) existia
+  // mas era no-op sem MAX_STAKE_UNITS setado → stake MT pós-mults compostos no caller
+  // (trust×market×tier, bot.js:7375-7438) podia escalar a ~6u sem teto absoluto. 4u alinha
+  // com o teto ML ALTA (¼ Kelly maxStake=4u) — nenhum tip único passa de 4u. Zero impacto
+  // real (tennis HG ≤2.4u, ML ≤4u); tampa runaway de boost-tiers. Override via
+  // MAX_STAKE_UNITS / <SPORT>_MAX_STAKE_UNITS (têm precedência). P3: usa o cap existente.
+  const globalCap = parseFloat(process.env.MAX_STAKE_UNITS || '4');
   let cap = null;
   let capSource = null;
   if (Number.isFinite(perSportCap) && perSportCap > 0) { cap = perSportCap; capSource = 'env'; }
