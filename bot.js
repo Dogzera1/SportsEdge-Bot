@@ -17051,8 +17051,9 @@ async function _pollDotaInner(runOnce = false) {
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
-    markPollHeartbeat('dota');
-    const matches = await serverGet('/dota-matches').catch(() => []);
+    let _fetchErrDota = null;
+    const matches = await serverGet('/dota-matches').catch(e => { _fetchErrDota = e?.message || 'fetch_failed'; return []; });
+    markPollHeartbeat('dota', _fetchErrDota ? { lastError: _fetchErrDota } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
     _dotaMatchesOut = Array.isArray(matches) ? matches : [];
     if (!Array.isArray(matches) || !matches.length) {
       log('INFO', 'AUTO-DOTA', 'Sem partidas Dota 2 disponíveis');
@@ -18335,11 +18336,12 @@ async function pollMma(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-MMA', 'Iniciando verificação de lutas MMA...');
-      markPollHeartbeat('mma');
+      let _fetchErrMma = null;
       const [fights, espnFights] = await Promise.all([
-        serverGet('/mma-matches').catch(() => []),
+        serverGet('/mma-matches').catch(e => { _fetchErrMma = e?.message || 'fetch_failed'; return []; }),
         fetchEspnMmaFights().catch(() => [])
       ]);
+      markPollHeartbeat('mma', _fetchErrMma ? { lastError: _fetchErrMma } : { matches: Array.isArray(fights) ? fights.length : 0, hadLive: Array.isArray(fights) && fights.some(f => f.status === 'live') });
 
       if (!Array.isArray(fights) || !fights.length) {
         if (!runOnce) setTimeout(loop, 30 * 60 * 1000); return;
@@ -19196,7 +19198,9 @@ async function pollTennis(runOnce = false) {
         if (!runOnce) setTimeout(loop, 5 * 60 * 1000);
         return [];
       }
-      const matches = await serverGet('/tennis-matches').catch(() => []);
+      let _fetchErrTennis = null;
+      const matches = await serverGet('/tennis-matches').catch(e => { _fetchErrTennis = e?.message || 'fetch_failed'; return []; });
+      markPollHeartbeat('tennis', _fetchErrTennis ? { lastError: _fetchErrTennis } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
       if (!Array.isArray(matches) || !matches.length) {
         if (!runOnce) setTimeout(loop, 30 * 60 * 1000);
         return [];
@@ -21003,7 +21007,9 @@ async function pollFootball(runOnce = false) {
         } catch (_) { loop._needsCacheWarm = false; }
       }
 
-      const matches = await serverGet('/football-matches').catch(() => []);
+      let _fetchErrFootball = null;
+      const matches = await serverGet('/football-matches').catch(e => { _fetchErrFootball = e?.message || 'fetch_failed'; return []; });
+      markPollHeartbeat('football', _fetchErrFootball ? { lastError: _fetchErrFootball } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
       if (!Array.isArray(matches) || !matches.length) {
         if (!runOnce) setTimeout(loop, 60 * 60 * 1000);
         return [];
@@ -22514,8 +22520,9 @@ async function pollTableTennis(runOnce = false) {
     let _matchesForScheduler = [];
     try {
       log('INFO', 'AUTO-TT', `Iniciando verificação de Table Tennis${ttConfig.shadowMode ? ' [SHADOW]' : ''}...`);
-      markPollHeartbeat('tt');
-      const matches = await serverGet('/tabletennis-matches').catch(() => []);
+      let _fetchErrTt = null;
+      const matches = await serverGet('/tabletennis-matches').catch(e => { _fetchErrTt = e?.message || 'fetch_failed'; return []; });
+      markPollHeartbeat('tt', _fetchErrTt ? { lastError: _fetchErrTt } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-TT', '0 partidas TT com odds');
         if (!runOnce) setTimeout(loop, TT_INTERVAL);
@@ -22800,7 +22807,9 @@ async function pollCs(runOnce = false) {
       markPollHeartbeat('cs');
       // 2026-05-11 audit overfeaturing: hour-gate manual removido.
       // TIME_OF_DAY_AUTO em server.js cobre auto.
-      const matches = await serverGet('/cs-matches').catch(() => []);
+      let _fetchErrCs = null;
+      const matches = await serverGet('/cs-matches').catch(e => { _fetchErrCs = e?.message || 'fetch_failed'; return []; });
+      markPollHeartbeat('cs', _fetchErrCs ? { lastError: _fetchErrCs } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-CS', '0 partidas CS2 com odds');
         if (!runOnce) { const _nBase = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('cs'); const _n = _nBase * _stMult; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
@@ -24754,8 +24763,9 @@ async function runAutoDarts() {
       const sofaDarts = require('./lib/sofascore-darts');
       const now = Date.now();
       log('INFO', 'AUTO-DARTS', `Iniciando verificação de darts${dartsConfig.shadowMode ? ' [SHADOW]' : ''}...`);
-      markPollHeartbeat('darts');
-      const matches = await serverGet('/darts-matches').catch(() => []);
+      let _fetchErrDarts = null;
+      const matches = await serverGet('/darts-matches').catch(e => { _fetchErrDarts = e?.message || 'fetch_failed'; return []; });
+      markPollHeartbeat('darts', _fetchErrDarts ? { lastError: _fetchErrDarts } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-DARTS', '0 partidas darts com odds');
       } else {
@@ -25094,8 +25104,9 @@ async function runAutoSnooker() {
       const { snookerPreFilter } = require('./lib/snooker-ml');
       const now = Date.now();
       log('INFO', 'AUTO-SNOOKER', `Iniciando verificação de snooker${snookerConfig.shadowMode ? ' [SHADOW]' : ''}...`);
-      markPollHeartbeat('snooker');
-      const matches = await serverGet('/snooker-matches').catch(() => []);
+      let _fetchErrSnooker = null;
+      const matches = await serverGet('/snooker-matches').catch(e => { _fetchErrSnooker = e?.message || 'fetch_failed'; return []; });
+      markPollHeartbeat('snooker', _fetchErrSnooker ? { lastError: _fetchErrSnooker } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-SNOOKER', '0 partidas snooker com odds Betfair');
       } else {
@@ -25370,8 +25381,9 @@ async function runAutoBasket() {
   try {
     const now = Date.now();
     log('INFO', 'AUTO-BASKET', `Iniciando verificação de basket${basketConfig.shadowMode ? ' [SHADOW]' : ''}...`);
-    markPollHeartbeat('basket');
-    const matches = await serverGet('/basket-matches').catch(() => []);
+    let _fetchErrBasket = null;
+    const matches = await serverGet('/basket-matches').catch(e => { _fetchErrBasket = e?.message || 'fetch_failed'; return []; });
+    markPollHeartbeat('basket', _fetchErrBasket ? { lastError: _fetchErrBasket } : { matches: Array.isArray(matches) ? matches.length : 0, hadLive: Array.isArray(matches) && matches.some(m => m.status === 'live') });
     if (!Array.isArray(matches) || !matches.length) {
       log('INFO', 'AUTO-BASKET', '0 partidas basket');
       return false;
