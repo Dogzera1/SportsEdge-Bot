@@ -25653,6 +25653,55 @@ load();
     return;
   }
 
+  // GET /admin/edge-shrink-fit?sport=tennis&days=90&minN=20&minEv=8&key=<KEY>
+  // Backtest the edge-shrink (anchor model prob → devigged fair) on market_tips_shadow
+  // per segment (market × dir_side): finds the shrink ∈ [0,1] that maximizes realized
+  // ROI after re-gating. Read-only. P2: SHADOW research data → recommendation ONLY,
+  // never auto-acts. Use to pick TENNIS_<TAG>_EDGE_SHRINK before enabling in prod.
+  if (p === '/admin/edge-shrink-fit') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const { backtestShrink } = require('./lib/edge-shrink');
+    const sport = String(parsed.query.sport || 'tennis').toLowerCase();
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '90', 10) || 90));
+    const minN = Math.max(10, parseInt(parsed.query.minN || '20', 10) || 20);
+    const minEv = parseFloat(parsed.query.minEv || '8');
+    try {
+      const rows = db.prepare(`
+        SELECT market, COALESCE(side,'na') AS side, line, league,
+               p_model, p_implied, odd, result, clv_pct
+          FROM market_tips_shadow
+         WHERE sport = ?
+           AND result IN ('win','loss','void')
+           AND p_model IS NOT NULL AND p_implied IS NOT NULL AND odd > 1
+           AND created_at >= datetime('now', '-' || ? || ' days')
+      `).all(sport, days);
+      const seg = {};
+      for (const r of rows) {
+        const dir = r.line < 0 ? 'NEG' : (r.line > 0 ? 'POS' : 'PK');
+        const key = `${r.market}|${dir}_${r.side}`;
+        (seg[key] = seg[key] || []).push(r);
+      }
+      const grid = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+      const segments = {};
+      for (const [key, tips] of Object.entries(seg)) {
+        if (tips.length < minN) continue;
+        const curve = backtestShrink(tips, { grid, minEv });
+        const current = curve.find(x => x.shrink === 1) || null;
+        const best = curve.filter(x => x.n >= Math.min(minN, tips.length) && x.roi != null)
+                          .sort((a, b) => b.roi - a.roi)[0] || null;
+        segments[key] = { n: tips.length, current, best, curve };
+      }
+      sendJson(res, {
+        ok: true, sport, days, minEv, minN,
+        disclaimer: 'shadow research backtest (P2) — recommendation only; validate on real before enabling TENNIS_*_EDGE_SHRINK',
+        n_segments: Object.keys(segments).length,
+        segments,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-shadow-comprehensive-audit?days=30&minN=10&regime=new|old|all&key=<KEY>
   // Auditoria completa MT shadow: performance por (sport,market,side),
   // detecção de promotion candidates + leaks + config gaps.
