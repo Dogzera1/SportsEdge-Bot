@@ -15702,6 +15702,9 @@ setInterval(load, 60000);
         railway_service: process.env.RAILWAY_SERVICE_NAME || 'unknown',
         railway_environment: process.env.RAILWAY_ENVIRONMENT_NAME || 'unknown',
         railway_project: process.env.RAILWAY_PROJECT_NAME || 'unknown',
+        // 2026-05-30 diag: nomes EXATOS de envs shadow/lol/real_leagues que o processo vê
+        // (só nomes, sem valores — config, não secrets). Revela typo/case/espaço no nome.
+        env_keys_shadow_lol: Object.keys(process.env).filter(k => /shadow|real_leagues|^lol/i.test(k)).sort(),
       };
 
       // 2026-05-17 — per-sport auto-promote overrides (A: WINDOW_DAYS_<SPORT>,
