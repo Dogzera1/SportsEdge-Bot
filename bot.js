@@ -19995,6 +19995,11 @@ async function pollTennis(runOnce = false) {
                         const _kellyBaseFrac = getKellyFraction('tennis', 'BAIXA', t.market, match.league, t.side, _hgLineDir);
                         const _isHgGoldSegment = (() => {
                           if (String(t.market).toLowerCase() !== 'handicapgames') return false;
+                          // 2026-05-29: POS_home (underdog-home, +line) has no demonstrable edge
+                          // (real −8.7% ROI / ~0 CLV). Never apply the EV>=15 gold boost to it — let
+                          // it fall to base frac which honors KELLY_TENNIS_HG_POS_HOME. Otherwise the
+                          // boost bypassed the dir/side cut (audit 2026-05-29 Fix C).
+                          if (String(t.side).toLowerCase() === 'home' && _hgLineDir === 'POS') return false;
                           const lg = String(match.league || '');
                           // Tier 1 (Slam + Masters 1000) — sample grande, edge validado historicamente
                           const isTopTier = /grand slam|wimbledon|us open|roland|french open|australian open|atp 1000|wta 1000|masters/i.test(lg)
