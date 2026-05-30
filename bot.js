@@ -30357,8 +30357,15 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           if (!Array.isArray(all) || all.length < 2) continue;
           const pin = all.find(b => /pinnacle/i.test(b.bookmaker || ''));
           const others = pin ? all.filter(b => !/pinnacle/i.test(b.bookmaker || '')) : all.slice();
-          const crossBookMode = !pin && all.length >= 3;
-          if (!pin && !crossBookMode) continue;
+          // Path 2 fix 2026-05-30: Pinnacle tennis vive em m.odds.t1/t2 (bookmaker=Pinnacle), NÃO em
+          // _allOdds (que só carrega casas BR via enrichTennisMatches). Sem âncora sharp, o super-odd
+          // roda crossbook e o Path 2 (exige mode='pinnacle') nunca dispara no tennis. Deriva a âncora
+          // do m.odds quando Pinnacle está ausente do _allOdds.
+          const _pinTn = (!pin && m.odds && /pinnacle/i.test(m.odds.bookmaker || '')
+            && parseFloat(m.odds.t1) > 1 && parseFloat(m.odds.t2) > 1)
+            ? { t1: parseFloat(m.odds.t1), t2: parseFloat(m.odds.t2) } : null;
+          const crossBookMode = !pin && !_pinTn && all.length >= 3;
+          if (!pin && !_pinTn && !crossBookMode) continue;
 
           // 2-way arb tennis (t1 vs t2 cross-book)
           const arb2tn = arb.detect2WayArb({ sport: 'tennis', team1: m.team1, team2: m.team2, allOdds: all });
@@ -30379,13 +30386,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           }
 
           for (const side of ['t1', 't2']) {
-            const pinOdd = pin ? parseFloat(pin[side]) : null;
+            const pinOdd = pin ? parseFloat(pin[side]) : (_pinTn ? _pinTn[side] : null);
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
             const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]), _capturedAt: b._capturedAt })).filter(x => Number.isFinite(x.odd));
-            // 2026-05-03 FIX: pinOddOpposite habilita devig ML 2-way tennis.
-            const _pinOppTn = pin ? (side === 't1' ? parseFloat(pin.t2) : parseFloat(pin.t1)) : null;
+            // 2026-05-03 FIX: pinOddOpposite habilita devig ML 2-way tennis. Âncora do _allOdds OU m.odds (_pinTn).
+            const _pinOppTn = pin ? (side === 't1' ? parseFloat(pin.t2) : parseFloat(pin.t1)) : (_pinTn ? (side === 't1' ? _pinTn.t2 : _pinTn.t1) : null);
             // Super-odd
-            const superArgsTn = pin
+            const superArgsTn = (pin || _pinTn)
               ? { sport: 'tennis', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks, pinOddOpposite: _pinOppTn }
               : { sport: 'tennis', team1: m.team1, team2: m.team2, side, books: allBooksSide };
             const superEvtTn = sod.detectSuperOdd(superArgsTn);
