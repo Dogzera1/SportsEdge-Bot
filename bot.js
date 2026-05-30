@@ -29977,11 +29977,14 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         modelP1: null, modelP2: null,
         modelPPick: fairP,
         modelLabel: 'pinnacle-follower',
+        // P2 fix 2026-05-30: caller deve decidir is_shadow (server default = real). Sem
+        // isso, pin-follower emitia real pra sports shadowed (lol/football). Mirror ML path.
+        isShadow: isBucketShadowed(sport, match.league) ? 1 : 0,
         tipReason: `Pinnacle ${side}: ${velEvt.oldOdd}→${velEvt.newOdd} (${velEvt.velocityPct.toFixed(1)}% em ${velEvt.windowMin}min) — sharp money entered. Best book ${bestBook.bookmaker} ainda em ${bestBook.odd.toFixed(2)} (lag).`,
         pickSide: side,
         gates_evaluated: _mlGatesPinFollow,
       }, sport);
-      if (rec?.tipId) {
+      if (rec?.tipId && !_isShadowDispatch(rec, sport, match.league)) {
         log('INFO', 'PIN-FOLLOWER',
           `${sport} ${match.team1} vs ${match.team2} (${sideLabel}): Pin ${velEvt.oldOdd}→${velEvt.newOdd} → tip ${bestBook.bookmaker} @ ${bestBook.odd} EV=${ev.toFixed(1)}% [tip#${rec.tipId}]`);
         // DM admin (opcional, separa do alert SHARP MOVE)
