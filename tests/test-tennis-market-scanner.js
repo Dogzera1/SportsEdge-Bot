@@ -172,4 +172,28 @@ module.exports = function runTests(t) {
     const handi = tips.find(x => x.market === 'handicapGames');
     t.assert(handi == null, 'handicap games disabled deve retornar 0 tips');
   });
+
+  t.test('edge-shrink anchors pModel toward fair line (HG)', () => {
+    // calib disabled → pModel = pT1Raw (overconfident vs market). With shrink<1 the
+    // emitted pModel must move toward the devigged fair (pImplied) and EV must drop.
+    const prevCalib = process.env.TENNIS_MARKOV_CALIB_DISABLED;
+    const prevShrink = process.env.TENNIS_HG_EDGE_SHRINK;
+    process.env.TENNIS_MARKOV_CALIB_DISABLED = 'true';
+    try {
+      const markov = _markovMock();
+      const markets = { gamesHandicaps: [{ line: 1.5, oddsHome: 2.20, oddsAway: 1.70, kind: 'games' }] };
+      const args = { markov, markets, minEv: 4, minOdd: 1.50, maxEv: 60 };
+      delete process.env.TENNIS_HG_EDGE_SHRINK; // shrink=1 (no-op)
+      const base = scanTennisMarkets(args).find(x => x.market === 'handicapGames' && x.side === 'home');
+      process.env.TENNIS_HG_EDGE_SHRINK = '0.5';
+      const shrunk = scanTennisMarkets(args).find(x => x.market === 'handicapGames' && x.side === 'home');
+      t.assert(base && shrunk, `expected HG home tip both runs (base=${!!base} shrunk=${!!shrunk})`);
+      t.assert(shrunk.pModel < base.pModel, `shrunk pModel ${shrunk.pModel} should be < base ${base.pModel}`);
+      t.assert(shrunk.pModel > base.pImplied, `shrunk pModel ${shrunk.pModel} should be > fair ${base.pImplied}`);
+      t.assert(shrunk.ev < base.ev, `shrunk ev ${shrunk.ev} should be < base ev ${base.ev}`);
+    } finally {
+      if (prevCalib === undefined) delete process.env.TENNIS_MARKOV_CALIB_DISABLED; else process.env.TENNIS_MARKOV_CALIB_DISABLED = prevCalib;
+      if (prevShrink === undefined) delete process.env.TENNIS_HG_EDGE_SHRINK; else process.env.TENNIS_HG_EDGE_SHRINK = prevShrink;
+    }
+  });
 };
