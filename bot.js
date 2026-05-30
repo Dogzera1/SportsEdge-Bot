@@ -30006,6 +30006,81 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     }
   }
 
+  // Soft-vs-sharp follower (Path 2, 2026-05-30): emite tip REAL quando uma casa SOFT
+  // paga acima da linha SHARP (Pinnacle) de-vigada. Reusa o detectSuperOdd (já devig +
+  // EV=soft×fair−1); lib/soft-vs-sharp aplica o gate de EV estático + freshness re-check
+  // no _capturedAt da entrada soft (gap: o cron nunca checava a idade do preço, e o feed
+  // BR pode ficar dias stale). Default OFF (SOFT_VS_SHARP_ENABLED). Shadow-safe: is_shadow
+  // por isBucketShadowed → só tennis (real) emite real; lol/football vão pra shadow.
+  const _softVsSharpLastEmit = new Map(); // sport|matchKey|side → ts (cooldown 30min)
+  async function _tryEmitSoftVsSharpTip({ sport, match, superEvt, allBooksSide, sideLabel }) {
+    if (!superEvt) return;
+    // Resolve a hora de captura da casa escolhida (BR aggregator carimba _capturedAt; fontes live não).
+    let capturedAt = null;
+    if (Array.isArray(allBooksSide)) {
+      const hit = allBooksSide.find(b => String(b.bookmaker || '') === String(superEvt.superBook || ''));
+      if (hit && hit._capturedAt != null) capturedAt = hit._capturedAt;
+    }
+    const { evaluateSoftVsSharp } = require('./lib/soft-vs-sharp');
+    const verdict = evaluateSoftVsSharp({ superEvt, capturedAt });
+    if (!verdict.ok) return;
+
+    const cdKey = `${sport}|${superEvt.matchKey}|${superEvt.side}`;
+    const cooldownMs = 30 * 60 * 1000;
+    if (Date.now() - (_softVsSharpLastEmit.get(cdKey) || 0) < cooldownMs) return;
+    _softVsSharpLastEmit.set(cdKey, Date.now());
+
+    const shadow = isBucketShadowed(sport, match.league) ? 1 : 0;
+    const baseMid = String(match.id || `${match.team1}_${match.team2}_${Date.now()}`).replace(/[^\w-]/g, '_');
+    const matchId = `${baseMid}::softvssharp::${superEvt.side}`;
+    const stake = String(process.env.SOFT_VS_SHARP_STAKE || '1');
+    const _gates = [
+      { gate: 'soft_vs_sharp_ev', passed: true, value: +verdict.evPct.toFixed(2), threshold: parseFloat(process.env.SOFT_VS_SHARP_MIN_EV || '3') },
+      { gate: 'sharp_anchor', passed: true, value: 'pinnacle', threshold: 'devigged Pinnacle fair' },
+      { gate: 'soft_freshness', passed: true, value: capturedAt || 'live', threshold: `<= ${parseFloat(process.env.SOFT_VS_SHARP_MAX_AGE_MIN || '15')}min` },
+      { gate: 'odd_range', passed: true, value: verdict.odd, threshold: '1.20-5.00' },
+      { gate: 'cooldown_clear', passed: true, value: cdKey, threshold: '30min per (sport, match, side)' },
+    ];
+    try {
+      const rec = await serverPost('/record-tip', {
+        matchId, eventName: match.league || sport,
+        p1: match.team1, p2: match.team2,
+        tipParticipant: sideLabel,
+        odds: String(verdict.odd),
+        ev: verdict.evPct.toFixed(2),
+        stake,
+        confidence: 'BAIXA', // sinal de mispricing soft-vs-sharp, não modelo
+        isLive: !!match.is_live || match.status === 'live',
+        market_type: 'ML',
+        modelP1: null, modelP2: null,
+        modelPPick: verdict.fairP,
+        modelLabel: 'soft-vs-sharp',
+        isShadow: shadow,
+        tipReason: `Soft vs sharp: ${verdict.book} @ ${verdict.odd} vs Pinnacle fair ${(verdict.fairP * 100).toFixed(1)}% (EV +${verdict.evPct.toFixed(1)}%). Casa soft paga acima da linha sharp de-vigada.`,
+        pickSide: superEvt.side,
+        gates_evaluated: _gates,
+      }, sport);
+      if (rec?.tipId && !_isShadowDispatch(rec, sport, match.league)) {
+        log('INFO', 'SOFT-VS-SHARP',
+          `${sport} ${match.team1} vs ${match.team2} (${sideLabel}): ${verdict.book} @ ${verdict.odd} EV=${verdict.evPct.toFixed(1)}% [tip#${rec.tipId}]`);
+        if (ADMIN_IDS.size) {
+          const tk = resolveAlertsToken();
+          if (tk) {
+            const msg = `🎯 *SOFT VS SHARP — ${sport.toUpperCase()}*\n\n` +
+              `*${match.team1} vs ${match.team2}* (${sideLabel})\n\n` +
+              `Pinnacle fair: ${(verdict.fairP * 100).toFixed(1)}%\n` +
+              `*Tip*: ${verdict.book} @ ${verdict.odd}\n` +
+              `EV: *+${verdict.evPct.toFixed(1)}%* | Stake: ${stake}u\n\n` +
+              `_Casa soft paga acima da linha sharp de-vigada. Aposte antes do book ajustar._`;
+            for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+          }
+        }
+      }
+    } catch (e) {
+      log('WARN', 'SOFT-VS-SHARP', `record-tip falhou: ${e.message}`);
+    }
+  }
+
   // Stale line detector: cron 5min varre /football-matches + /lol-matches comparando
   // Pinnacle current vs odd 15min atrás. Se Pinnacle moveu >5% mas casa não-Pinnacle
   // ainda alinhada com odd antiga = stale → alert admin (cooldown 1h por match).
@@ -30075,7 +30150,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           for (const side of ['h', 'd', 'a']) {
             const pinOdd = pin ? parseFloat(pin[side]) : null;
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
-            const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]), _capturedAt: b._capturedAt })).filter(x => Number.isFinite(x.odd));
             // Pin vs BR mediana lag detector — sinal: Pinnacle moveu mas BR
             // mediana ficou estagnada como bloco (sharp money entrou pin, BR
             // não acompanhou). Reusa _ringBuf da stale-line pra pinOld; mantém
@@ -30139,6 +30214,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 }
               }
             }
+            // Path 2: soft-vs-sharp +EV emit (default off, shadow-safe)
+            await _tryEmitSoftVsSharpTip({
+              sport: 'football', match: m, superEvt, allBooksSide,
+              sideLabel: side === 'h' ? m.team1 : side === 'a' ? m.team2 : 'Empate',
+            }).catch(() => {});
             // Stale line: Pinnacle anchor ou cross-book
             const staleArgs = pin
               ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, brBooks }
@@ -30237,6 +30317,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               sod.persistEvent(db, superEvt);
               superOdds++;
             }
+            // Path 2: soft-vs-sharp +EV emit (default off, shadow-safe). LoL is shadowed
+            // (tennis-only flip) → is_shadow=1; _allOdds has no _capturedAt → freshness no-op.
+            await _tryEmitSoftVsSharpTip({
+              sport: 'lol', match: m, superEvt,
+              allBooksSide: all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]), _capturedAt: b._capturedAt })).filter(x => Number.isFinite(x.odd)),
+              sideLabel: side === 't1' ? m.team1 : m.team2,
+            }).catch(() => {});
             const evt = checkStaleLines({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
             // Velocity LoL (silent — só count, accumula data)
             const velEvtLol = vel.checkVelocity(slDet._ringBuf, { sport: 'lol', team1: m.team1, team2: m.team2, side });
@@ -30291,7 +30378,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           for (const side of ['t1', 't2']) {
             const pinOdd = pin ? parseFloat(pin[side]) : null;
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
-            const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]), _capturedAt: b._capturedAt })).filter(x => Number.isFinite(x.odd));
             // 2026-05-03 FIX: pinOddOpposite habilita devig ML 2-way tennis.
             const _pinOppTn = pin ? (side === 't1' ? parseFloat(pin.t2) : parseFloat(pin.t1)) : null;
             // Super-odd
@@ -30310,6 +30397,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
+            // Path 2: soft-vs-sharp +EV emit (default off, shadow-safe)
+            await _tryEmitSoftVsSharpTip({
+              sport: 'tennis', match: m, superEvt: superEvtTn, allBooksSide,
+              sideLabel: side === 't1' ? m.team1 : m.team2,
+            }).catch(() => {});
             // Stale line + velocity
             const staleArgsTn = pin
               ? { sport: 'tennis', team1: m.team1, team2: m.team2, side, pinOdd, brBooks }
