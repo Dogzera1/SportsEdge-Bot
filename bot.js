@@ -11592,7 +11592,7 @@ async function autoAnalyzeMatch(token, match) {
           const confLabel = lolModel.confidence >= 0.75 && edgePp >= 12 ? CONF.ALTA
             : lolModel.confidence >= 0.70 && edgePp >= 10 ? CONF.MEDIA
             : CONF.BAIXA;
-          const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: confLabel });
+          const stake = calcKellyWithP(pickP, pickOdd, getKellyFraction('lol', confLabel, 'ML', match.league), { sport: 'lol', confKey: confLabel });
           const stakeU = String(stake || (confLabel === CONF.ALTA ? '2u' : '1u'));
           log('INFO', 'LOL-HYBRID',
             `${match.team1} vs ${match.team2}${isLiveLolH ? ' [LIVE]' : ''}: trained-direct ${pickTeam}@${pickOdd} | P=${(pickP*100).toFixed(1)}% impP=${((pickP1?_imp1:_imp2)*100).toFixed(1)}% edge=${edgePp.toFixed(1)}pp EV=${evPp.toFixed(1)}% conf=${confLabel} trainedConf=${lolModel.confidence.toFixed(2)}`);
@@ -11682,7 +11682,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= FALLBACK_MIN_EV && mlResult.score >= FALLBACK_MIN_EDGE) {
-        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
+        const stake = calcKellyWithP(pickP, pickOdd, getKellyFraction('lol', 'MEDIA', 'ML', match.league), { sport: 'lol', confKey: 'MEDIA' });
         log('INFO', 'AUTO', `AI_DISABLED: fallback modelo ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
           ok: true,
@@ -11748,7 +11748,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= FALLBACK_MIN_EV && mlResult.score >= FALLBACK_MIN_EDGE) {
-        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
+        const stake = calcKellyWithP(pickP, pickOdd, getKellyFraction('lol', 'MEDIA', 'ML', match.league), { sport: 'lol', confKey: 'MEDIA' });
         log('WARN', 'AUTO', `IA em backoff; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
           ok: true,
@@ -11837,7 +11837,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= FALLBACK_MIN_EV && mlResult.score >= FALLBACK_MIN_EDGE) {
-        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
+        const stake = calcKellyWithP(pickP, pickOdd, getKellyFraction('lol', 'MEDIA', 'ML', match.league), { sport: 'lol', confKey: 'MEDIA' });
         const errShort = resp?.error ? String(resp.error).slice(0, 140) : '';
         const st = resp?.__status ? String(resp.__status) : '';
         log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
