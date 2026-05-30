@@ -25653,22 +25653,26 @@ load();
     return;
   }
 
-  // GET /admin/edge-shrink-fit?sport=tennis&days=90&minN=20&minEv=8&key=<KEY>
+  // GET /admin/edge-shrink-fit?sport=tennis&days=90&minN=20&minEv=8&holdout=0&key=<KEY>
   // Backtest the edge-shrink (anchor model prob → devigged fair) on market_tips_shadow
   // per segment (market × dir_side): finds the shrink ∈ [0,1] that maximizes realized
   // ROI after re-gating. Read-only. P2: SHADOW research data → recommendation ONLY,
   // never auto-acts. Use to pick TENNIS_<TAG>_EDGE_SHRINK before enabling in prod.
+  // holdout>0: also time-splits each segment (fit shrink on older TRAIN, validate on
+  // newest TEST) → segment.holdout.{train,test,deltaOos,holds} guards against overfit.
   if (p === '/admin/edge-shrink-fit') {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
-    const { backtestShrink } = require('./lib/edge-shrink');
+    const { backtestShrink, backtestShrinkHoldout } = require('./lib/edge-shrink');
     const sport = String(parsed.query.sport || 'tennis').toLowerCase();
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '90', 10) || 90));
     const minN = Math.max(10, parseInt(parsed.query.minN || '20', 10) || 20);
     const minEv = parseFloat(parsed.query.minEv || '8');
+    // holdout ∈ (0,0.5]: hold out the NEWEST fraction by time as out-of-sample TEST (0 = in-sample only)
+    const holdout = Math.max(0, Math.min(0.5, parseFloat(parsed.query.holdout || '0') || 0));
     try {
       const rows = db.prepare(`
-        SELECT market, COALESCE(side,'na') AS side, line, league,
+        SELECT market, COALESCE(side,'na') AS side, line, league, created_at,
                p_model, p_implied, odd, result, clv_pct
           FROM market_tips_shadow
          WHERE sport = ?
@@ -25690,12 +25694,17 @@ load();
         const current = curve.find(x => x.shrink === 1) || null;
         const best = curve.filter(x => x.n >= Math.min(minN, tips.length) && x.roi != null)
                           .sort((a, b) => b.roi - a.roi)[0] || null;
-        segments[key] = { n: tips.length, current, best, curve };
+        const entry = { n: tips.length, current, best, curve };
+        if (holdout > 0) entry.holdout = backtestShrinkHoldout(tips, { grid, minEv, holdout });
+        segments[key] = entry;
       }
+      const n_segments_hold = holdout > 0
+        ? Object.values(segments).filter(s => s.holdout && s.holdout.holds).length : null;
       sendJson(res, {
-        ok: true, sport, days, minEv, minN,
+        ok: true, sport, days, minEv, minN, holdout,
         disclaimer: 'shadow research backtest (P2) — recommendation only; validate on real before enabling TENNIS_*_EDGE_SHRINK',
         n_segments: Object.keys(segments).length,
+        n_segments_hold,
         segments,
       });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }

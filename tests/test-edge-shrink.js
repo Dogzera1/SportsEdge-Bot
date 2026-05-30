@@ -2,7 +2,7 @@
 // Unit tests for lib/edge-shrink (money-affecting: anchors model→fair before EV).
 // Runner convention: module.exports = function(t) { t.test(name, fn); t.assert(cond,msg) }
 
-const { applyEdgeShrink, resolveShrink, backtestShrink } = require('../lib/edge-shrink');
+const { applyEdgeShrink, resolveShrink, backtestShrink, backtestShrinkHoldout } = require('../lib/edge-shrink');
 
 module.exports = function (t) {
   // ── applyEdgeShrink ──────────────────────────────────────────────
@@ -72,5 +72,51 @@ module.exports = function (t) {
       { p_model: 0.6, p_implied: 0.5, odd: 2.0, result: 'loss', clv_pct: 2 },
     ], { grid: [1], minEv: 8 });
     t.assert(r[0].meanClv === 3, JSON.stringify(r[0]));
+  });
+
+  // ── backtestShrinkHoldout (out-of-sample validation) ─────────────
+  t.test('backtestShrinkHoldout count-based time split (newest held out)', () => {
+    const tips = Array.from({ length: 10 }, (_, i) => ({
+      created_at: `2026-01-${String(i + 1).padStart(2, '0')}`,
+      p_model: 0.6, p_implied: 0.5, odd: 2.0, result: 'win',
+    }));
+    const r = backtestShrinkHoldout(tips, { holdout: 0.3, minFitN: 1, minTestN: 1 });
+    t.assert(r.nTotal === 10 && r.nTrain === 7 && r.nTest === 3, JSON.stringify(r));
+  });
+
+  // TRAIN: shrink=0 drops overconfident losers (EV→0) keeping the genuine winners
+  // (ROI +100 > s=1 ROI 0). Input passed newest-first to prove internal time-sort.
+  const _hoTrain = [
+    { created_at: '2026-01-01', p_model: 0.80, p_implied: 0.50, odd: 2.0, result: 'loss' },
+    { created_at: '2026-01-02', p_model: 0.60, p_implied: 0.55, odd: 2.0, result: 'win' },
+    { created_at: '2026-01-03', p_model: 0.80, p_implied: 0.50, odd: 2.0, result: 'loss' },
+    { created_at: '2026-01-04', p_model: 0.60, p_implied: 0.55, odd: 2.0, result: 'win' },
+  ];
+  t.test('backtestShrinkHoldout OOS: train-best shrink validated on held-out test', () => {
+    const test = [ // at s=0 the loser is filtered, the winner kept → +100 vs baseline 0
+      { created_at: '2026-02-01', p_model: 0.80, p_implied: 0.50, odd: 2.0, result: 'loss' },
+      { created_at: '2026-02-02', p_model: 0.60, p_implied: 0.55, odd: 2.0, result: 'win' },
+    ];
+    const r = backtestShrinkHoldout([...test, ..._hoTrain], { holdout: 1 / 3, minEv: 8, minFitN: 1, minTestN: 1 });
+    t.assert(r.train.bestShrink === 0, `train ${JSON.stringify(r.train)}`);
+    t.assert(r.test.atBest.roi === 100 && r.test.baseline.roi === 0, JSON.stringify(r.test));
+    t.assert(r.deltaOos === 100 && r.holds === true, JSON.stringify(r));
+  });
+  t.test('backtestShrinkHoldout catches overfit: train-best fails OOS → holds=false', () => {
+    const test = [ // at s=0 the survivor (EV 10%) LOSES; the filtered one would have won
+      { created_at: '2026-02-01', p_model: 0.60, p_implied: 0.55, odd: 2.0, result: 'loss' },
+      { created_at: '2026-02-02', p_model: 0.80, p_implied: 0.50, odd: 2.0, result: 'win' },
+    ];
+    const r = backtestShrinkHoldout([...test, ..._hoTrain], { holdout: 1 / 3, minEv: 8, minFitN: 1, minTestN: 1 });
+    t.assert(r.train.bestShrink === 0, JSON.stringify(r.train));
+    t.assert(r.test.atBest.roi === -100 && r.test.baseline.roi === 0, JSON.stringify(r.test));
+    t.assert(r.deltaOos === -100 && r.holds === false, JSON.stringify(r));
+  });
+  t.test('backtestShrinkHoldout insufficient test sample → holds=false, reason set', () => {
+    const r = backtestShrinkHoldout([
+      { created_at: '2026-01-01', p_model: 0.6, p_implied: 0.5, odd: 2.0, result: 'win' },
+      { created_at: '2026-01-02', p_model: 0.6, p_implied: 0.5, odd: 2.0, result: 'win' },
+    ], { holdout: 0.3, minFitN: 1, minTestN: 1 });
+    t.assert(r.holds === false && r.reason === 'insufficient_data', JSON.stringify(r));
   });
 };
