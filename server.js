@@ -15697,6 +15697,11 @@ setInterval(load, 60000);
         deploy_id: process.env.RAILWAY_DEPLOYMENT_ID || 'unknown',
         commit_message: process.env.RAILWAY_GIT_COMMIT_MESSAGE || null,
         deployed_at: process.env.RAILWAY_DEPLOYMENT_CREATED_AT || null,
+        // 2026-05-30: identidade do service Railway — confirma EM QUAL service/environment
+        // o bot roda, pra setar envs (<SPORT>_SHADOW etc) no alvo certo (não em service irmão).
+        railway_service: process.env.RAILWAY_SERVICE_NAME || 'unknown',
+        railway_environment: process.env.RAILWAY_ENVIRONMENT_NAME || 'unknown',
+        railway_project: process.env.RAILWAY_PROJECT_NAME || 'unknown',
       };
 
       // 2026-05-17 — per-sport auto-promote overrides (A: WINDOW_DAYS_<SPORT>,
