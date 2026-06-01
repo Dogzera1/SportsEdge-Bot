@@ -1264,6 +1264,15 @@ button { cursor: pointer; }
   display: none;
 }
 .dl-error.visible { display: block; }
+.dl-gp-odds,.dl-gp-phases,.dl-gp-wc{margin-top:10px;padding-top:8px;border-top:1px solid #1a2a3a}
+.dl-gp-h{color:#5a7a9a;font-size:11px;letter-spacing:1px;margin-bottom:4px}
+.dl-gp-row{font-family:monospace;font-size:13px;line-height:1.6}
+.dl-gp-measured{color:#cfe}.dl-gp-est{color:#9ab}.dl-gp-badge{color:#789;font-style:italic}
+.dl-gp-note{color:#678;font-size:11px}
+.dl-gp-edgewrap{margin-top:4px}.dl-gp-bookodds{width:90px;background:#0a1520;border:1px solid #1a2a3a;color:#cfe;padding:2px 6px}
+.dl-gp-edge{margin-left:8px;color:#7c9}
+.dl-gp-quality{margin-top:8px;color:#678;font-size:11px}
+.dl-gp-warn{margin-top:4px;color:#a86;font-size:11px}
 </style>
 </head>
 <body>
@@ -2183,6 +2192,59 @@ function dlRenderMatchResult(data, team1, team2) {
       )
     );
   }
+  dlRenderGameProfile(root, data, team1, team2);
+}
+
+function dlRenderGameProfile(root, data, team1, team2) {
+  const gp = data.gameProfile;
+  if (!gp) return;
+  const sideName = (w) => (w === 'blue' ? (team1 || 'Azul') : (team2 || 'Vermelho'));
+  const bar = (n) => '▰'.repeat(Math.max(0, n)) + '▱'.repeat(Math.max(0, 5 - n));
+
+  // Fair odds + edge input
+  const odds = el('div', { class: 'dl-gp-odds' },
+    el('span', {}, `Odd justa: ${team1 || 'T1'} ${gp.fairOdds.team1}  ·  ${team2 || 'T2'} ${gp.fairOdds.team2}`));
+  const edgeOut = el('span', { class: 'dl-gp-edge' }, gp.edge != null ? `edge: ${(gp.edge * 100).toFixed(1)}%` : '');
+  const input = el('input', { type: 'number', step: '0.01', min: '1.01', placeholder: 'odd da casa', class: 'dl-gp-bookodds' });
+  input.addEventListener('input', () => {
+    const o = parseFloat(input.value);
+    if (o > 1 && typeof data.prob === 'number') {
+      const e = data.prob * o - 1;
+      edgeOut.textContent = `edge: ${(e * 100).toFixed(1)}%  (modelo é leitura, não recomendação)`;
+    } else { edgeOut.textContent = ''; }
+  });
+  odds.appendChild(el('div', { class: 'dl-gp-edgewrap' }, input, edgeOut));
+  root.appendChild(odds);
+
+  // Phases
+  if (gp.phases) {
+    const ph = el('div', { class: 'dl-gp-phases' }, el('div', { class: 'dl-gp-h' }, 'QUEM DOMINA CADA FASE'));
+    const earlyAnchor = gp.phases.early.anchor;
+    ph.appendChild(el('div', { class: 'dl-gp-row dl-gp-measured' },
+      `EARLY  ${bar(gp.phases.early.bars)}  ${gp.phases.early.winner === 'even' ? '—' : sideName(gp.phases.early.winner)}`,
+      el('span', { class: 'dl-gp-note' }, ` medido · ${earlyAnchor.golddiff15 >= 0 ? '+' : ''}${earlyAnchor.golddiff15}g, ${earlyAnchor.xpdiff15 >= 0 ? '+' : ''}${earlyAnchor.xpdiff15}xp @15`)));
+    ph.appendChild(el('div', { class: 'dl-gp-row dl-gp-est' },
+      `MID    ${bar(gp.phases.mid.bars)}  ${gp.phases.mid.winner === 'even' ? '—' : sideName(gp.phases.mid.winner)}`,
+      el('span', { class: 'dl-gp-note' }, ' estimativa')));
+    ph.appendChild(el('div', { class: 'dl-gp-row dl-gp-badge' },
+      el('span', { class: 'dl-gp-note' }, `LATE · ${gp.phases.late.winner === 'even' ? 'equilibrado' : 'leve vantagem ' + sideName(gp.phases.late.winner)} ~ (scaling, sinal fraco)`)));
+    root.appendChild(ph);
+  }
+
+  // Win condition + style + time
+  if (gp.winCondition) {
+    const wc = el('div', { class: 'dl-gp-wc' }, el('div', { class: 'dl-gp-h' }, 'COMO O JOGO TENDE A SER'));
+    if (gp.expectedTime) wc.appendChild(el('div', {}, `• Tempo esperado: ${gp.expectedTime.bucket} (~${Math.round(gp.expectedTime.seconds / 60)} min)`));
+    if (gp.compStyle) wc.appendChild(el('div', {}, `• Estilo: ${team1 || 'Azul'} ${gp.compStyle.blue.style} · ${team2 || 'Vermelho'} ${gp.compStyle.red.style}`));
+    wc.appendChild(el('div', {}, `• ${gp.winCondition}`));
+    root.appendChild(wc);
+  }
+
+  // Quality
+  const q = gp.quality;
+  const qtxt = `QUALIDADE: ${q.knownChamps}/${q.totalChamps} campeões · ${q.tier}` + (q.warnings.length ? ` · ⚠ ${q.warnings.join(', ')}` : '');
+  root.appendChild(el('div', { class: 'dl-gp-quality' }, qtxt));
+  root.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ draft é sinal fraco — leitura, não ordem de aposta'));
 }
 
 // Shared by the file picker and Ctrl+V paste — downscales the image, then runs the vision parse.
