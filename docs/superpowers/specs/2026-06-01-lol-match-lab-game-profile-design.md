@@ -95,7 +95,8 @@ Gerado por `train-lol-champion-timing.js`:
 - **early_edge** = `mean(golddiff15_blue) − mean(golddiff15_red)` (com xp/cs como âncora secundária exibida). **measured = true**.
 - **late_edge** = `mean(scaling.index_blue) − mean(scaling.index_red)`. **measured = false** (estimativa).
 - **mid_edge** = `(early_edge_norm + late_edge_norm) / 2` — transição, **menor confiança**, rotulada.
-- Cada fase → `winner ∈ {blue, red, even}` (banda morta perto de 0 = "even"), magnitude normalizada para a barra (0–5 blocos), e `confidence` derivada da amostra (n dos lookups) + (para late) penalidade fixa de estimativa.
+- Cada fase → `winner ∈ {blue, red, even}` (banda morta perto de 0 = "even"), magnitude normalizada (0–5), e `confidence` derivada da amostra (n dos lookups) + (para late) penalidade fixa de estimativa.
+- **Tratamento visual proporcional à confiança** (decisão 01/06): **early** = barra cheia em destaque (medido); **mid** = barra esmaecida (estimativa/transição); **late** = **selo discreto de texto, sem barra** (ex.: "leve vantagem X ~") — o scaling é o número mais ruidoso (viés de stomp), então não recebe o mesmo peso visual das outras fases. O payload (§7) carrega os mesmos campos para as três; a diferença é só de render.
 - Âncora exibida no early: o `golddiff15`/`xpdiff15` agregado do lado favorecido (ex.: "+340g, +1.2k xp @15").
 
 ### 6.3 Tempo esperado & win condition
@@ -175,7 +176,7 @@ Se não houver draft (só times): `gameProfile.phases`/`compStyle` = null com me
 │ QUEM DOMINA CADA FASE                                    │
 │ EARLY  ▰▰▰▰▱  T1       medido · +340g, +1.2k xp @15     │
 │ MID    ▰▰▰▱▱  T1       estimativa                        │
-│ LATE   ▰▰▱▱▱  Gen.G ~  tendência (sinal fraco)          │
+│ LATE   · leve vantagem Gen.G ~  (scaling, sinal fraco)  │
 ├─────────────────────────────────────────────────────────┤
 │ COMO O JOGO TENDE A SER                                  │
 │ • Tempo esperado: médio (~32 min)                       │
