@@ -5346,7 +5346,34 @@ const server = http.createServer(async (req, res) => {
           draft,
           league: json?.league || null,
         });
-        sendJson(res, { ok: true, ...out });
+
+        // Display-only game-profile enrichment (phases/odds/win-condition/quality).
+        // Graceful: any failure (e.g. missing artifact) -> gameProfile null, base payload intact.
+        let gameProfile = null;
+        try {
+          const { computeGameProfile } = require('./lib/lol-game-profile');
+          let laneMatchups = [], knownChamps = 0, totalChamps = 10;
+          if (draft) {
+            const { computeDraftWinProb } = require('./lib/lol-draft-model');
+            const d = computeDraftWinProb(draft);
+            laneMatchups = d.breakdown.laneMatchups;
+            knownChamps = d.breakdown.knownChamps;
+            totalChamps = d.breakdown.totalChamps;
+          }
+          const bookOdds = (typeof json?.bookOdds === 'number') ? json.bookOdds : null;
+          gameProfile = computeGameProfile({
+            draft,
+            probTeam1: out.prob,
+            bookOdds,
+            eloConfidence: (out.components && out.components.elo) ? out.components.elo.confidence : 0,
+            laneMatchups, knownChamps, totalChamps,
+          });
+        } catch (e) {
+          log('WARN', 'MATCH-LAB', `game-profile err: ${e.message}`);
+          gameProfile = null;
+        }
+
+        sendJson(res, { ok: true, ...out, gameProfile });
       } catch (e) {
         log('WARN', 'MATCH-LAB', `match-analyze err: ${e.message}`);
         sendJson(res, { ok: false, error: 'match_analyze_failed' }, 500);
