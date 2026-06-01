@@ -1053,6 +1053,18 @@ button { cursor: pointer; }
   display: none;
 }
 #draftLab.open { display: block; }
+
+/* ── Dota Lab ────────────────────────────────────────────────────────── */
+#dotaLab {
+  position: fixed; top: 56px; left: 0; right: 0; bottom: 0;
+  z-index: 40;
+  overflow-y: auto;
+  background: var(--bg-deep);
+  padding: var(--pad-5) var(--pad-6);
+  display: none;
+}
+#dotaLab.open { display: block; }
+.dota-hero { width: 100%; margin-bottom: 4px; }
 .dl-paste-hint {
   font-family: var(--font-mono); font-size: 10px;
   color: var(--ink-mute); letter-spacing: 0.04em; text-align: center;
@@ -1303,6 +1315,7 @@ button { cursor: pointer; }
     <button class="btn" id="refreshBtn">↻ Refresh</button>
     <button class="btn primary" id="autoBtn">Auto 5s</button>
     <button class="btn" id="draftLabBtn" onclick="toggleDraftLab()">⚗ Draft Lab</button>
+    <button class="btn" id="dotaLabBtn" onclick="toggleDotaLab()">⚗ Dota Lab</button>
   </div>
 </header>
 
@@ -1345,6 +1358,33 @@ button { cursor: pointer; }
     </div>
   </aside>
 
+</div>
+
+<!-- ── Dota Lab ───────────────────────────────────────────────── -->
+<div id="dotaLab">
+  <div class="dl-header">
+    <span class="dl-title">Dota Lab</span>
+    <span class="dl-subtitle">times + heróis — win% calibrado com Elo e draft</span>
+    <button class="btn" onclick="toggleDotaLab(false)" style="margin-left:auto;">✕ fechar</button>
+  </div>
+  <datalist id="dotaTeamList"></datalist>
+  <datalist id="dotaHeroList"></datalist>
+  <div class="dl-body">
+    <div class="dl-team" id="dotaBlueTeamCol">
+      <div class="dl-team-label blue">Blue Side</div>
+      <input class="dl-team-input" id="dota_blueTeam" list="dotaTeamList" placeholder="Time (azul)" autocomplete="off">
+      <div id="dotaBlueHeroes"></div>
+    </div>
+    <div class="dl-team" id="dotaRedTeamCol">
+      <div class="dl-team-label red">Red Side</div>
+      <input class="dl-team-input" id="dota_redTeam" list="dotaTeamList" placeholder="Time (vermelho)" autocomplete="off">
+      <div id="dotaRedHeroes"></div>
+    </div>
+    <div class="dl-actions">
+      <button class="btn primary" id="dotaAnalyzeBtn">Analisar partida</button>
+    </div>
+  </div>
+  <div id="dotaResult" style="margin-top: var(--pad-4);"></div>
 </div>
 
 <!-- ── Draft Lab ───────────────────────────────────────────────── -->
@@ -2408,7 +2448,7 @@ document.addEventListener('paste', (e) => {
   }
 });
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') toggleDraftLab(false); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { toggleDraftLab(false); toggleDotaLab(false); } });
 
 // Populate team autocomplete from /api/lol-teams
 fetch('/api/lol-teams').then(r => r.json()).then(d => {
@@ -2422,6 +2462,69 @@ fetch('/api/lol-teams').then(r => r.json()).then(d => {
     dl.appendChild(o);
   }
 }).catch(() => {});
+
+// ── Dota Lab ─────────────────────────────────────────────────────────
+function toggleDotaLab(force) {
+  const lab = document.getElementById('dotaLab');
+  if (!lab) return;
+  const open = typeof force === 'boolean' ? force : !lab.classList.contains('open');
+  lab.classList.toggle('open', open);
+  if (open) { toggleDraftLab(false); }
+}
+
+(function initDotaLab() {
+  for (const side of ['Blue', 'Red']) {
+    const c = document.getElementById('dota' + side + 'Heroes');
+    for (let i = 0; i < 5; i++) c.appendChild(el('input', { type: 'text', list: 'dotaHeroList', placeholder: side === 'Blue' ? 'Herói azul' : 'Herói vermelho', autocomplete: 'off', class: 'dota-hero', 'data-side': side.toLowerCase() }));
+  }
+  fetch('/api/dota-teams').then(r => r.json()).then(d => { if (d.ok) document.getElementById('dotaTeamList').innerHTML = d.teams.map(t => `<option value="${t.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
+  fetch('/api/dota-heroes').then(r => r.json()).then(d => { if (d.ok) document.getElementById('dotaHeroList').innerHTML = d.heroes.map(h => `<option value="${h.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
+  document.getElementById('dotaAnalyzeBtn').addEventListener('click', dotaAnalyze);
+})();
+
+function dotaCollect() {
+  const grab = (id) => [...document.getElementById(id).querySelectorAll('.dota-hero')].map(i => i.value.trim()).filter(Boolean);
+  return { team1: (document.getElementById('dota_blueTeam').value || '').trim() || null, team2: (document.getElementById('dota_redTeam').value || '').trim() || null, blue: grab('dotaBlueHeroes'), red: grab('dotaRedHeroes') };
+}
+
+async function dotaAnalyze() {
+  const c = dotaCollect();
+  if (!c.team1 && !c.team2 && !c.blue.length && !c.red.length) { document.getElementById('dotaResult').textContent = 'Informe times e/ou heróis.'; return; }
+  const root = document.getElementById('dotaResult'); root.innerHTML = 'analisando…';
+  try {
+    const r = await fetch('/api/dota-match-analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...c, side: 'blue' }) });
+    const d = await r.json();
+    if (!d.ok) { root.textContent = 'Falha na análise.'; return; }
+    dotaRender(root, d, c);
+  } catch (e) { root.textContent = 'Falha: ' + e.message; }
+}
+
+function dotaRender(root, d, c) {
+  root.innerHTML = '';
+  const pct = (d.prob * 100).toFixed(1);
+  root.appendChild(el('div', { class: 'dl-gp-row' }, `P(${c.team1 || 'Azul'} vence): ${pct}%  ·  ${d.label}`));
+  root.appendChild(el('div', { class: 'dl-gp-row' }, `Odd justa: ${c.team1 || 'Azul'} ${d.fairOdds.team1} · ${c.team2 || 'Vermelho'} ${d.fairOdds.team2}${d.edge != null ? '  ·  edge: ' + (d.edge * 100).toFixed(1) + '%' : ''}`));
+  if (d.components.elo) root.appendChild(el('div', { class: 'dl-gp-note' }, `Elo: ${d.components.elo.ratingBlue} vs ${d.components.elo.ratingRed}`));
+  if (d.components.draft) root.appendChild(el('div', { class: 'dl-gp-note' }, `Força de draft (WR): azul ${(d.components.draft.blueWR * 100).toFixed(1)}% vs vermelho ${(d.components.draft.redWR * 100).toFixed(1)}%`));
+  const aiOut = el('div', { class: 'dl-ai-out' });
+  const aiBtn = el('button', { class: 'dl-ai-btn' }, '🤖 Análise da IA');
+  aiBtn.addEventListener('click', () => dotaExplain(aiBtn, aiOut, c));
+  root.appendChild(el('div', { class: 'dl-gp-ai' }, aiBtn, aiOut));
+  root.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ display-only — não é sinal; draft = leitura da IA (pode não refletir o patch)'));
+}
+
+async function dotaExplain(btn, outEl, c) {
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'analisando…'; outEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/dota-match-explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...c, side: 'blue' }) });
+    const d = await r.json();
+    if (!d.ok) { outEl.textContent = d.error === 'daily_cap_reached' ? 'Limite diário atingido.' : d.error === 'vision_disabled' ? 'IA indisponível.' : 'Falha.'; return; }
+    if (d.analysis) { [['VISÃO', d.analysis.overview], ['DRAFT', d.analysis.draftRead], ['HERÓIS-CHAVE', d.analysis.keyHeroes], ['VEREDITO', d.analysis.verdict]].forEach(([k, v]) => { if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v))); }); }
+    else if (d.raw) outEl.appendChild(el('div', { class: 'dl-ai-raw' }, d.raw));
+    outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
+  } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
 
 // initial
 startPolling();
