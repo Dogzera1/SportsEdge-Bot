@@ -93,4 +93,21 @@ module.exports = function(t) {
     const s = gp.winCondition({ early: { winner: 'even' }, late: { winner: 'even' } });
     assert.ok(/equilibrad/.test(s), `got "${s}"`);
   });
+  t.test('compStyle: two assassins -> pick', () => {
+    const c = gp.compStyle([{ champion: 'Zed', role: 'mid' }, { champion: 'Talon', role: 'jng' }], ART.tags);
+    assert.strictEqual(c.style, 'pick', `got ${c.style}`);
+    assert.ok(c.confidence <= 0.6, 'qualitative confidence capped');
+  });
+  t.test('compStyle: frontline + mage -> teamfight', () => {
+    const c = gp.compStyle([{ champion: 'Aatrox' }, { champion: 'Gnar' }, { champion: 'Orianna' }], ART.tags);
+    assert.strictEqual(c.style, 'teamfight', `got ${c.style}`);
+  });
+  t.test('compStyle: no trigger -> balanceado', () => {
+    const c = gp.compStyle([{ champion: 'Jinx' }], ART.tags);
+    assert.strictEqual(c.style, 'balanceado', `got ${c.style}`);
+  });
+  t.test('compStyle: unknown champ ignored, lowers confidence', () => {
+    const c = gp.compStyle([{ champion: 'Nonexistent' }], ART.tags);
+    assert.ok(c.confidence < 0.3, 'unknown -> low confidence');
+  });
 };
