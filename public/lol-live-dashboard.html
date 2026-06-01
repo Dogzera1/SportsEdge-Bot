@@ -1045,9 +1045,17 @@ button { cursor: pointer; }
 
 /* ── Draft Lab ───────────────────────────────────────────────────────── */
 #draftLab {
-  border-top: 1px solid var(--border);
+  position: fixed; top: 56px; left: 0; right: 0; bottom: 0;
+  z-index: 40;
+  overflow-y: auto;
   background: var(--bg-deep);
   padding: var(--pad-5) var(--pad-6);
+  display: none;
+}
+#draftLab.open { display: block; }
+.dl-paste-hint {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--ink-mute); letter-spacing: 0.04em; text-align: center;
 }
 .dl-header {
   display: flex; align-items: baseline; gap: 12px;
@@ -1247,6 +1255,7 @@ button { cursor: pointer; }
     <span class="meta-item"><span class="meta-label">updated</span><span class="meta-val" id="lastUpdate">—</span></span>
     <button class="btn" id="refreshBtn">↻ Refresh</button>
     <button class="btn primary" id="autoBtn">Auto 5s</button>
+    <button class="btn" id="draftLabBtn" onclick="toggleDraftLab()">⚗ Draft Lab</button>
   </div>
 </header>
 
@@ -1296,6 +1305,7 @@ button { cursor: pointer; }
   <div class="dl-header">
     <span class="dl-title">Draft Lab</span>
     <span class="dl-subtitle">análise exploratória de draft — pick 5 blue + 5 red</span>
+    <button class="btn" onclick="toggleDraftLab(false)" style="margin-left:auto;">✕ fechar</button>
   </div>
   <div class="dl-body">
     <!-- Blue side -->
@@ -1311,9 +1321,10 @@ button { cursor: pointer; }
     <div class="dl-actions">
       <button class="btn primary" id="dlAnalyzeBtn" onclick="dlAnalyze()">Analisar draft</button>
       <label class="btn" style="cursor:pointer; text-align:center;">
-        📷 colar print
+        📷 enviar print
         <input type="file" id="dlPrintInput" accept="image/*" style="display:none" onchange="dlParsePrint(this)">
       </label>
+      <span class="dl-paste-hint">ou Ctrl+V pra colar</span>
       <div class="dl-print-msg" id="dlPrintMsg"></div>
       <div class="dl-error" id="dlError"></div>
     </div>
@@ -2050,15 +2061,15 @@ async function dlAnalyze() {
   }
 }
 
-async function dlParsePrint(input) {
-  const file = input.files[0];
+// Shared by the file picker and Ctrl+V paste — takes a File/Blob image and runs the vision parse.
+async function dlSubmitPrintFile(file) {
   if (!file) return;
   dlSetError(null);
   dlSetPrintMsg(null);
 
   const reader = new FileReader();
   reader.onload = async (ev) => {
-    const imageBase64 = ev.target.result; // data:image/png;base64,...
+    const imageBase64 = ev.target.result; // data:image/...;base64,...
     dlSetPrintMsg('Processando print…');
     try {
       const r = await fetch('/api/lol-draft-parse-print', {
@@ -2102,9 +2113,37 @@ async function dlParsePrint(input) {
     }
   };
   reader.readAsDataURL(file);
-  // reset so same file can be re-uploaded
-  input.value = '';
 }
+
+function dlParsePrint(input) {
+  dlSubmitPrintFile(input.files[0]);
+  input.value = ''; // reset so the same file can be re-uploaded
+}
+
+// Show/hide the Draft Lab overlay (it sits above the fixed terminal layout).
+function toggleDraftLab(force) {
+  const lab = document.getElementById('draftLab');
+  if (!lab) return;
+  const open = (force === undefined) ? !lab.classList.contains('open') : !!force;
+  lab.classList.toggle('open', open);
+  const btn = document.getElementById('draftLabBtn');
+  if (btn) btn.classList.toggle('primary', open);
+}
+
+// Ctrl+V a draft screenshot straight into the lab (only while it's open) — same path as the picker.
+document.addEventListener('paste', (e) => {
+  const lab = document.getElementById('draftLab');
+  if (!lab || !lab.classList.contains('open')) return;
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  for (const it of items) {
+    if (it.type && it.type.indexOf('image/') === 0) {
+      const blob = it.getAsFile();
+      if (blob) { e.preventDefault(); dlSubmitPrintFile(blob); return; }
+    }
+  }
+});
+
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') toggleDraftLab(false); });
 
 // initial
 startPolling();
