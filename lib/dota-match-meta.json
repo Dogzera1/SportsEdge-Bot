@@ -1,0 +1,26 @@
+{
+  "game": "dota2",
+  "level": "match",
+  "predicts": "P(team1 wins)",
+  "eloConfig": {
+    "kBase": 32,
+    "kMin": 10,
+    "kScale": 40,
+    "halfLifeDays": 0,
+    "confidenceScale": 20,
+    "confidenceFloor": 5
+  },
+  "trainedAt": "2026-06-01T19:36:16.707Z",
+  "n": 35868,
+  "walkForward": {
+    "trainN": 25107,
+    "testN": 10761
+  },
+  "baseRate": 0.523878,
+  "oos": {
+    "baselineBrier": 0.249441,
+    "eloRawBrier": 0.235295,
+    "eloRawEce": 0.02121,
+    "beatsBaseline": true
+  }
+}
