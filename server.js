@@ -5396,6 +5396,64 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Match Lab — AI match reading (display-only). Sonnet explains the game-profile; never feeds stake.
+  if (p === '/api/lol-match-explain' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled', tip: 'set ANTHROPIC_API_KEY' }, 503); return; }
+        const json = safeParse(body, null);
+        const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
+          ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
+        if (!json?.team1 && !json?.team2 && !draft) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
+
+        // Daily cap per (IP, day). Reserve BEFORE the paid call so failures count (anti-abuse).
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
+        const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const usedN = _amap.get(dayKey) || 0;
+        if (usedN >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        _amap.set(dayKey, usedN + 1);
+
+        const { predictMatch } = require('./lib/lol-match-predict');
+        const { computeGameProfile } = require('./lib/lol-game-profile');
+        const { computeDraftWinProb } = require('./lib/lol-draft-model');
+        const { buildExplainPrompt, parseExplainResponse } = require('./lib/lol-match-explain');
+
+        const side = json?.side === 'red' ? 'red' : 'blue';
+        const out = predictMatch(db, { team1: json?.team1 || null, team2: json?.team2 || null, side, draft, league: json?.league || null });
+        let laneMatchups = [], knownChamps = 0, totalChamps = 10;
+        if (draft) { const d = computeDraftWinProb(draft); laneMatchups = d.breakdown.laneMatchups; knownChamps = d.breakdown.knownChamps; totalChamps = d.breakdown.totalChamps; }
+        const bookOdds = (typeof json?.bookOdds === 'number') ? json.bookOdds : null;
+        const gameProfile = computeGameProfile({ draft, probTeam1: out.prob, bookOdds,
+          eloConfidence: (out.components && out.components.elo) ? out.components.elo.confidence : 0,
+          laneMatchups, knownChamps, totalChamps });
+
+        const teams = { blue: side === 'blue' ? (json?.team1 || null) : (json?.team2 || null),
+                        red:  side === 'blue' ? (json?.team2 || null) : (json?.team1 || null) };
+        const prompt = buildExplainPrompt({ gameProfile, draft, teams, probPct: Math.round(out.probBlue * 100), label: out.label });
+        const model = process.env.AI_ANALYSIS_MODEL || 'claude-sonnet-4-5';
+        const payload = { model, max_tokens: 700, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] };
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages', payload,
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const analysis = parseExplainResponse(text);
+        if (analysis) sendJson(res, { ok: true, analysis });
+        else if (text && text.trim()) sendJson(res, { ok: true, analysis: null, raw: text.slice(0, 1200) });
+        else sendJson(res, { ok: false, error: 'ai_failed' }, 500);
+      } catch (e) {
+        log('WARN', 'MATCH-LAB', `match-explain err: ${e.message}`);
+        sendJson(res, { ok: false, error: 'ai_failed' }, 500);
+      }
+    });
+    return;
+  }
+
   // Draft Lab — parse a draft screenshot into champions via Claude Haiku vision.
   // Dormant until ANTHROPIC_API_KEY is set in env. Result is for USER CONFIRMATION before analyze.
   if (p === '/api/lol-draft-parse-print' && req.method === 'POST') {
