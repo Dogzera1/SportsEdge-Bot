@@ -13,8 +13,9 @@ Um painel **"Dota Lab"** separado no `/edge` que prevê **P(time vence)** pré-j
 ## 2. Princípio — Elo validado, draft como leitura
 
 - O **prob** vem do **Elo** (calibrado e validado por backtest em `match_results` dota2). É o sinal forte e auditável.
-- O **draft** entra como **leitura separada** (força de draft blue vs red via winrate dos heróis), **NÃO** embutido no prob. Motivo: `match_results` de Dota não tem o draft histórico (heróis por jogo), então não dá pra validar um ajuste de draft num backtest — embuti-lo seria fabricar confiança. (Embutir = v2, exigiria ingerir draft histórico.)
-- A IA explica Elo + draft + heróis, instruída a ser medida e a não recomendar stake.
+- O **draft** entra como **leitura separada**, **NÃO** embutido no prob. Motivo: `match_results` de Dota não tem o draft histórico (heróis por jogo), então não dá pra validar um ajuste de draft num backtest — embuti-lo no número seria fabricar confiança. (Embutir = v2, exigiria draft histórico.)
+- A **leitura qualitativa do draft é feita pela própria IA** (Sonnet), usando o **conhecimento dela sobre Dota** (sinergias, counters, win conditions, power spikes) — já que não temos matchup/synergy no banco. Exibimos também a **força de draft objetiva** (WR agregado via `getDraftMatchupFactor`) como número de apoio.
+- **Limite de honestidade:** a IA NÃO inventa nem altera o **prob** (esse é só o Elo). A análise de draft pela IA é **conhecimento geral** e vem rotulada — *pode não refletir o patch atual* (o meta de Dota muda por patch; o conhecimento do modelo tem cutoff). A IA é instruída a não recomendar stake.
 
 ## 3. Não-objetivos
 
@@ -91,8 +92,8 @@ Overlay próprio (botão `⚗ Dota Lab` na topbar do `/edge`), estilo do Match L
 
 ## 10. Análise da IA (`dota-match-explain.js`)
 
-Prompt entrega os dados reais: P(blue) do Elo + ratings, odd justa/edge, força de draft (blueWR/redWR/high-priority), heróis dos dois lados. Pede JSON com seções adaptadas a Dota:
-`{"overview","draftRead","keyHeroes","verdict"}` (4 seções — sem early/mid/late nem tempo de jogo, que não temos no banco). Mesmas regras: PT-BR, medido (Elo domina, draft é leitura agregada), **não recomende stake**, não invente. Parse com fallback `raw` (reusa `parseExplainResponse` se a forma casar; senão valida as 4 chaves).
+Prompt entrega os dados reais (P(blue) do Elo + ratings, odd justa/edge, força de draft WR, heróis dos dois lados) **E autoriza a IA a usar o conhecimento próprio dela sobre Dota** (sinergias, counters, win conditions, power spikes, timings dos heróis) pra a leitura do draft — já que não temos esses dados no banco. Pede JSON com seções adaptadas a Dota:
+`{"overview","draftRead","keyHeroes","verdict"}` (4 seções — sem early/mid/late nem tempo de jogo, que não temos no banco). Regras: o **prob é o Elo** (a IA não inventa nem altera o número; o `verdict` se apoia no Elo/odd justa); a leitura de draft pode usar o conhecimento da IA, mas o painel marca essa parte como **conhecimento geral da IA — pode não refletir o patch atual**; PT-BR; **não recomende stake**. Parse com fallback `raw` (reusa `parseExplainResponse` se a forma casar; senão valida as 4 chaves).
 
 ## 11. Edge cases
 - Sem times → prob 0.5, label 'lean fraco' (sem Elo).
