@@ -6,6 +6,9 @@
 // Task 6 — GAME-LEVEL blend fit: predicts P(blue side wins) for a single game,
 //          blending as-of Elo + as-of form + draft, then isotonic-calibrates.
 //          The series-level replay above stays as validation evidence.
+// Task 7 — SHIP DECISION: form DROPPED (hurts OOS, elo+form Brier > elo-only).
+//          Final blend = Elo + capped draft.  SHIP model written to lib/lol-match-meta.json.
+//          Form retained in ablation display (informational) and available for breakdown UI.
 //
 // NO DATA LEAKAGE: getP() is called BEFORE rate() for every match; form is
 // computed as-of g.resolved_at (strictly prior matches only). Draft is pre-game
@@ -262,18 +265,26 @@ const cut = Math.floor(gSamples.length * 0.7);
 const train = gSamples.slice(0, cut);
 const test = gSamples.slice(cut);
 
-// ---- Fit logistic (strong l2 = anti-overfit, P3) ----
-let w = fitLogistic(train, { epochs: 600, lr: 0.1, l2: 0.05 });
+// ---- Fit 3-feature logistic (elo+form+draft) for ablation display only ----
+let wFull = fitLogistic(train, { epochs: 600, lr: 0.1, l2: 0.05 });
+// Cap draft weight on the 3-feat model (informational, not shipped).
+if (Math.abs(wFull[3]) > 0.5 * Math.abs(wFull[1])) {
+  wFull[3] = Math.sign(wFull[3]) * 0.5 * Math.abs(wFull[1]);
+}
+const predictFull = (s) => sigmoid(wFull[0] + wFull[1] * s.x[0] + wFull[2] * s.x[1] + wFull[3] * s.x[2]);
 
-// ---- Cap draft weight (it's the weak term; don't let it exceed half of Elo) ----
-const draftIdx = 3; // w = [bias, elo, form, draft]
+// ---- SHIP MODEL: refit with 2 features [elo, draft] — form dropped (hurts OOS) ----
+// Feature vector for ship: x = [ logit(pEloBlue), logit(pDraftBlue) or 0 ]
+const trainShip = train.map(s => ({ x: [s.x[0], s.x[2]], y: s.y }));
+let wShip = fitLogistic(trainShip, { epochs: 600, lr: 0.1, l2: 0.05 });
+// wShip = [bias, elo, draft]
+// Cap draft: if |w[2]| > 0.5*|w[1]|, clamp.
 let draftCapApplied = false;
-if (Math.abs(w[draftIdx]) > 0.5 * Math.abs(w[1])) {
-  w[draftIdx] = Math.sign(w[draftIdx]) * 0.5 * Math.abs(w[1]);
+if (Math.abs(wShip[2]) > 0.5 * Math.abs(wShip[1])) {
+  wShip[2] = Math.sign(wShip[2]) * 0.5 * Math.abs(wShip[1]);
   draftCapApplied = true;
 }
-
-const predictFull = (s) => sigmoid(w[0] + w[1] * s.x[0] + w[2] * s.x[1] + w[3] * s.x[2]);
+const predictShip = (s) => sigmoid(wShip[0] + wShip[1] * s.x[0] + wShip[2] * s.x[2]);
 
 // ---- Standalone PAV isotonic on TRAIN ----
 // NOTE: lib/calibration.js already has PAV, but it is DB-coupled (reads
@@ -318,49 +329,71 @@ function fitIsotonicPav(samples, nBins = 12) {
   return arr.map(b => ({ pMin: +b.pMin.toFixed(6), pMax: +b.pMax.toFixed(6), yMean: +b.yMean.toFixed(6), n: b.n }));
 }
 
-const trainCalSamples = train.map(s => ({ p: predictFull(s), y: s.y }));
-let blocks = fitIsotonicPav(trainCalSamples);
+// ---- Isotonic calibration fit on SHIP model (elo+draft) ----
+const trainShipCalSamples = train.map(s => ({ p: predictShip(s), y: s.y }));
+let blocks = fitIsotonicPav(trainShipCalSamples);
 
-// Apply calibration on TEST; keep ONLY if it improves OOS Brier.
-const testFull = test.map(s => ({ p: predictFull(s), y: s.y }));
-const testCalib = test.map(s => ({ p: _applyIsotonicBlocks(blocks, predictFull(s)), y: s.y }));
-const brierFull = M.brier(testFull);
-const brierCalib = blocks.length ? M.brier(testCalib) : Infinity;
-let keptOOS = blocks.length > 0 && brierCalib < brierFull;
+// Apply calibration on TEST; keep ONLY if it improves OOS Brier for the SHIP model.
+const testShip = test.map(s => ({ p: predictShip(s), y: s.y }));
+const testShipCalib = test.map(s => ({ p: _applyIsotonicBlocks(blocks, predictShip(s)), y: s.y }));
+const brierShip = M.brier(testShip);
+const brierShipCalib = blocks.length ? M.brier(testShipCalib) : Infinity;
+let keptOOS = blocks.length > 0 && brierShipCalib < brierShip;
 if (!keptOOS) blocks = [];
 
 // ---- Ablation on TEST ----
 const baseG = M.blueSideBaseline(test);
-const eloOnly = test.map(s => ({ p: s.pEloBlue, y: s.y }));               // sigmoid(logit(pEloBlue)) === pEloBlue
-const eloForm = test.map(s => ({ p: sigmoid(w[0] + w[1] * s.x[0] + w[2] * s.x[1]), y: s.y })); // zero draft
-const fullBlend = testFull;
-const fullCalib = keptOOS ? testCalib : testFull;
+const eloOnly = test.map(s => ({ p: s.pEloBlue, y: s.y }));
+// elo+form: zero draft slot in 3-feat model.
+const eloForm = test.map(s => ({ p: sigmoid(wFull[0] + wFull[1] * s.x[0] + wFull[2] * s.x[1]), y: s.y }));
+const fullBlend3 = test.map(s => ({ p: predictFull(s), y: s.y }));
+// SHIP: elo+draft (no form).
+const shipTest = testShip;
+const shipCalib = keptOOS ? testShipCalib : testShip;
 
 const row = (label, smp, extra) => {
   const b = M.brier(smp), ll = M.logloss(smp), e = M.ece(smp);
-  console.log(`  ${label.padEnd(22)} Brier=${b.toFixed(4)}  logloss=${ll.toFixed(4)}  ECE=${e.toFixed(4)}${extra || ''}`);
+  console.log(`  ${label.padEnd(28)} Brier=${b.toFixed(4)}  logloss=${ll.toFixed(4)}  ECE=${e.toFixed(4)}${extra || ''}`);
 };
 
-console.log('\n=== GAME-LEVEL blend fit (Task 6 — P(blue wins)) ===');
+console.log('\n=== GAME-LEVEL blend fit (Tasks 6+7 — P(blue wins)) ===');
 console.log(`[game] samples n=${gSamples.length}  (train=${train.length} test=${test.length})`);
 console.log(`[game] draft join (conf>0.05): ${nDraftJoined}/${gSamples.length}   form join: ${nFormJoined}/${gSamples.length}`);
-console.log(`[game] weights w=[bias=${w[0].toFixed(4)}, elo=${w[1].toFixed(4)}, form=${w[2].toFixed(4)}, draft=${w[3].toFixed(4)}]  draftCapApplied=${draftCapApplied}`);
+console.log(`[game] 3-feat weights (ablation) w=[bias=${wFull[0].toFixed(4)}, elo=${wFull[1].toFixed(4)}, form=${wFull[2].toFixed(4)}, draft=${wFull[3].toFixed(4)}]`);
+console.log(`[game] SHIP weights (elo+draft)  wShip=[bias=${wShip[0].toFixed(4)}, elo=${wShip[1].toFixed(4)}, draft=${wShip[2].toFixed(4)}]  draftCapApplied=${draftCapApplied}`);
 console.log(`[game] blue-side base rate (test pStar)=${baseG.pStar.toFixed(4)}`);
 console.log('--- Ablation (TEST, last 30%) ---');
-row('(a) baseline', test.map(s => ({ p: baseG.pStar, y: s.y })), `  <- blue-side game base-rate`);
+row('(a) baseline', test.map(s => ({ p: baseG.pStar, y: s.y })), '  <- blue-side game base-rate');
 row('(b) elo-only', eloOnly);
 row('(c) elo+form', eloForm);
-row('(d) full blend', fullBlend);
-row('(e) full + calib', fullCalib, keptOOS ? '  [calib KEPT]' : '  [calib DROPPED — no OOS gain]');
-console.log(`[game] full blend beats base-rate OOS? ${M.brier(fullBlend) < baseG.brier ? 'YES' : 'NO'}`);
+row('(d) full 3-feat blend', fullBlend3);
+row('(e) elo+draft [SHIP]', shipTest, '  <- SHIP model (form dropped)');
+row('(f) elo+draft + calib', shipCalib, keptOOS ? '  [calib KEPT]' : '  [calib DROPPED — no OOS gain]');
+console.log(`[game] SHIP model (elo+draft) beats base-rate OOS? ${M.brier(shipTest) < baseG.brier ? 'YES' : 'NO'}`);
+console.log(`[game] form HURTS OOS? elo+form(${M.brier(eloForm).toFixed(4)}) > elo-only(${M.brier(eloOnly).toFixed(4)})? ${M.brier(eloForm) > M.brier(eloOnly) ? 'YES — form dropped correctly' : 'NO — review decision'}`);
 
-// ---- Write artifacts ----
+// ---- Write artifacts for SHIP model ----
+const oosBrier = M.brier(shipTest);
+const oosLogloss = M.logloss(shipTest);
+const oosEce = M.ece(shipTest);
+const baselineBrier = M.brier(test.map(s => ({ p: baseG.pStar, y: s.y })));
+const eloOnlyBrier = M.brier(eloOnly);
+
 fs.writeFileSync(path.join(__dirname, '..', 'lib', 'lol-match-meta.json'), JSON.stringify({
-  weights: w, featureOrder: ['elo', 'form', 'draft'], draftCapApplied,
+  weights: wShip, featureOrder: ['elo', 'draft'], draftCapApplied,
+  droppedFeatures: ['form'],
+  droppedReason: 'form hurts OOS (elo+form Brier > elo-only); kept in display breakdown as info only',
   trainedAt: new Date().toISOString(), n: gSamples.length,
   walkForward: { trainN: train.length, testN: test.length },
   eloConfig: ELO_CONFIG,
   level: 'game', predicts: 'P(blue wins)',
+  oos: {
+    baselineBrier: +baselineBrier.toFixed(6),
+    eloOnlyBrier: +eloOnlyBrier.toFixed(6),
+    shipBrier: +oosBrier.toFixed(6),
+    shipLogloss: +oosLogloss.toFixed(6),
+    shipEce: +oosEce.toFixed(6),
+  },
 }, null, 2));
 fs.writeFileSync(path.join(__dirname, '..', 'lib', 'lol-match-calib.json'),
   JSON.stringify({ method: 'isotonic_pav', blocks, keptOOS }, null, 2));

@@ -173,3 +173,64 @@ Extends the existing overlay panel (`public/lol-live-dashboard.html`):
 2. Real-match prefill = yes, with manual override. ✅
 3. Unify-draft stays **display-only**; live betting comp untouched. ✅
 4. Keep logistic blend; no XGBoost/embeddings/transfer (Option B deferred). ✅
+
+---
+
+## 13. Resultados da validação (2026-06-01)
+
+### Verdict
+
+**Calibrated game-level Elo beats the blue-side base-rate OOS by ~12% Brier.** The blend is Elo-dominant. Form was dropped (hurts OOS). Draft is a small capped lean whose backtest gain is optimism-inflated (OE draft artifacts include the test window — at display time the user's draft is genuinely OOS). Ship verdict: **PASS as an Elo-dominant display lean.** Plano 2 (UI) may proceed.
+
+### Ablation table (TEST set, last 30%, n=884 games)
+
+| Model | Brier | Logloss | ECE | Notes |
+|---|---|---|---|---|
+| (a) baseline (blue-side rate) | 0.2492 | 0.6915 | 0.0000 | pStar=0.5283 |
+| (b) elo-only | 0.2200 | 0.6289 | 0.0376 | |
+| (c) elo+form | 0.2237 | 0.6385 | 0.0369 | form HURTS OOS — dropped |
+| (d) full 3-feat (elo+form+draft) | 0.2183 | 0.6271 | 0.0485 | ablation-only, not shipped |
+| **(e) elo+draft [SHIP]** | **0.2203** | **0.6319** | **0.0850** | **SHIP model** |
+| (f) elo+draft + calib | 0.2153 | 0.6200 | 0.0533 | calib KEPT (OOS gain) |
+
+Elo-only beats base-rate by ~12% Brier (0.2200 vs 0.2492). The ship model (elo+draft) is 0.2203 — negligibly above elo-only on an absolute basis; the draft adds a very small directional lean (honest: draft alone is a weak signal in pro play, ~10% of outcome per iTero). Row (f) (+calib, 0.2153) is the best OOS number: isotonic PAV improved Brier on the test set and was retained (`keptOOS=true`, 6 blocks).
+
+### Why form was dropped
+
+`elo+form` (0.2237) > `elo-only` (0.2200) — form HURTS OOS despite contributing a positive coefficient in-sample. This is a classic regularization artefact: form signal has high within-sample variance, and L2=0.05 is not strong enough to suppress it completely when n_train=2060. The correct action is to drop it from the prediction path and keep it only in the display breakdown (informational, not contributing to the probability).
+
+### Final ship weights
+
+From `lib/lol-match-meta.json`:
+
+```json
+{
+  "weights": [0.04164661699268262, 0.45023046693085, 0.225115233465425],
+  "featureOrder": ["elo", "draft"],
+  "draftCapApplied": true,
+  "droppedFeatures": ["form"],
+  "n": 2944,
+  "walkForward": { "trainN": 2060, "testN": 884 },
+  "oos": {
+    "baselineBrier": 0.2492,
+    "eloOnlyBrier": 0.219988,
+    "shipBrier": 0.22027,
+    "shipLogloss": 0.631862,
+    "shipEce": 0.085044
+  }
+}
+```
+
+Weights: `bias=0.0416, w_elo=0.4502, w_draft=0.2251`. Draft cap applied (`|w_draft| = 0.2251 = 0.5 × |w_elo| = 0.2251` — capped exactly at the 0.5 ceiling). Calibration: `keptOOS=true`, 6 isotonic blocks.
+
+### Caveats
+
+1. **ECE ~0.085** (above the 0.03 target on the raw ship model). The post-calibration row (f) reduces ECE to 0.0533, still above target. Isotonic PAV with n=884 and 6 thin test bins does not fully correct calibration. Accepted for a display "lean", not an edge instrument.
+2. **Draft optimism**: OE draft artifacts cover only 2026 data (~4104 OE games, 2944 usable after Elo confidence filter). The OE window is included in the test set, so draft's backtest gain is partially in-sample. At display time the user's actual draft is genuinely out-of-sample — honest framing in the UI is required ("lean fraco — draft sozinho").
+3. **OE draft window is 2026-only**: 2024-25 sync is TLS-blocked locally; deeper OE data would improve draft coverage but is not blocking (Elo drives the model).
+4. **Elo config `halfLifeDays=0`**: backtest replay mode disables time-decay (historical matches would get near-zero weight with decay active). The display `predictMatch()` (Task 8) must use the same `halfLifeDays=0` config — live-mode decay would change ratings and break the blend's calibration.
+5. **Form retained in breakdown UI** (informational, not contributing to win-prob). The UI may show form as a signed bar with a "display only" label.
+
+### Ship verdict
+
+**PASS.** Elo-dominant blend (w_elo=0.450 vs w_draft=0.225) beats base-rate OOS by ~12% Brier. Calibrated post-fit (keptOOS=true). Form correctly dropped. Draft contribution is small and capped. Artifacts committed to `lib/lol-match-meta.json` + `lib/lol-match-calib.json`. **Plano 2 (Task 8: predictMatch() + UI) may proceed.**

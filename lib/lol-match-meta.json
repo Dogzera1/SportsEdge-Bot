@@ -1,17 +1,19 @@
 {
   "weights": [
-    0.03652230697717044,
-    0.3812938505631978,
-    0.1987198476491116,
-    0.1906469252815989
+    0.04164661699268262,
+    0.45023046693085,
+    0.225115233465425
   ],
   "featureOrder": [
     "elo",
-    "form",
     "draft"
   ],
   "draftCapApplied": true,
-  "trainedAt": "2026-06-01T13:24:04.228Z",
+  "droppedFeatures": [
+    "form"
+  ],
+  "droppedReason": "form hurts OOS (elo+form Brier > elo-only); kept in display breakdown as info only",
+  "trainedAt": "2026-06-01T13:38:39.359Z",
   "n": 2944,
   "walkForward": {
     "trainN": 2060,
@@ -26,5 +28,12 @@
     "confidenceFloor": 5
   },
   "level": "game",
-  "predicts": "P(blue wins)"
+  "predicts": "P(blue wins)",
+  "oos": {
+    "baselineBrier": 0.2492,
+    "eloOnlyBrier": 0.219988,
+    "shipBrier": 0.22027,
+    "shipLogloss": 0.631862,
+    "shipEce": 0.085044
+  }
 }
