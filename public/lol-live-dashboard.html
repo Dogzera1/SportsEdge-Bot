@@ -1610,10 +1610,38 @@ function selectMatch(id) {
   STATE.goldHistory.set(id, []);
 }
 
+async function pullLiveDraft(eventId, btn) {
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'puxando draft…';
+  const reset = () => { btn.textContent = old; btn.disabled = false; };
+  try {
+    const r = await fetch('/api/lol-live-draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eventId: String(eventId) }) });
+    const d = await r.json();
+    if (!d.ok) {
+      btn.textContent = (d.error === 'no_window' || d.error === 'no_active_game') ? 'draft ainda não disponível' : d.error === 'need_riot_event_id' ? 'sem evento Riot' : 'falha ao puxar draft';
+      setTimeout(reset, 2500); return;
+    }
+    if (d.teams) {
+      const bt = document.getElementById('dl_blueTeam'); if (bt && d.teams.blue) bt.value = d.teams.blue;
+      const rt = document.getElementById('dl_redTeam'); if (rt && d.teams.red) rt.value = d.teams.red;
+    }
+    const fill = (side, picks) => { for (const p of (picks || [])) { const inp = document.getElementById('dl_' + side + '_' + p.role); if (inp) inp.value = p.champion; } };
+    fill('blue', d.blue); fill('red', d.red);
+    toggleDraftLab(true);
+    reset();
+  } catch (e) { btn.textContent = 'falha: ' + e.message; setTimeout(reset, 2500); }
+}
+
 // ──────────────────────────────────────────────────────────── render detail
 function renderDetail(m) {
   const root = document.getElementById('detail');
   root.innerHTML = '';
+
+  // Pull live draft → Match Lab (Riot events only — numeric id)
+  if (/^\d+$/.test(String(m.id))) {
+    const pullBtn = el('button', { class: 'dl-ai-btn', style: 'margin-bottom:10px;' }, '⚗ → Match Lab (puxar draft da partida)');
+    pullBtn.addEventListener('click', () => pullLiveDraft(m.id, pullBtn));
+    root.appendChild(pullBtn);
+  }
 
   const stats = m.liveStats || {};
   const hasStats = !!stats.hasLiveStats;

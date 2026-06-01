@@ -5395,6 +5395,36 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
+  // Match Lab — pull live draft from Riot lolesports for a selected match (display-only).
+  // Resolves eventId -> getEventDetails -> inProgress/last game -> livestats window -> champs+roles+teams.
+  if (p === '/api/lol-live-draft' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const eventId = String(json?.eventId || '').trim();
+        if (!/^\d+$/.test(eventId)) { sendJson(res, { ok: false, error: 'need_riot_event_id' }, 400); return; }
+        const edR = await httpGet(LOL_BASE + '/getEventDetails?hl=en-US&id=' + eventId, LOL_HEADERS).catch(() => null);
+        const ed = (edR && edR.status === 200) ? safeParse(edR.body, {}) : {};
+        const ev = ed?.data?.event;
+        const games = (ev?.match?.games) || [];
+        const g = games.find(x => x.state === 'inProgress') || [...games].reverse().find(x => x.state === 'completed');
+        if (!g) { sendJson(res, { ok: false, error: 'no_active_game' }, 404); return; }
+        const wR = await httpGet('https://feed.lolesports.com/livestats/v1/window/' + g.id, LOL_HEADERS).catch(() => null);
+        const w = (wR && wR.status === 200) ? safeParse(wR.body, {}) : null;
+        if (!w || !w.gameMetadata) { sendJson(res, { ok: false, error: 'no_window', game: g.id, state: g.state }, 404); return; }
+        const ROLE2SLOT = { top: 'TOP', jungle: 'JGL', mid: 'MID', bottom: 'ADC', support: 'SUP' };
+        const pick = (md) => (md || []).map(x => ({ champion: x.championId, role: ROLE2SLOT[x.role] || String(x.role || '').toUpperCase() }));
+        const blue = pick(w.gameMetadata.blueTeamMetadata.participantMetadata);
+        const red = pick(w.gameMetadata.redTeamMetadata.participantMetadata);
+        const teamsArr = (ev?.match?.teams) || [];
+        const nameOf = (id) => (teamsArr.find(t => String(t.id) === String(id))?.name) || null;
+        const teams = { blue: nameOf(w.gameMetadata.blueTeamMetadata.esportsTeamId), red: nameOf(w.gameMetadata.redTeamMetadata.esportsTeamId) };
+        sendJson(res, { ok: true, teams, blue, red, game: g.id, gameNumber: g.number, state: g.state });
+      } catch (e) { log('WARN', 'LIVE-DRAFT', `err: ${e.message}`); sendJson(res, { ok: false, error: 'live_draft_failed' }, 500); }
+    });
+    return;
+  }
   // Dota Lab — team autocomplete (display-only)
   if (p === '/api/dota-teams' && req.method === 'GET') {
     try {
