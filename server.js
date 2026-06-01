@@ -5395,6 +5395,85 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
+  // Dota Lab — team autocomplete (display-only)
+  if (p === '/api/dota-teams' && req.method === 'GET') {
+    try {
+      const rows = db.prepare(`SELECT team1 t FROM match_results WHERE game='dota2' AND team1 IS NOT NULL AND team1!=''
+                               UNION SELECT team2 t FROM match_results WHERE game='dota2' AND team2 IS NOT NULL AND team2!=''`).all();
+      sendJson(res, { ok: true, teams: [...new Set(rows.map(r => r.t))].sort((a, b) => a.localeCompare(b)) });
+    } catch (e) { sendJson(res, { ok: false, error: 'teams_failed' }, 500); }
+    return;
+  }
+  // Dota Lab — hero autocomplete (display-only)
+  if (p === '/api/dota-heroes' && req.method === 'GET') {
+    try {
+      const rows = db.prepare(`SELECT DISTINCT localized_name n FROM dota_hero_stats WHERE localized_name IS NOT NULL AND localized_name!='' ORDER BY localized_name`).all();
+      sendJson(res, { ok: true, heroes: rows.map(r => r.n) });
+    } catch (e) { sendJson(res, { ok: false, error: 'heroes_failed' }, 500); }
+    return;
+  }
+  // Dota Lab — match analyze (Elo + draft read, display-only)
+  if (p === '/api/dota-match-analyze' && req.method === 'POST') {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const { predictMatch } = require('./lib/dota-match-predict');
+        const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
+          ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
+        const out = predictMatch(db, { team1: json?.team1 || null, team2: json?.team2 || null, side: json?.side === 'red' ? 'red' : 'blue', draft });
+        const p1 = Math.max(1e-6, Math.min(1 - 1e-6, out.prob));
+        const fairOdds = { team1: +(1 / p1).toFixed(2), team2: +(1 / (1 - p1)).toFixed(2) };
+        const bookOdds = (typeof json?.bookOdds === 'number' && json.bookOdds > 1) ? json.bookOdds : null;
+        const edge = bookOdds ? +((out.prob * bookOdds) - 1).toFixed(3) : null;
+        sendJson(res, { ok: true, ...out, fairOdds, edge });
+      } catch (e) { log('WARN', 'DOTA-LAB', `analyze err: ${e.message}`); sendJson(res, { ok: false, error: 'dota_analyze_failed' }, 500); }
+    });
+    return;
+  }
+  // Dota Lab — AI explain (Sonnet, capped, display-only)
+  if (p === '/api/dota-match-explain' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled' }, 503); return; }
+        const json = safeParse(body, null);
+        const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
+          ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
+        if (!json?.team1 && !json?.team2 && !draft) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
+        const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const usedN = _amap.get(dayKey) || 0;
+        if (usedN >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        _amap.set(dayKey, usedN + 1);
+        const { predictMatch } = require('./lib/dota-match-predict');
+        const { buildDotaExplainPrompt, parseDotaExplain } = require('./lib/dota-match-explain');
+        const side = json?.side === 'red' ? 'red' : 'blue';
+        const out = predictMatch(db, { team1: json?.team1 || null, team2: json?.team2 || null, side, draft });
+        const p1 = Math.max(1e-6, Math.min(1 - 1e-6, out.prob));
+        const fairOdds = { team1: +(1 / p1).toFixed(2), team2: +(1 / (1 - p1)).toFixed(2) };
+        const bookOdds = (typeof json?.bookOdds === 'number' && json.bookOdds > 1) ? json.bookOdds : null;
+        const edge = bookOdds ? +((out.prob * bookOdds) - 1).toFixed(3) : null;
+        const teams = { blue: side === 'blue' ? (json?.team1 || null) : (json?.team2 || null), red: side === 'blue' ? (json?.team2 || null) : (json?.team1 || null) };
+        const prompt = buildDotaExplainPrompt({ pred: out, draft, teams, fairOdds, edge });
+        const model = process.env.AI_ANALYSIS_MODEL || 'claude-sonnet-4-5';
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages',
+          { model, max_tokens: 700, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] },
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const analysis = parseDotaExplain(text);
+        if (analysis) sendJson(res, { ok: true, analysis });
+        else if (text && text.trim()) sendJson(res, { ok: true, analysis: null, raw: text.slice(0, 1200) });
+        else sendJson(res, { ok: false, error: 'ai_failed' }, 500);
+      } catch (e) { log('WARN', 'DOTA-LAB', `explain err: ${e.message}`); sendJson(res, { ok: false, error: 'ai_failed' }, 500); }
+    });
+    return;
+  }
 
   // Match Lab — AI match reading (display-only). Sonnet explains the game-profile; never feeds stake.
   if (p === '/api/lol-match-explain' && req.method === 'POST') {
