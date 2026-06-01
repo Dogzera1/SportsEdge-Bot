@@ -9,7 +9,11 @@ const { normalizeChampion } = require('../lib/lol-champions');
 
 const args = process.argv.slice(2);
 const dbPath = (args.includes('--db') ? args[args.indexOf('--db') + 1] : (process.env.DB_PATH || 'sportsedge.db'));
-const SHRINK_K = 20, PRIOR = 0.5;
+// SHRINK_K=100 + L2=0.02 chosen by grid-search walk-forward: weaker shrinkage overfit the
+// per-patch meta (OOS Brier worse than a coinflip); this config beats the 0.5 baseline. The
+// draft edge over the blue-side base rate is small (~0.0024 Brier) — a modest lean, not a
+// confident probability. Champion WR (wrDiff) carries ~no OOS signal; lane+synergy carry the rest.
+const SHRINK_K = 100, PRIOR = 0.5;
 
 const db = new Database(dbPath, { readonly: true });
 const rows = db.prepare(`SELECT gameid, side, position, champion, result, patch, date
@@ -47,7 +51,7 @@ const trainRows = rows.filter(r => r.patch < cut), testRows = rows.filter(r => r
 function trainOn(rs) {
   const wr = buildWrTable(rs), matchups = buildMatchupMatrix(rs), synergy = buildSynergyMatrix(rs);
   const samples = [...groupGames(rs).values()].map(p => gameFeatures(p, wr, matchups, synergy)).filter(Boolean);
-  const weights = fitLogistic(samples, { epochs: 400, lr: 0.2, l2: 0.0005 });
+  const weights = fitLogistic(samples, { epochs: 500, lr: 0.2, l2: 0.02 });
   return { wr, matchups, synergy, weights };
 }
 function evalOn(model, rs) {
