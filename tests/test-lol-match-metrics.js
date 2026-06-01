@@ -17,4 +17,8 @@ assert.ok(Math.abs(b.brier - (2 / 3) * (1 / 3)) < 1e-9);
 const cal = Array.from({ length: 100 }, (_, i) => ({ p: 0.7, y: i < 70 ? 1 : 0 }));
 assert.ok(m.ece(cal) < 0.05);
 
+// logloss (ship-gate metric): p=0.5 always => ln(2); confident+correct => ~0 (clamp-safe)
+assert.ok(Math.abs(m.logloss([{ p: 0.5, y: 1 }, { p: 0.5, y: 0 }]) - Math.log(2)) < 1e-6);
+assert.ok(m.logloss([{ p: 1, y: 1 }]) < 1e-6);
+
 console.log('OK test-lol-match-metrics');
