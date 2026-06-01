@@ -5382,7 +5382,8 @@ const server = http.createServer(async (req, res) => {
         log('WARN', 'DRAFT-LAB', `parse-print err: ${e.message}`);
         sendJson(res, { ok: false, error: 'parse_print_failed' }, 500);
       }
-    });
+    }, 2000000); // image payload: raise the 64KB default to 2MB. Client downscales to ~1568px first
+                 // (~300-500KB typical); 2MB bounds abuse memory on Railway's tight RSS budget.
     return;
   }
 

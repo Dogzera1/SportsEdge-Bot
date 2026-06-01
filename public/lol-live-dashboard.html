@@ -2061,58 +2061,77 @@ async function dlAnalyze() {
   }
 }
 
-// Shared by the file picker and Ctrl+V paste — takes a File/Blob image and runs the vision parse.
+// Shared by the file picker and Ctrl+V paste — downscales the image, then runs the vision parse.
 async function dlSubmitPrintFile(file) {
   if (!file) return;
   dlSetError(null);
-  dlSetPrintMsg(null);
-
-  const reader = new FileReader();
-  reader.onload = async (ev) => {
-    const imageBase64 = ev.target.result; // data:image/...;base64,...
-    dlSetPrintMsg('Processando print…');
-    try {
-      const r = await fetch('/api/lol-draft-parse-print', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 }),
-      });
-      if (r.status === 503) {
-        dlSetPrintMsg(null);
-        dlSetError('Parse por print indisponível (ANTHROPIC_API_KEY não setada).');
-        return;
-      }
-      const data = await r.json();
-      if (!data.ok) {
-        dlSetPrintMsg(null);
-        dlSetError(data.error || 'Erro ao interpretar print.');
-        return;
-      }
-      // Prefill inputs
-      const sides = { blue: data.blue || [], red: data.red || [] };
-      const ROLES = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
-      for (const [side, picks] of Object.entries(sides)) {
-        // clear all first
-        for (const role of ROLES) {
-          const inp = document.getElementById(`dl_${side}_${role}`);
-          if (inp) { inp.value = ''; inp.classList.remove('prefilled'); }
-        }
-        for (const pick of picks) {
-          const role = (pick.role || '').toUpperCase();
-          const inp = document.getElementById(`dl_${side}_${role}`);
-          if (inp && pick.champion) {
-            inp.value = pick.champion;
-            inp.classList.add('prefilled');
-          }
-        }
-      }
-      dlSetPrintMsg('Draft preenchido — revise e clique Analisar draft.');
-    } catch (e) {
+  dlSetPrintMsg('Processando print…');
+  try {
+    const imageBase64 = await dlDownscaleToDataUrl(file);
+    const r = await fetch('/api/lol-draft-parse-print', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64 }),
+    });
+    if (r.status === 503) {
       dlSetPrintMsg(null);
-      dlSetError('Falha ao processar print: ' + e.message);
+      dlSetError('Parse por print indisponível (ANTHROPIC_API_KEY não setada).');
+      return;
     }
-  };
-  reader.readAsDataURL(file);
+    const data = await r.json();
+    if (!data.ok) {
+      dlSetPrintMsg(null);
+      dlSetError(data.error === 'body_too_large'
+        ? 'Print grande demais mesmo após reduzir — recorte só a área do draft e tente de novo.'
+        : (data.error || 'Erro ao interpretar print.'));
+      return;
+    }
+    // Prefill inputs
+    const sides = { blue: data.blue || [], red: data.red || [] };
+    const ROLES = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
+    for (const [side, picks] of Object.entries(sides)) {
+      for (const role of ROLES) {
+        const inp = document.getElementById(`dl_${side}_${role}`);
+        if (inp) { inp.value = ''; inp.classList.remove('prefilled'); }
+      }
+      for (const pick of picks) {
+        const role = (pick.role || '').toUpperCase();
+        const inp = document.getElementById(`dl_${side}_${role}`);
+        if (inp && pick.champion) { inp.value = pick.champion; inp.classList.add('prefilled'); }
+      }
+    }
+    dlSetPrintMsg('Draft preenchido — revise e clique Analisar draft.');
+  } catch (e) {
+    dlSetPrintMsg(null);
+    dlSetError('Falha ao processar print: ' + e.message);
+  }
+}
+
+// Re-encode the image to <=1568px on the long edge (Anthropic's own ceiling) as JPEG, so the POST
+// body stays small (the server caps it). Falls back to the original data URL if it can't be decoded.
+function dlDownscaleToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error('leitura do arquivo falhou'));
+    fr.onload = () => {
+      const raw = fr.result;
+      const img = new Image();
+      img.onerror = () => resolve(raw);
+      img.onload = () => {
+        const MAX = 1568;
+        const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        try { resolve(canvas.toDataURL('image/jpeg', 0.85)); }
+        catch (_) { resolve(raw); }
+      };
+      img.src = raw;
+    };
+    fr.readAsDataURL(file);
+  });
 }
 
 function dlParsePrint(input) {
