@@ -110,4 +110,32 @@ module.exports = function(t) {
     const c = gp.compStyle([{ champion: 'Nonexistent' }], ART.tags);
     assert.ok(c.confidence < 0.3, 'unknown -> low confidence');
   });
+  t.test('qualityBlock: full known + good sample -> alta', () => {
+    const q = gp.qualityBlock({ knownChamps: 10, totalChamps: 10, laneMatchups: [{ n: 100 }, { n: 80 }], eloConfidence: 1 });
+    assert.strictEqual(q.tier, 'alta', `got ${q.tier}`);
+    assert.strictEqual(q.avgLaneN, 90, 'avgLaneN=90');
+    assert.strictEqual(q.warnings.length, 0, 'no warnings');
+  });
+  t.test('qualityBlock: missing champs -> warning + lower tier', () => {
+    const q = gp.qualityBlock({ knownChamps: 7, totalChamps: 10, laneMatchups: [{ n: 50 }], eloConfidence: 0.5 });
+    assert.strictEqual(q.tier, 'média', `got ${q.tier}`);
+    assert.ok(q.warnings.some(w => /sem dado/.test(w)), 'warns missing champs');
+  });
+  t.test('computeGameProfile: full output with draft', () => {
+    const out = gp.computeGameProfile({
+      draft: DRAFT, probTeam1: 0.7345, bookOdds: 1.85, eloConfidence: 1,
+      laneMatchups: [{ n: 100 }, { n: 90 }], knownChamps: 4, totalChamps: 4,
+    }, ART);
+    assert.ok(out.phases && out.phases.early.winner === 'blue', 'phases present');
+    assert.ok(out.expectedTime && out.compStyle && out.fairOdds, 'all blocks present');
+    assert.ok(Math.abs(out.fairOdds.team1 - 1.36) < 0.01, 'fairOdds wired');
+    assert.ok(out.edge !== null, 'edge computed when bookOdds given');
+    assert.ok(out.quality && out.quality.tier, 'quality present');
+  });
+  t.test('computeGameProfile: no draft -> phases null, odds still present', () => {
+    const out = gp.computeGameProfile({ draft: null, probTeam1: 0.6, bookOdds: null, eloConfidence: 1, laneMatchups: [], knownChamps: 0, totalChamps: 10 }, ART);
+    assert.strictEqual(out.phases, null, 'phases null without draft');
+    assert.strictEqual(out.compStyle, null, 'compStyle null without draft');
+    assert.ok(out.fairOdds && out.edge === null, 'odds present, edge null');
+  });
 };
