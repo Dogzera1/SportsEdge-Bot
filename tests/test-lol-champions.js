@@ -16,4 +16,18 @@ module.exports = function (t) {
     t.assert(normalizeChampion('') === null, 'empty');
     t.assert(normalizeChampion('   ') === null, 'spaces');
   });
+  t.test('normalizeRole maps aliases to Oracle Elixir codes', () => {
+    const { normalizeRole } = require('../lib/lol-champions');
+    t.assert(normalizeRole('TOP') === 'top', 'TOP');
+    t.assert(normalizeRole('JGL') === 'jng', 'JGL→jng');
+    t.assert(normalizeRole('Jungle') === 'jng', 'Jungle→jng');
+    t.assert(normalizeRole('MID') === 'mid', 'MID');
+    t.assert(normalizeRole('ADC') === 'bot', 'ADC→bot');
+    t.assert(normalizeRole('Bottom') === 'bot', 'Bottom→bot');
+    t.assert(normalizeRole('bot') === 'bot', 'bot passthrough');
+    t.assert(normalizeRole('Support') === 'sup', 'Support→sup');
+    t.assert(normalizeRole('jng') === 'jng', 'jng passthrough');
+    t.assert(normalizeRole('') === '', 'empty → empty');
+    t.assert(normalizeRole(null) === '', 'null → empty');
+  });
 };

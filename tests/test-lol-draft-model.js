@@ -32,4 +32,17 @@ module.exports = function (t) {
     t.assert(out.prob >= 0 && out.prob <= 1, 'prob bounded');
     t.assert(out.confidence < 0.5, 'low confidence on unknown');
   });
+  t.test('computeDraftWinProb accepts UI role aliases (ADC→bot lane resolves)', () => {
+    const { computeDraftWinProb } = require('../lib/lol-draft-model');
+    const art = {
+      meta: { priorWr: 0.5, shrinkK: 20, weights: [0, 4, 2, 1, 0] },
+      wr: { 'jinx|bot': { wins: 60, n: 100 }, 'aphelios|bot': { wins: 40, n: 100 } },
+      matchups: { bot: { jinx: { aphelios: { wins: 70, n: 100 } } } },
+      synergy: {},
+    };
+    const out = computeDraftWinProb({ blue: [{ champion: 'Jinx', role: 'ADC' }], red: [{ champion: 'Aphelios', role: 'ADC' }] }, {}, art);
+    const lane = out.breakdown.laneMatchups[0];
+    t.assert(lane && lane.n === 100, `ADC lane resolved via bot alias, got ${JSON.stringify(lane)}`);
+    t.assert(lane.deltaPp > 0, 'jinx favored vs aphelios bot');
+  });
 };
