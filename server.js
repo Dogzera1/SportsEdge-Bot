@@ -5330,6 +5330,59 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Draft Lab — parse a draft screenshot into champions via Claude Haiku vision.
+  // Dormant until ANTHROPIC_API_KEY is set in env. Result is for USER CONFIRMATION before analyze.
+  if (p === '/api/lol-draft-parse-print' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled', tip: 'set ANTHROPIC_API_KEY' }, 503); return; }
+        const json = safeParse(body, null);
+        const dataUrl = String(json?.imageBase64 || '');
+        const m = dataUrl.match(/^data:(image\/(png|jpeg|webp));base64,(.+)$/);
+        if (!m) { sendJson(res, { ok: false, error: 'imageBase64 must be a data URL (png/jpeg/webp)' }, 400); return; }
+        const mediaType = m[1], b64 = m[3];
+        if (b64.length > 7000000) { sendJson(res, { ok: false, error: 'image_too_large', max_b64: 7000000 }, 413); return; }
+
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const cap = parseInt(process.env.ANTHROPIC_VISION_DAILY_CAP || '50', 10);
+        const _vmap = (global._draftVisionDayMap = global._draftVisionDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const used = _vmap.get(dayKey) || 0;
+        if (used >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+
+        const prompt = 'This is a League of Legends draft screenshot. Return ONLY compact JSON, no prose: '
+          + '{"blue":[{"champion":"<name>","role":"top|jng|mid|bot|sup"}],"red":[...]} '
+          + 'with exactly 5 entries per team in role order top,jng,mid,bot,sup. '
+          + 'Use official English champion names. If a role is unclear, still order by lane position. If you cannot read a champion, use null.';
+        const payload = {
+          model: 'claude-haiku-4-5', max_tokens: 1024,
+          messages: [{ role: 'user', content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+            { type: 'text', text: prompt },
+          ] }],
+        };
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages', payload,
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        _vmap.set(dayKey, used + 1);
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const parsed = safeParse((text.match(/\{[\s\S]*\}/) || [null])[0], null);
+        if (!parsed) { sendJson(res, { ok: false, error: 'parse_failed', raw: text.slice(0, 300) }, 502); return; }
+        const { normalizeChampion } = require('./lib/lol-champions');
+        const tag = (arr) => (arr || []).map(p => ({ champion: p.champion, role: p.role, key: normalizeChampion(p.champion) }));
+        sendJson(res, { ok: true, blue: tag(parsed.blue), red: tag(parsed.red), needsConfirmation: true });
+      } catch (e) {
+        log('WARN', 'DRAFT-LAB', `parse-print err: ${e.message}`);
+        sendJson(res, { ok: false, error: 'parse_print_failed' }, 500);
+      }
+    });
+    return;
+  }
+
   // LoL Live Edge Terminal — JSON aggregator for /lol-live-dashboard
   // Combina /lol-matches (Riot+PandaScore live), /live-game (livestats), lol-map-model,
   // lol-markets, lol-patches. Edge scanner ranqueia mercados com EV >= threshold.
