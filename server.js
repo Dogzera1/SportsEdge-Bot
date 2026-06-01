@@ -5351,6 +5351,10 @@ const server = http.createServer(async (req, res) => {
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
         const used = _vmap.get(dayKey) || 0;
         if (used >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        // Reserve the slot BEFORE the paid call so failed/timed-out attempts still count toward the
+        // cap (prevents quota exhaustion via repeated failures). Map is bounded by distinct (ip, day)
+        // keys — negligible for this low-traffic, user-triggered endpoint.
+        _vmap.set(dayKey, used + 1);
 
         const prompt = 'This is a League of Legends draft screenshot. Return ONLY compact JSON, no prose: '
           + '{"blue":[{"champion":"<name>","role":"top|jng|mid|bot|sup"}],"red":[...]} '
@@ -5365,7 +5369,6 @@ const server = http.createServer(async (req, res) => {
         };
         const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages', payload,
           { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
-        _vmap.set(dayKey, used + 1);
         try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
 
         const rj = r ? safeParse(r.body, {}) : {};
@@ -5373,7 +5376,7 @@ const server = http.createServer(async (req, res) => {
         const parsed = safeParse((text.match(/\{[\s\S]*\}/) || [null])[0], null);
         if (!parsed) { sendJson(res, { ok: false, error: 'parse_failed', raw: text.slice(0, 300) }, 502); return; }
         const { normalizeChampion } = require('./lib/lol-champions');
-        const tag = (arr) => (arr || []).map(p => ({ champion: p.champion, role: p.role, key: normalizeChampion(p.champion) }));
+        const tag = (arr) => (arr || []).map(entry => ({ champion: entry.champion, role: entry.role, key: normalizeChampion(entry.champion) }));
         sendJson(res, { ok: true, blue: tag(parsed.blue), red: tag(parsed.red), needsConfirmation: true });
       } catch (e) {
         log('WARN', 'DRAFT-LAB', `parse-print err: ${e.message}`);
