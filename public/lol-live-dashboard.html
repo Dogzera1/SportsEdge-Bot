@@ -2281,13 +2281,20 @@ async function dlSubmitPrintFile(file) {
         const inp = document.getElementById(`dl_${side}_${role}`);
         if (inp) { inp.value = ''; inp.classList.remove('prefilled'); }
       }
+      // Vision returns Oracle role codes (top/jng/mid/bot/sup); the input slots use UI labels
+      // (TOP/JGL/MID/ADC/SUP). Translate so jng→JGL and bot→ADC land in the right field.
+      const SLOT = { top: 'TOP', jng: 'JGL', jungle: 'JGL', jg: 'JGL', mid: 'MID', middle: 'MID', bot: 'ADC', adc: 'ADC', bottom: 'ADC', sup: 'SUP', support: 'SUP' };
       for (const pick of picks) {
-        const role = (pick.role || '').toUpperCase();
-        const inp = document.getElementById(`dl_${side}_${role}`);
+        const slot = SLOT[(pick.role || '').toLowerCase().trim()] || (pick.role || '').toUpperCase();
+        const inp = document.getElementById(`dl_${side}_${slot}`);
         if (inp && pick.champion) { inp.value = pick.champion; inp.classList.add('prefilled'); }
       }
     }
-    dlSetPrintMsg('Draft preenchido — revise e clique Analisar draft.');
+    if (data.teams) {
+      const bt = document.getElementById('dl_blueTeam'); if (bt && data.teams.blue) bt.value = data.teams.blue;
+      const rt = document.getElementById('dl_redTeam');  if (rt && data.teams.red)  rt.value = data.teams.red;
+    }
+    dlSetPrintMsg('Draft preenchido — revise e clique Analisar partida.');
   } catch (e) {
     dlSetPrintMsg(null);
     dlSetError('Falha ao processar print: ' + e.message);
