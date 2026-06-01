@@ -5310,6 +5310,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Draft Lab — draft-only win prob (display-only; no pricing/EV/tips impact).
+  if (p === '/api/lol-draft-analyze' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const blue = Array.isArray(json?.blue) ? json.blue.slice(0, 5) : [];
+        const red = Array.isArray(json?.red) ? json.red.slice(0, 5) : [];
+        if (!blue.length || !red.length) { sendJson(res, { ok: false, error: 'blue and red arrays required' }, 400); return; }
+        const { computeDraftWinProb } = require('./lib/lol-draft-model');
+        const out = computeDraftWinProb({ blue, red }, { patch: json?.patch || null });
+        sendJson(res, { ok: true, ...out });
+      } catch (e) {
+        log('WARN', 'DRAFT-LAB', `analyze err: ${e.message}`);
+        sendJson(res, { ok: false, error: 'analyze_failed' }, 500);
+      }
+    });
+    return;
+  }
+
   // LoL Live Edge Terminal — JSON aggregator for /lol-live-dashboard
   // Combina /lol-matches (Riot+PandaScore live), /live-game (livestats), lol-map-model,
   // lol-markets, lol-patches. Edge scanner ranqueia mercados com EV >= threshold.
