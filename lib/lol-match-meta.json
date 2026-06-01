@@ -1,0 +1,30 @@
+{
+  "weights": [
+    0.03652230697717044,
+    0.3812938505631978,
+    0.1987198476491116,
+    0.1906469252815989
+  ],
+  "featureOrder": [
+    "elo",
+    "form",
+    "draft"
+  ],
+  "draftCapApplied": true,
+  "trainedAt": "2026-06-01T13:24:04.228Z",
+  "n": 2944,
+  "walkForward": {
+    "trainN": 2060,
+    "testN": 884
+  },
+  "eloConfig": {
+    "halfLifeDays": 0,
+    "kBase": 32,
+    "kMin": 10,
+    "kScale": 40,
+    "confidenceScale": 20,
+    "confidenceFloor": 5
+  },
+  "level": "game",
+  "predicts": "P(blue wins)"
+}

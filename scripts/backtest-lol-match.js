@@ -1,19 +1,25 @@
 'use strict';
 
 // scripts/backtest-lol-match.js
-// Task 4 — Point-in-time Elo replay baseline for LoL match predictor.
+// Task 4 — Point-in-time Elo replay baseline for LoL match predictor (series level).
 // Task 5 — Adds point-in-time form (as-of resolved_at) + OE draft join per sample.
+// Task 6 — GAME-LEVEL blend fit: predicts P(blue side wins) for a single game,
+//          blending as-of Elo + as-of form + draft, then isotonic-calibrates.
+//          The series-level replay above stays as validation evidence.
 //
 // NO DATA LEAKAGE: getP() is called BEFORE rate() for every match; form is
 // computed as-of g.resolved_at (strictly prior matches only). Draft is pre-game
 // info (champions known at match start), so using it to predict the same match
 // is legitimate.
 
+const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { createEloSystem } = require('../lib/elo-rating');
 const { classifyLeague, _formSubModel } = require('../lib/lol-model');
 const { computeDraftWinProb } = require('../lib/lol-draft-model');
+const { fitLogistic, sigmoid } = require('../lib/lol-draft-train');
+const { _applyIsotonicBlocks } = require('../lib/brier-holdout-eval');
 const M = require('../lib/lol-match-metrics');
 
 const db = new Database(path.join(__dirname, '..', 'sportsedge.db'), { readonly: true });
@@ -27,23 +33,33 @@ const norm = (s) => String(s || '')
   .replace(/[^a-z0-9]/g, '');
 
 // ---- OE draft index (built ONCE; 2026-only data ~4104 games) ----
-// oeByGame:  gameid -> { day, blueTeam, redTeam, blue:[{champion,role}], red:[...] }
+// oeByGame:  gameid -> { day, date, league, blueTeam, redTeam, blueWon, blue:[{champion,role}], red:[...] }
 // oeIndex:   `${day}|${normTeam}` -> [{ gid, side }]
 const oeByGame = new Map();
 {
   const oeRows = db.prepare(`
-    SELECT gameid, side, position, teamname, champion, date
+    SELECT gameid, side, position, teamname, champion, date, league, result
     FROM oracleselixir_players
   `).all();
   for (const r of oeRows) {
     let og = oeByGame.get(r.gameid);
     if (!og) {
-      og = { day: String(r.date).slice(0, 10), blueTeam: null, redTeam: null, blue: [], red: [] };
+      og = {
+        day: String(r.date).slice(0, 10), date: r.date, league: r.league,
+        blueTeam: null, redTeam: null, blueWon: null, blue: [], red: [],
+      };
       oeByGame.set(r.gameid, og);
     }
     const side = String(r.side || '').toLowerCase();
-    if (side === 'blue') { og.blue.push({ champion: r.champion, role: r.position }); og.blueTeam = r.teamname; }
-    else if (side === 'red') { og.red.push({ champion: r.champion, role: r.position }); og.redTeam = r.teamname; }
+    if (side === 'blue') {
+      og.blue.push({ champion: r.champion, role: r.position });
+      og.blueTeam = r.teamname;
+      // result is per-player but identical across a team's 5 players.
+      if (og.blueWon === null) og.blueWon = r.result ? 1 : 0;
+    } else if (side === 'red') {
+      og.red.push({ champion: r.champion, role: r.position });
+      og.redTeam = r.teamname;
+    }
   }
 }
 const oeIndex = new Map();
@@ -155,12 +171,198 @@ for (const g of games) {
   elo.rate(winner, loser, margin, g.resolved_at, tier);
 }
 
+const base = M.blueSideBaseline(samples);
+console.log('=== SERIES-LEVEL Elo replay (Task 4/5 — validation evidence) ===');
+console.log(`[series] n=${samples.length}`);
+console.log(`[series] Elo-only:  Brier=${M.brier(samples).toFixed(4)}  logloss=${M.logloss(samples).toFixed(4)}  ECE=${M.ece(samples).toFixed(4)}`);
+console.log(`[series] baseline:  Brier=${base.brier.toFixed(4)} (pStar=${base.pStar.toFixed(3)})`);
+console.log(`[series] Elo beats baseline OOS? ${M.brier(samples) < base.brier ? 'YES' : 'NO'}`);
+console.log(`[series] draft coverage: ${samples.filter((s) => s.pDraft != null).length}/${samples.length}`);
+console.log(`[series] form  coverage: ${samples.filter((s) => s.pForm != null).length}/${samples.length}`);
+
+// ============================================================================
+// TASK 6 — GAME-LEVEL blend fit. Predicts P(blue side wins) for a single game.
+// The blue-side advantage is the logistic intercept (no explicit side feature).
+// ============================================================================
+
+const ELO_CONFIG = { halfLifeDays: 0, kBase: 32, kMin: 10, kScale: 40, confidenceScale: 20, confidenceFloor: 5 };
+const clamp01 = (p) => Math.max(1e-6, Math.min(1 - 1e-6, p));
+const logit = (p) => { const c = clamp01(p); return Math.log(c / (1 - c)); };
+
+// ---- Chronological event interleave (NO LEAKAGE) ----
+// Events: match_results series ('rate') + OE games ('predict'). Sort by date ASC;
+// on ties, 'predict' BEFORE 'rate' so a game never sees its own series' result in
+// the Elo. Elo is updated ONLY from series ('rate'); OE games are sub-events of
+// those series — rating them again would double-count.
+const events = [];
+for (const g of games) {
+  events.push({ kind: 'rate', date: g.resolved_at, g });
+}
+for (const [gid, og] of oeByGame) {
+  // Need both full sides and a known outcome to be a usable sample.
+  if (og.blueWon == null || !og.blueTeam || !og.redTeam) continue;
+  events.push({ kind: 'predict', date: og.date, gid, og });
+}
+// predict (0) sorts before rate (1) on equal dates.
+const kindRank = { predict: 0, rate: 1 };
+events.sort((a, b) => {
+  const da = String(a.date), db_ = String(b.date);
+  if (da < db_) return -1;
+  if (da > db_) return 1;
+  return kindRank[a.kind] - kindRank[b.kind];
+});
+
+const gameElo = createEloSystem(ELO_CONFIG);
+const gSamples = []; // { x:[logit(elo),form,draft], y:blueWon, date }
+let nDraftJoined = 0, nFormJoined = 0;
+
+for (const ev of events) {
+  if (ev.kind === 'rate') {
+    const g = ev.g;
+    const tier = classifyLeague(g.league);
+    const y1 = (String(g.winner).toLowerCase() === String(g.team1).toLowerCase()) ? 1 : 0;
+    const winner = y1 ? g.team1 : g.team2;
+    const loser = y1 ? g.team2 : g.team1;
+    const sc = String(g.final_score || '').match(/(\d+)\s*[-:]\s*(\d+)/);
+    const margin = sc ? Math.max(1, Math.abs(parseInt(sc[1]) - parseInt(sc[2]))) : 1;
+    gameElo.rate(winner, loser, margin, g.resolved_at, tier);
+    continue;
+  }
+
+  // predict: as-of Elo P(blue wins), oriented to blue.
+  const og = ev.og;
+  const tier = classifyLeague(og.league);
+  const pred = gameElo.getP(og.blueTeam, og.redTeam, tier);
+  if (!(pred.foundA && pred.foundB && pred.confidence > 0)) continue;
+  const pEloBlue = pred.pA; // pA = P(playerA=blue wins)
+
+  // Form as-of game date (blueTeam is t1 → form.pA = P(blue better form)).
+  const form = _formSubModel(db, og.blueTeam, og.redTeam, null, og.date);
+  const pFormBlue = form.confidence > 0 ? form.pA : null;
+  if (pFormBlue != null) nFormJoined++;
+
+  // Draft (pre-game info). d.prob = P(blue wins).
+  const d = computeDraftWinProb({ blue: og.blue, red: og.red });
+  const pDraftBlue = d.prob;
+  if (d.confidence > 0.05) nDraftJoined++;
+
+  gSamples.push({
+    x: [logit(pEloBlue), pFormBlue != null ? logit(pFormBlue) : 0, pDraftBlue != null ? logit(pDraftBlue) : 0],
+    y: og.blueWon,
+    date: og.date,
+    pEloBlue,
+  });
+}
+
 db.close();
 
-const base = M.blueSideBaseline(samples);
-console.log(`[backtest] n=${samples.length}`);
-console.log(`[backtest] Elo-only:  Brier=${M.brier(samples).toFixed(4)}  logloss=${M.logloss(samples).toFixed(4)}  ECE=${M.ece(samples).toFixed(4)}`);
-console.log(`[backtest] baseline:  Brier=${base.brier.toFixed(4)} (pStar=${base.pStar.toFixed(3)})`);
-console.log(`[backtest] Elo beats baseline OOS? ${M.brier(samples) < base.brier ? 'YES' : 'NO'}`);
-console.log(`[backtest] draft coverage: ${samples.filter((s) => s.pDraft != null).length}/${samples.length}`);
-console.log(`[backtest] form  coverage: ${samples.filter((s) => s.pForm != null).length}/${samples.length}`);
+// ---- Walk-forward split (train = first 70% by date, test = last 30%) ----
+gSamples.sort((a, b) => String(a.date) < String(b.date) ? -1 : String(a.date) > String(b.date) ? 1 : 0);
+const cut = Math.floor(gSamples.length * 0.7);
+const train = gSamples.slice(0, cut);
+const test = gSamples.slice(cut);
+
+// ---- Fit logistic (strong l2 = anti-overfit, P3) ----
+let w = fitLogistic(train, { epochs: 600, lr: 0.1, l2: 0.05 });
+
+// ---- Cap draft weight (it's the weak term; don't let it exceed half of Elo) ----
+const draftIdx = 3; // w = [bias, elo, form, draft]
+let draftCapApplied = false;
+if (Math.abs(w[draftIdx]) > 0.5 * Math.abs(w[1])) {
+  w[draftIdx] = Math.sign(w[draftIdx]) * 0.5 * Math.abs(w[1]);
+  draftCapApplied = true;
+}
+
+const predictFull = (s) => sigmoid(w[0] + w[1] * s.x[0] + w[2] * s.x[1] + w[3] * s.x[2]);
+
+// ---- Standalone PAV isotonic on TRAIN ----
+// NOTE: lib/calibration.js already has PAV, but it is DB-coupled (reads
+// market_tips_shadow, emits {bin,empirical,n}). This emits {pMin,pMax,yMean,n}
+// blocks consumable by _applyIsotonicBlocks. ~20 lines; documented duplication.
+function fitIsotonicPav(samples, nBins = 12) {
+  if (!samples.length) return [];
+  const bins = Array.from({ length: nBins }, () => ({ sumP: 0, sumY: 0, n: 0 }));
+  for (const { p, y } of samples) {
+    let idx = Math.floor(clamp01(p) * nBins);
+    if (idx >= nBins) idx = nBins - 1;
+    if (idx < 0) idx = 0;
+    bins[idx].sumP += p; bins[idx].sumY += y; bins[idx].n++;
+  }
+  let arr = bins.filter(b => b.n >= 3).map(b => ({
+    pMin: b.sumP / b.n, pMax: b.sumP / b.n, yMean: b.sumY / b.n, n: b.n,
+  }));
+  if (arr.length < 2) return [];
+  // PAV — enforce ascending monotonicity (merge violators, weighted by n).
+  let i = 0;
+  while (i < arr.length - 1) {
+    if (arr[i].yMean > arr[i + 1].yMean) {
+      const a = arr[i], b = arr[i + 1], n = a.n + b.n;
+      arr.splice(i, 2, {
+        pMin: Math.min(a.pMin, b.pMin), pMax: Math.max(a.pMax, b.pMax),
+        yMean: (a.yMean * a.n + b.yMean * b.n) / n, n,
+      });
+      if (i > 0) i--;
+    } else i++;
+  }
+  // Stretch block boundaries to cover the full [0,1] line so test points between
+  // bin centers map to the nearest block (lookup is inclusive pMin..pMax).
+  arr.sort((a, b) => a.pMin - b.pMin);
+  for (let k = 0; k < arr.length; k++) {
+    arr[k].pMin = (k === 0) ? 0 : (arr[k - 1].pMax + arr[k].pMin) / 2;
+    arr[k].pMax = (k === arr.length - 1) ? 1 : arr[k].pMax;
+  }
+  for (let k = 0; k < arr.length - 1; k++) {
+    const mid = (arr[k].pMax + arr[k + 1].pMin) / 2;
+    arr[k].pMax = mid; arr[k + 1].pMin = mid;
+  }
+  return arr.map(b => ({ pMin: +b.pMin.toFixed(6), pMax: +b.pMax.toFixed(6), yMean: +b.yMean.toFixed(6), n: b.n }));
+}
+
+const trainCalSamples = train.map(s => ({ p: predictFull(s), y: s.y }));
+let blocks = fitIsotonicPav(trainCalSamples);
+
+// Apply calibration on TEST; keep ONLY if it improves OOS Brier.
+const testFull = test.map(s => ({ p: predictFull(s), y: s.y }));
+const testCalib = test.map(s => ({ p: _applyIsotonicBlocks(blocks, predictFull(s)), y: s.y }));
+const brierFull = M.brier(testFull);
+const brierCalib = blocks.length ? M.brier(testCalib) : Infinity;
+let keptOOS = blocks.length > 0 && brierCalib < brierFull;
+if (!keptOOS) blocks = [];
+
+// ---- Ablation on TEST ----
+const baseG = M.blueSideBaseline(test);
+const eloOnly = test.map(s => ({ p: s.pEloBlue, y: s.y }));               // sigmoid(logit(pEloBlue)) === pEloBlue
+const eloForm = test.map(s => ({ p: sigmoid(w[0] + w[1] * s.x[0] + w[2] * s.x[1]), y: s.y })); // zero draft
+const fullBlend = testFull;
+const fullCalib = keptOOS ? testCalib : testFull;
+
+const row = (label, smp, extra) => {
+  const b = M.brier(smp), ll = M.logloss(smp), e = M.ece(smp);
+  console.log(`  ${label.padEnd(22)} Brier=${b.toFixed(4)}  logloss=${ll.toFixed(4)}  ECE=${e.toFixed(4)}${extra || ''}`);
+};
+
+console.log('\n=== GAME-LEVEL blend fit (Task 6 — P(blue wins)) ===');
+console.log(`[game] samples n=${gSamples.length}  (train=${train.length} test=${test.length})`);
+console.log(`[game] draft join (conf>0.05): ${nDraftJoined}/${gSamples.length}   form join: ${nFormJoined}/${gSamples.length}`);
+console.log(`[game] weights w=[bias=${w[0].toFixed(4)}, elo=${w[1].toFixed(4)}, form=${w[2].toFixed(4)}, draft=${w[3].toFixed(4)}]  draftCapApplied=${draftCapApplied}`);
+console.log(`[game] blue-side base rate (test pStar)=${baseG.pStar.toFixed(4)}`);
+console.log('--- Ablation (TEST, last 30%) ---');
+row('(a) baseline', test.map(s => ({ p: baseG.pStar, y: s.y })), `  <- blue-side game base-rate`);
+row('(b) elo-only', eloOnly);
+row('(c) elo+form', eloForm);
+row('(d) full blend', fullBlend);
+row('(e) full + calib', fullCalib, keptOOS ? '  [calib KEPT]' : '  [calib DROPPED — no OOS gain]');
+console.log(`[game] full blend beats base-rate OOS? ${M.brier(fullBlend) < baseG.brier ? 'YES' : 'NO'}`);
+
+// ---- Write artifacts ----
+fs.writeFileSync(path.join(__dirname, '..', 'lib', 'lol-match-meta.json'), JSON.stringify({
+  weights: w, featureOrder: ['elo', 'form', 'draft'], draftCapApplied,
+  trainedAt: new Date().toISOString(), n: gSamples.length,
+  walkForward: { trainN: train.length, testN: test.length },
+  eloConfig: ELO_CONFIG,
+  level: 'game', predicts: 'P(blue wins)',
+}, null, 2));
+fs.writeFileSync(path.join(__dirname, '..', 'lib', 'lol-match-calib.json'),
+  JSON.stringify({ method: 'isotonic_pav', blocks, keptOOS }, null, 2));
+
+console.log('\n[game] wrote lib/lol-match-meta.json + lib/lol-match-calib.json');
