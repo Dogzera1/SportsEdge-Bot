@@ -30,7 +30,7 @@ Num bot de aposta, um LLM solto escreve prosa confiante e fabricada. Para evitar
 - `lib/lol-match-explain.js` — lógica pura testável:
   - `buildExplainPrompt({ gameProfile, draft, teams, probPct, label })` → string do prompt.
   - `parseExplainResponse(text)` → `{ early, mid, late, winCondition, keyMatchup, verdict }` ou `null` (parse falhou).
-- `test/test-lol-match-explain.js` — testa os dois.
+- `tests/test-lol-match-explain.js` — testa os dois.
 
 ### Arquivos modificados
 - `server.js` — novo handler `POST /api/lol-match-explain` (perto do `/api/lol-match-analyze`, ~5334).
@@ -124,7 +124,7 @@ Extrai o primeiro bloco `{…}` do texto (`text.match(/\{[\s\S]*\}/)`), `JSON.pa
 - **JSON do modelo inválido** → fallback `raw` (mostra o texto, não quebra).
 - **Draft parcial** (alguns campeões) → o prompt inclui só os conhecidos; a IA é instruída a não inventar.
 
-## 11. Testes (`test/test-lol-match-explain.js`)
+## 11. Testes (`tests/test-lol-match-explain.js`)
 - `buildExplainPrompt`: inclui prob, odd justa, fases com âncora, win-condition e draft; **omite** linhas de campos null (ex.: sem edge → sem a linha de edge); contém a instrução "APENAS um JSON" e "NÃO recomende stake".
 - `parseExplainResponse`: JSON válido (com cerca de prosa em volta) → objeto com as 6 chaves; JSON inválido/sem chaves → `null`; chaves faltando → preenchidas com `''`.
 - Endpoint: smoke prod (1 chamada real) + verificação de cap/erro graceful.
