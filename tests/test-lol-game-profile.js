@@ -56,6 +56,8 @@ module.exports = function(t) {
     // early: mean(blue gold 300,50)=175 - mean(red gold -100,120)=10 => +165
     assert.strictEqual(ph.early.measured, true, 'early measured');
     assert.strictEqual(ph.early.anchor.golddiff15, 165, 'early anchor gold = 165');
+    // cs: mean(blue 5,2)=3.5 - mean(red -3,4)=0.5 => +3
+    assert.strictEqual(ph.early.anchor.csdiff15, 3, 'early anchor cs = 3');
     assert.strictEqual(ph.early.winner, 'blue', 'blue wins early');
     assert.ok(ph.early.bars >= 0 && ph.early.bars <= 5, 'bars in [0,5]');
   });
