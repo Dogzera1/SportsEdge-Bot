@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Trains the draft model from oracleselixir_players and writes JSON artifacts to lib/.
-// Usage: node scripts/train-lol-draft-model.js [--db sportsedge.db] [--min-patch 14.0]
+// Usage: node scripts/train-lol-draft-model.js [--db sportsedge.db]
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
