@@ -1273,6 +1273,13 @@ button { cursor: pointer; }
 .dl-gp-edge{margin-left:8px;color:#7c9}
 .dl-gp-quality{margin-top:8px;color:#678;font-size:11px}
 .dl-gp-warn{margin-top:4px;color:#a86;font-size:11px}
+.dl-gp-ai{margin-top:10px;padding-top:8px;border-top:1px solid #1a2a3a}
+.dl-ai-btn{background:#13283a;border:1px solid #2a4a66;color:#cfe;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+.dl-ai-btn:disabled{opacity:.6;cursor:default}
+.dl-ai-out{margin-top:8px}
+.dl-ai-row{font-size:13px;line-height:1.6;margin-bottom:3px}
+.dl-ai-k{display:inline-block;min-width:74px;color:#5a7a9a;font-size:11px;letter-spacing:1px}
+.dl-ai-raw{font-size:13px;line-height:1.6;white-space:pre-wrap;color:#cfe}
 </style>
 </head>
 <body>
@@ -2246,6 +2253,51 @@ function dlRenderGameProfile(root, data, team1, team2) {
   const qtxt = `QUALIDADE: ${q.knownChamps}/${q.totalChamps} campeões · ${q.tier}` + (q.warnings.length ? ` · ⚠ ${q.warnings.join(', ')}` : '');
   root.appendChild(el('div', { class: 'dl-gp-quality' }, qtxt));
   root.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ draft é sinal fraco — leitura, não ordem de aposta'));
+
+  // AI analysis (on demand — paid call, capped server-side)
+  const aiWrap = el('div', { class: 'dl-gp-ai' });
+  const aiOut = el('div', { class: 'dl-ai-out' });
+  const aiBtn = el('button', { class: 'dl-ai-btn' }, '🤖 Análise da IA');
+  aiBtn.addEventListener('click', () => dlExplainMatch(aiBtn, aiOut));
+  aiWrap.appendChild(aiBtn);
+  aiWrap.appendChild(aiOut);
+  root.appendChild(aiWrap);
+}
+
+async function dlExplainMatch(btn, outEl) {
+  const team1 = (document.getElementById('dl_blueTeam')?.value || '').trim() || null;
+  const team2 = (document.getElementById('dl_redTeam')?.value  || '').trim() || null;
+  const draft = dlCollectDraft();
+  const oddRaw = parseFloat((document.querySelector('.dl-gp-bookodds')?.value) || '');
+  if (!team1 && !team2 && !draft) { outEl.textContent = 'Informe os times e/ou o draft.'; return; }
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'analisando…'; outEl.innerHTML = '';
+  try {
+    const reqBody = { team1, team2, side: 'blue', blue: draft?.blue, red: draft?.red };
+    if (oddRaw > 1) reqBody.bookOdds = oddRaw;
+    const r = await fetch('/api/lol-match-explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
+    const data = await r.json();
+    if (!data.ok) {
+      outEl.textContent = data.error === 'daily_cap_reached' ? 'Limite diário de análises atingido.'
+        : data.error === 'vision_disabled' ? 'IA indisponível (sem chave configurada).'
+        : data.error === 'empty_match' ? 'Informe os times e/ou o draft.'
+        : 'Falha na análise.';
+      return;
+    }
+    dlRenderAiAnalysis(outEl, data);
+  } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+function dlRenderAiAnalysis(outEl, data) {
+  outEl.innerHTML = '';
+  if (data.analysis) {
+    const a = data.analysis;
+    [['EARLY', a.early], ['MID', a.mid], ['LATE', a.late], ['WIN', a.winCondition], ['CHAVE', a.keyMatchup], ['VEREDITO', a.verdict]]
+      .forEach(([k, v]) => { if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v))); });
+  } else if (data.raw) {
+    outEl.appendChild(el('div', { class: 'dl-ai-raw' }, data.raw));
+  }
+  outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
 }
 
 // Shared by the file picker and Ctrl+V paste — downscales the image, then runs the vision parse.
