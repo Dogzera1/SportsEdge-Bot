@@ -1217,6 +1217,37 @@ button { cursor: pointer; }
 .dl-meta-item { display: flex; gap: 6px; }
 .dl-meta-label { color: var(--ink-faint); }
 .dl-meta-val   { color: var(--ink-soft); }
+.dl-team-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--ink);
+  padding: 5px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  border-radius: 3px;
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 4px;
+  transition: border-color 0.15s;
+}
+.dl-team-input:focus {
+  outline: none;
+  border-color: var(--border-strong);
+}
+.dl-comp-row {
+  display: flex; gap: 8px; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 11px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line-grid);
+}
+.dl-comp-k    { color: var(--ink-soft); }
+.dl-comp-v    { color: var(--gold); font-variant-numeric: tabular-nums; }
+.dl-comp-note { color: var(--ink-mute); font-size: 10px; }
+.dl-match-hint {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--ink-mute); font-style: italic;
+  margin-top: 6px;
+}
 .dl-print-msg {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -1303,23 +1334,27 @@ button { cursor: pointer; }
 <!-- ── Draft Lab ───────────────────────────────────────────────── -->
 <div id="draftLab">
   <div class="dl-header">
-    <span class="dl-title">Draft Lab</span>
-    <span class="dl-subtitle">análise exploratória de draft — pick 5 blue + 5 red</span>
+    <span class="dl-title">Match Lab</span>
+    <span class="dl-subtitle">times + lado + draft — win% calibrado com Elo e draft</span>
     <button class="btn" onclick="toggleDraftLab(false)" style="margin-left:auto;">✕ fechar</button>
   </div>
+  <datalist id="dlTeamList"></datalist>
   <div class="dl-body">
     <!-- Blue side -->
     <div class="dl-team" id="dlBlueTeam">
       <div class="dl-team-label blue">Blue Side</div>
+      <input class="dl-team-input" id="dl_blueTeam" list="dlTeamList" placeholder="Time (blue)" autocomplete="off">
       <!-- picks injected by JS -->
     </div>
     <!-- Red side -->
     <div class="dl-team" id="dlRedTeam">
       <div class="dl-team-label red">Red Side</div>
+      <input class="dl-team-input" id="dl_redTeam" list="dlTeamList" placeholder="Time (red)" autocomplete="off">
     </div>
     <!-- Actions -->
     <div class="dl-actions">
-      <button class="btn primary" id="dlAnalyzeBtn" onclick="dlAnalyze()">Analisar draft</button>
+      <button class="btn primary" id="dlAnalyzeMatchBtn" onclick="dlAnalyzeMatch()">Analisar partida</button>
+      <button class="btn" id="dlAnalyzeBtn" onclick="dlAnalyze()">Analisar draft</button>
       <label class="btn" style="cursor:pointer; text-align:center;">
         📷 enviar print
         <input type="file" id="dlPrintInput" accept="image/*" style="display:none" onchange="dlParsePrint(this)">
@@ -2029,12 +2064,19 @@ function dlRenderResult(data) {
   root.classList.add('visible');
 }
 
+// Returns { blue:[{champion,role}], red:[...] } or null if both sides empty.
+function dlCollectDraft() {
+  const blue = dlGetPicks('blue');
+  const red  = dlGetPicks('red');
+  if (!blue.length && !red.length) return null;
+  return { blue, red };
+}
+
 async function dlAnalyze() {
   dlSetError(null);
   dlSetPrintMsg(null);
-  const blue = dlGetPicks('blue');
-  const red  = dlGetPicks('red');
-  if (!blue.length && !red.length) {
+  const draft = dlCollectDraft();
+  if (!draft) {
     dlSetError('Preencha ao menos um campeão antes de analisar.');
     return;
   }
@@ -2045,7 +2087,7 @@ async function dlAnalyze() {
     const r = await fetch('/api/lol-draft-analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blue, red }),
+      body: JSON.stringify({ blue: draft.blue, red: draft.red }),
     });
     const data = await r.json();
     if (!r.ok || !data.ok) {
@@ -2058,6 +2100,87 @@ async function dlAnalyze() {
   } finally {
     btn.textContent = 'Analisar draft';
     btn.disabled = false;
+  }
+}
+
+async function dlAnalyzeMatch() {
+  const team1 = (document.getElementById('dl_blueTeam')?.value || '').trim() || null;
+  const team2 = (document.getElementById('dl_redTeam')?.value  || '').trim() || null;
+  const draft = dlCollectDraft();
+  const btn = document.getElementById('dlAnalyzeMatchBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  dlSetError(null);
+  dlSetPrintMsg(null);
+  try {
+    const r = await fetch('/api/lol-match-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team1, team2, side: 'blue', blue: draft?.blue, red: draft?.red }),
+    });
+    const data = await r.json();
+    if (!data.ok) { dlSetError(data.error || 'Erro'); return; }
+    dlRenderMatchResult(data, team1, team2);
+  } catch (e) {
+    dlSetError('Falha: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Analisar partida'; }
+  }
+}
+
+function dlRenderMatchResult(data, team1, team2) {
+  const root = document.getElementById('dlResult');
+  root.innerHTML = '';
+  root.classList.add('visible');
+  const pct = (x) => (x == null ? '—' : (x * 100).toFixed(1) + '%');
+  const blueP = data.prob * 100;
+
+  // win% bar
+  root.appendChild(
+    el('div', { class: 'dl-prob-bar-wrap' },
+      el('div', { class: 'dl-bar-blue', style: `width:${blueP.toFixed(1)}%` },
+        blueP >= 20 ? el('span', { class: 'dl-bar-label' }, pct(data.prob)) : null
+      ),
+      el('div', { class: 'dl-bar-red' },
+        (100 - blueP) >= 20 ? el('span', { class: 'dl-bar-label' }, pct(1 - data.prob)) : null
+      )
+    )
+  );
+
+  // headline numbers
+  root.appendChild(
+    el('div', { class: 'dl-prob-nums' },
+      el('span', {}, `${team1 || 'Blue'} ${pct(data.prob)}`),
+      el('span', {}, `${data.label} · conf ${pct(data.confidence)}`),
+      el('span', {}, `${team2 || 'Red'} ${pct(1 - data.prob)}`)
+    )
+  );
+
+  // component breakdown
+  const c = data.components || {};
+  if (c.elo) {
+    root.appendChild(
+      el('div', { class: 'dl-comp-row' },
+        el('span', { class: 'dl-comp-k' }, 'Elo (P blue)'),
+        el('span', { class: 'dl-comp-v' }, pct(c.elo.pBlue)),
+        el('span', { class: 'dl-comp-note' }, `conf ${pct(c.elo.confidence)}`)
+      )
+    );
+  }
+  if (c.draft) {
+    root.appendChild(
+      el('div', { class: 'dl-comp-row' },
+        el('span', { class: 'dl-comp-k' }, 'Draft (P blue)'),
+        el('span', { class: 'dl-comp-v' }, pct(c.draft.pBlue)),
+        el('span', { class: 'dl-comp-note' }, 'lean pequeno')
+      )
+    );
+  }
+  if (!c.elo) {
+    root.appendChild(
+      el('div', { class: 'dl-match-hint' },
+        'sem times → lean fraco (só draft). Preencha os times pra usar o Elo.'
+      )
+    );
   }
 }
 
@@ -2163,6 +2286,19 @@ document.addEventListener('paste', (e) => {
 });
 
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') toggleDraftLab(false); });
+
+// Populate team autocomplete from /api/lol-teams
+fetch('/api/lol-teams').then(r => r.json()).then(d => {
+  if (!d.ok) return;
+  const dl = document.getElementById('dlTeamList');
+  if (!dl) return;
+  dl.innerHTML = '';
+  for (const t of d.teams) {
+    const o = document.createElement('option');
+    o.value = t;
+    dl.appendChild(o);
+  }
+}).catch(() => {});
 
 // initial
 startPolling();
