@@ -26,6 +26,7 @@ module.exports = function(t) {
     assert.ok(/EARLY \(medido\): Vermelho/.test(p) && /-120g, -50xp, -4cs/.test(p), 'early anchor');
     assert.ok(/APENAS um JSON/.test(p), 'json-only instruction');
     assert.ok(/NÃO recomende stake/.test(p), 'no-stake instruction');
+    assert.ok(/USE O SEU CONHECIMENTO/.test(p), 'hybrid: own knowledge for late/draft');
   });
   t.test('buildExplainPrompt omits edge line when edge is null', () => {
     const gp2 = Object.assign({}, GP, { edge: null });
