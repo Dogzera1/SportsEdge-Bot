@@ -5330,6 +5330,45 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Match Lab — full match predictor (display-only). Calls predictMatch (Elo+capped-draft, calibrated).
+  if (p === '/api/lol-match-analyze' && req.method === 'POST') {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const { predictMatch } = require('./lib/lol-match-predict');
+        const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
+          ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
+        const out = predictMatch(db, {
+          team1: json?.team1 || null,
+          team2: json?.team2 || null,
+          side: json?.side === 'red' ? 'red' : 'blue',
+          draft,
+          league: json?.league || null,
+        });
+        sendJson(res, { ok: true, ...out });
+      } catch (e) {
+        log('WARN', 'MATCH-LAB', `match-analyze err: ${e.message}`);
+        sendJson(res, { ok: false, error: 'match_analyze_failed' }, 500);
+      }
+    });
+    return;
+  }
+
+  // Match Lab — team-name autocomplete (datalist source). Display-only.
+  if (p === '/api/lol-teams' && req.method === 'GET') {
+    try {
+      const set = new Set();
+      for (const r of db.prepare(`SELECT DISTINCT team1 t FROM match_results WHERE game='lol' AND team1 IS NOT NULL AND team1!=''
+                                   UNION SELECT DISTINCT team2 t FROM match_results WHERE game='lol' AND team2 IS NOT NULL AND team2!=''`).all()) set.add(r.t);
+      try { for (const r of db.prepare(`SELECT DISTINCT teamname t FROM oracleselixir_players WHERE teamname IS NOT NULL AND teamname!=''`).all()) set.add(r.t); } catch (_) {}
+      sendJson(res, { ok: true, teams: [...set].sort((a, b) => a.localeCompare(b)) });
+    } catch (e) {
+      sendJson(res, { ok: false, error: 'teams_failed' }, 500);
+    }
+    return;
+  }
+
   // Draft Lab — parse a draft screenshot into champions via Claude Haiku vision.
   // Dormant until ANTHROPIC_API_KEY is set in env. Result is for USER CONFIRMATION before analyze.
   if (p === '/api/lol-draft-parse-print' && req.method === 'POST') {
