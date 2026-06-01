@@ -74,4 +74,23 @@ module.exports = function(t) {
     const ph = gp.phaseEdges(mirror, ART.timing);
     assert.strictEqual(ph.early.winner, 'even', 'mirror draft -> even early');
   });
+  t.test('expectedTime averages gamelength of all 10 picks -> bucket', () => {
+    const all = [...DRAFT.blue, ...DRAFT.red];
+    const et = gp.expectedTime(all, ART.timing);
+    // mean(1900,2100,1850,1700)=1887.5 -> 1888s -> 31.5min -> médio
+    assert.strictEqual(et.seconds, 1888, 'seconds=1888');
+    assert.strictEqual(et.bucket, 'médio', 'bucket médio');
+  });
+  t.test('winCondition: same side early+late -> all phases', () => {
+    const s = gp.winCondition({ early: { winner: 'blue' }, late: { winner: 'blue' } });
+    assert.ok(/todas as fases/.test(s), `got "${s}"`);
+  });
+  t.test('winCondition: early blue + late red -> convert before scaling', () => {
+    const s = gp.winCondition({ early: { winner: 'blue' }, late: { winner: 'red' } });
+    assert.ok(/converter/.test(s) && /Azul/.test(s), `got "${s}"`);
+  });
+  t.test('winCondition: all even -> execution call', () => {
+    const s = gp.winCondition({ early: { winner: 'even' }, late: { winner: 'even' } });
+    assert.ok(/equilibrad/.test(s), `got "${s}"`);
+  });
 };
