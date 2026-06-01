@@ -1042,6 +1042,189 @@ button { cursor: pointer; }
   .layout { grid-template-columns: 240px 1fr 300px; }
   .col-detail { padding: 16px 20px; }
 }
+
+/* ── Draft Lab ───────────────────────────────────────────────────────── */
+#draftLab {
+  border-top: 1px solid var(--border);
+  background: var(--bg-deep);
+  padding: var(--pad-5) var(--pad-6);
+}
+.dl-header {
+  display: flex; align-items: baseline; gap: 12px;
+  margin-bottom: var(--pad-4);
+}
+.dl-title {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.dl-subtitle {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-mute);
+  letter-spacing: 0.04em;
+}
+.dl-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: var(--pad-5);
+  align-items: start;
+}
+.dl-team { display: flex; flex-direction: column; gap: 6px; }
+.dl-team-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.dl-team-label.blue { color: var(--side-blue); }
+.dl-team-label.red  { color: var(--side-red); }
+.dl-pick {
+  display: flex; align-items: center; gap: 8px;
+}
+.dl-role {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+  width: 32px;
+  flex-shrink: 0;
+}
+.dl-pick input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--ink);
+  padding: 5px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  border-radius: 3px;
+  width: 100%;
+  min-width: 0;
+  transition: border-color 0.15s;
+}
+.dl-pick input:focus {
+  outline: none;
+  border-color: var(--border-strong);
+}
+.dl-pick input.prefilled {
+  border-color: var(--gold-deep);
+  color: var(--gold);
+}
+.dl-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: flex-start;
+  padding-top: 22px;
+}
+.dl-result {
+  margin-top: var(--pad-4);
+  display: none;
+}
+.dl-result.visible { display: block; }
+.dl-prob-bar-wrap {
+  height: 22px;
+  border-radius: 3px;
+  background: var(--surface-high);
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 8px;
+  display: flex;
+}
+.dl-bar-blue {
+  background: linear-gradient(90deg, var(--side-blue), rgba(95,143,230,0.7));
+  transition: width 0.4s ease;
+  display: flex; align-items: center; justify-content: flex-start;
+  padding: 0 8px;
+}
+.dl-bar-red {
+  background: linear-gradient(270deg, var(--side-red), rgba(217,122,92,0.7));
+  flex: 1;
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 0 8px;
+}
+.dl-bar-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.04em;
+}
+.dl-prob-nums {
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink-mute);
+  margin-bottom: 6px;
+}
+.dl-disclaimer {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  font-style: italic;
+  margin-bottom: var(--pad-3);
+  letter-spacing: 0.02em;
+}
+.dl-breakdown-title {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-bottom: 6px;
+}
+.dl-breakdown-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 1fr 60px;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line-grid);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  gap: 8px;
+}
+.dl-breakdown-row.head {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.dl-bd-role { color: var(--ink-mute); }
+.dl-bd-blue { color: var(--side-blue); }
+.dl-bd-red  { color: var(--side-red); }
+.dl-bd-delta { text-align: right; font-weight: 600; }
+.dl-bd-delta.pos { color: var(--side-blue); }
+.dl-bd-delta.neg { color: var(--side-red); }
+.dl-bd-delta.neu { color: var(--ink-mute); }
+.dl-meta-row {
+  display: flex; gap: var(--pad-5); flex-wrap: wrap;
+  margin-top: var(--pad-3);
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--ink-mute);
+}
+.dl-meta-item { display: flex; gap: 6px; }
+.dl-meta-label { color: var(--ink-faint); }
+.dl-meta-val   { color: var(--ink-soft); }
+.dl-print-msg {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--gold);
+  margin-top: 6px;
+  display: none;
+}
+.dl-print-msg.visible { display: block; }
+.dl-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--leak);
+  margin-top: 8px;
+  display: none;
+}
+.dl-error.visible { display: block; }
 </style>
 </head>
 <body>
@@ -1106,6 +1289,37 @@ button { cursor: pointer; }
     </div>
   </aside>
 
+</div>
+
+<!-- ── Draft Lab ───────────────────────────────────────────────── -->
+<div id="draftLab">
+  <div class="dl-header">
+    <span class="dl-title">Draft Lab</span>
+    <span class="dl-subtitle">análise exploratória de draft — pick 5 blue + 5 red</span>
+  </div>
+  <div class="dl-body">
+    <!-- Blue side -->
+    <div class="dl-team" id="dlBlueTeam">
+      <div class="dl-team-label blue">Blue Side</div>
+      <!-- picks injected by JS -->
+    </div>
+    <!-- Red side -->
+    <div class="dl-team" id="dlRedTeam">
+      <div class="dl-team-label red">Red Side</div>
+    </div>
+    <!-- Actions -->
+    <div class="dl-actions">
+      <button class="btn primary" id="dlAnalyzeBtn" onclick="dlAnalyze()">Analisar draft</button>
+      <label class="btn" style="cursor:pointer; text-align:center;">
+        📷 colar print
+        <input type="file" id="dlPrintInput" accept="image/*" style="display:none" onchange="dlParsePrint(this)">
+      </label>
+      <div class="dl-print-msg" id="dlPrintMsg"></div>
+      <div class="dl-error" id="dlError"></div>
+    </div>
+  </div>
+  <!-- Result -->
+  <div class="dl-result" id="dlResult"></div>
 </div>
 
 <script>
@@ -1661,6 +1875,236 @@ document.getElementById('autoBtn').addEventListener('click', () => {
 });
 document.getElementById('m_p').addEventListener('input', recalcManual);
 document.getElementById('m_odd').addEventListener('input', recalcManual);
+
+// ──────────────────────────────────────────────────────────── Draft Lab
+(function initDraftLab() {
+  const ROLES = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
+
+  function buildPicks(containerId, side) {
+    const container = document.getElementById(containerId);
+    // keep the label, then add picks
+    for (const role of ROLES) {
+      const inp = el('input', {
+        type: 'text',
+        placeholder: role === 'JGL' ? 'Jungle' : role.charAt(0) + role.slice(1).toLowerCase(),
+        autocomplete: 'off',
+        'data-side': side,
+        'data-role': role,
+        id: `dl_${side}_${role}`,
+      });
+      container.appendChild(
+        el('div', { class: 'dl-pick' },
+          el('span', { class: 'dl-role' }, role),
+          inp
+        )
+      );
+    }
+  }
+
+  buildPicks('dlBlueTeam', 'blue');
+  buildPicks('dlRedTeam',  'red');
+})();
+
+function dlGetPicks(side) {
+  const ROLES = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
+  return ROLES.map(role => {
+    const inp = document.getElementById(`dl_${side}_${role}`);
+    return { champion: (inp ? inp.value.trim() : ''), role };
+  }).filter(p => p.champion !== '');
+}
+
+function dlSetError(msg) {
+  const el_ = document.getElementById('dlError');
+  if (msg) { el_.textContent = msg; el_.classList.add('visible'); }
+  else      { el_.textContent = ''; el_.classList.remove('visible'); }
+}
+
+function dlSetPrintMsg(msg) {
+  const el_ = document.getElementById('dlPrintMsg');
+  if (msg) { el_.textContent = msg; el_.classList.add('visible'); }
+  else      { el_.textContent = ''; el_.classList.remove('visible'); }
+}
+
+function dlRenderResult(data) {
+  const root = document.getElementById('dlResult');
+  root.innerHTML = '';
+
+  const prob = data.prob;           // blue win prob 0–1
+  const conf = data.confidence;     // e.g. 'low' | 'medium' | 'high'
+  const bd   = data.breakdown || {};
+
+  const blueP = (prob * 100).toFixed(1);
+  const redP  = (100 - prob * 100).toFixed(1);
+  const bluePct = prob * 100;
+
+  // prob bar
+  root.appendChild(
+    el('div', { class: 'dl-prob-bar-wrap' },
+      el('div', { class: 'dl-bar-blue', style: `width:${bluePct.toFixed(1)}%` },
+        bluePct >= 20 ? el('span', { class: 'dl-bar-label' }, blueP + '%') : null
+      ),
+      el('div', { class: 'dl-bar-red' },
+        (100 - bluePct) >= 20 ? el('span', { class: 'dl-bar-label' }, redP + '%') : null
+      )
+    )
+  );
+
+  // numeric + conf
+  root.appendChild(
+    el('div', { class: 'dl-prob-nums' },
+      el('span', {}, `Blue ${blueP}%`),
+      conf ? el('span', {}, `conf: ${conf}`) : null,
+      el('span', {}, `Red ${redP}%`)
+    )
+  );
+
+  // disclaimer (humble framing)
+  root.appendChild(
+    el('div', { class: 'dl-disclaimer' },
+      'exploratório — draft sozinho é sinal fraco; veja o breakdown abaixo'
+    )
+  );
+
+  // lane matchups breakdown
+  const matchups = bd.laneMatchups || [];
+  if (matchups.length) {
+    root.appendChild(el('div', { class: 'dl-breakdown-title' }, 'Lane matchups'));
+
+    // header
+    root.appendChild(
+      el('div', { class: 'dl-breakdown-row head' },
+        el('span', { class: 'dl-bd-role' }, 'Role'),
+        el('span', { class: 'dl-bd-blue' }, 'Blue'),
+        el('span', { class: 'dl-bd-red'  }, 'Red'),
+        el('span', { class: 'dl-bd-delta' }, 'Δ Blue')
+      )
+    );
+
+    for (const mu of matchups) {
+      const delta = mu.deltaPp;
+      const cls = delta == null ? 'neu' : delta > 0 ? 'pos' : delta < 0 ? 'neg' : 'neu';
+      const deltaStr = delta == null ? '—' : (delta >= 0 ? '+' : '') + delta.toFixed(1) + 'pp';
+      const nStr = mu.n != null ? ` (n=${mu.n})` : '';
+      root.appendChild(
+        el('div', { class: 'dl-breakdown-row' },
+          el('span', { class: 'dl-bd-role' }, mu.role || '—'),
+          el('span', { class: 'dl-bd-blue' }, mu.blue || '—'),
+          el('span', { class: 'dl-bd-red'  }, mu.red  || '—'),
+          el('span', { class: `dl-bd-delta ${cls}` }, deltaStr + nStr)
+        )
+      );
+    }
+  }
+
+  // summary meta-row
+  const metas = [];
+  if (bd.wrDiffPp  != null) metas.push(['WR diff', (bd.wrDiffPp >= 0 ? '+' : '') + bd.wrDiffPp.toFixed(1) + 'pp']);
+  if (bd.synergyDiff != null) metas.push(['Synergy diff', (bd.synergyDiff >= 0 ? '+' : '') + bd.synergyDiff.toFixed(2)]);
+  if (bd.knownChamps != null && bd.totalChamps != null) metas.push(['Coverage', `${bd.knownChamps}/${bd.totalChamps} champs`]);
+
+  if (metas.length) {
+    const metaRow = el('div', { class: 'dl-meta-row' });
+    for (const [lbl, val] of metas) {
+      metaRow.appendChild(
+        el('div', { class: 'dl-meta-item' },
+          el('span', { class: 'dl-meta-label' }, lbl),
+          el('span', { class: 'dl-meta-val' }, val)
+        )
+      );
+    }
+    root.appendChild(metaRow);
+  }
+
+  root.classList.add('visible');
+}
+
+async function dlAnalyze() {
+  dlSetError(null);
+  dlSetPrintMsg(null);
+  const blue = dlGetPicks('blue');
+  const red  = dlGetPicks('red');
+  if (!blue.length && !red.length) {
+    dlSetError('Preencha ao menos um campeão antes de analisar.');
+    return;
+  }
+  const btn = document.getElementById('dlAnalyzeBtn');
+  btn.textContent = 'Analisando…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/lol-draft-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blue, red }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      dlSetError(data.error || `Erro ${r.status}`);
+    } else {
+      dlRenderResult(data);
+    }
+  } catch (e) {
+    dlSetError('Falha na requisição: ' + e.message);
+  } finally {
+    btn.textContent = 'Analisar draft';
+    btn.disabled = false;
+  }
+}
+
+async function dlParsePrint(input) {
+  const file = input.files[0];
+  if (!file) return;
+  dlSetError(null);
+  dlSetPrintMsg(null);
+
+  const reader = new FileReader();
+  reader.onload = async (ev) => {
+    const imageBase64 = ev.target.result; // data:image/png;base64,...
+    dlSetPrintMsg('Processando print…');
+    try {
+      const r = await fetch('/api/lol-draft-parse-print', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64 }),
+      });
+      if (r.status === 503) {
+        dlSetPrintMsg(null);
+        dlSetError('Parse por print indisponível (ANTHROPIC_API_KEY não setada).');
+        return;
+      }
+      const data = await r.json();
+      if (!data.ok) {
+        dlSetPrintMsg(null);
+        dlSetError(data.error || 'Erro ao interpretar print.');
+        return;
+      }
+      // Prefill inputs
+      const sides = { blue: data.blue || [], red: data.red || [] };
+      const ROLES = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
+      for (const [side, picks] of Object.entries(sides)) {
+        // clear all first
+        for (const role of ROLES) {
+          const inp = document.getElementById(`dl_${side}_${role}`);
+          if (inp) { inp.value = ''; inp.classList.remove('prefilled'); }
+        }
+        for (const pick of picks) {
+          const role = (pick.role || '').toUpperCase();
+          const inp = document.getElementById(`dl_${side}_${role}`);
+          if (inp && pick.champion) {
+            inp.value = pick.champion;
+            inp.classList.add('prefilled');
+          }
+        }
+      }
+      dlSetPrintMsg('Draft preenchido — revise e clique Analisar draft.');
+    } catch (e) {
+      dlSetPrintMsg(null);
+      dlSetError('Falha ao processar print: ' + e.message);
+    }
+  };
+  reader.readAsDataURL(file);
+  // reset so same file can be re-uploaded
+  input.value = '';
+}
 
 // initial
 startPolling();
