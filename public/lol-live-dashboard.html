@@ -1181,6 +1181,12 @@ button { cursor: pointer; }
   color: var(--ink-mute);
   margin-bottom: 6px;
 }
+.dl-series-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-family: var(--font-mono); font-size: 11px; flex-wrap: wrap; }
+.dl-series-lbl { color: var(--ink-mute); letter-spacing: 0.1em; text-transform: uppercase; font-size: 9.5px; }
+.dl-series-sel { display: inline-flex; gap: 4px; }
+.dl-series-btn { background: var(--surface); border: 1px solid var(--border); color: var(--ink-mute); font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; }
+.dl-series-btn.active { border-color: var(--border-strong); color: var(--ink); }
+.dl-series-val { color: var(--ink-soft); }
 .dl-disclaimer {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -2265,6 +2271,29 @@ function dlRenderMatchResult(data, team1, team2) {
       el('span', {}, `${team2 || 'Red'} ${pct(1 - data.prob)}`)
     )
   );
+
+  // series prob (display-only) — side-neutralized binomial; selector switches Bo (no re-request)
+  if (data.series) {
+    const fmts = [['Bo1', 'bo1'], ['Bo3', 'bo3'], ['Bo5', 'bo5']];
+    const valEl = el('span', { class: 'dl-series-val' });
+    const render = (key) => {
+      const ps = data.series[key];
+      valEl.textContent = `${team1 || 'T1'} ${pct(ps)} · ${team2 || 'T2'} ${pct(1 - ps)}`;
+    };
+    const sel = el('div', { class: 'dl-series-sel' });
+    fmts.forEach(([label, key], i) => {
+      const b = el('button', { class: 'dl-series-btn' + (i === 1 ? ' active' : '') }, label);
+      b.addEventListener('click', () => {
+        sel.querySelectorAll('.dl-series-btn').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+        render(key);
+      });
+      sel.appendChild(b);
+    });
+    root.appendChild(el('div', { class: 'dl-series-row' },
+      el('span', { class: 'dl-series-lbl' }, 'Série'), sel, valEl));
+    render('bo3');
+  }
 
   // component breakdown
   const c = data.components || {};
