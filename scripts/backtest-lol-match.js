@@ -108,7 +108,7 @@ function matchOeDraft(g, oeIdx, oeGames, normFn) {
   let repGid = null;
   for (const gid of cand.keys()) { if (repGid === null || gid < repGid) repGid = gid; }
   const og = oeGames.get(repGid);
-  return { draft: { blue: og.blue, red: og.red }, team1IsBlue: cand.get(repGid) };
+  return { draft: { blue: og.blue, red: og.red }, team1IsBlue: cand.get(repGid), gid: repGid };
 }
 
 // All resolved LoL matches in strict chronological order (no leakage).
@@ -274,6 +274,28 @@ for (const [gid, og] of oeByGame) {
     y: og.blueWon, date: og.date, pEloBlue,
   });
 }
+
+// --- Phase B: validate seriesProb(games-fed Elo game prob) vs real series winners ---
+const { seriesProb } = require('../lib/lol-match-series');
+const seriesSamples = [];
+for (const g of games) {
+  const m = matchOeDraft(g, oeIndex, oeByGame, norm);
+  if (!m || !m.gid) continue;
+  const pBlue = winnerMap.get(m.gid); // games-fed Elo as-of pre-game-1 (no leakage)
+  if (pBlue == null) continue;
+  const pNeutralT1 = m.team1IsBlue ? pBlue : 1 - pBlue;
+  const sc = String(g.final_score || '').match(/(\d+)\s*[-:]\s*(\d+)/);
+  if (!sc) continue;
+  const bestOf = 2 * Math.max(parseInt(sc[1]), parseInt(sc[2])) - 1;
+  const y = (String(g.winner).toLowerCase() === String(g.team1).toLowerCase()) ? 1 : 0;
+  seriesSamples.push({ p: seriesProb(pNeutralT1, bestOf), y, date: g.resolved_at });
+}
+seriesSamples.sort((a, b) => String(a.date) < String(b.date) ? -1 : String(a.date) > String(b.date) ? 1 : 0);
+const sTest = seriesSamples.slice(Math.floor(seriesSamples.length * 0.7));
+const sBase = M.blueSideBaseline(sTest);
+console.log('\n=== Phase B: series-level validation (seriesProb on games-Elo) ===');
+console.log(`[series-B] n=${sTest.length}  Brier=${M.brier(sTest).toFixed(4)}  logloss=${M.logloss(sTest).toFixed(4)}  ECE=${M.ece(sTest).toFixed(4)}  base=${sBase.brier.toFixed(4)}`);
+console.log(`[series-B] beats base-rate OOS? ${M.brier(sTest) < sBase.brier ? 'YES' : 'NO'}`);
 
 db.close();
 
