@@ -5380,7 +5380,19 @@ const server = http.createServer(async (req, res) => {
           gameProfile = null;
         }
 
-        sendJson(res, { ok: true, ...out, gameProfile });
+        let series = null;
+        if (typeof out.seriesNeutralP === 'number') {
+          const { seriesProb } = require('./lib/lol-match-series');
+          const p = out.seriesNeutralP;
+          series = {
+            neutralP: +p.toFixed(4),
+            bo1: +seriesProb(p, 1).toFixed(4),
+            bo3: +seriesProb(p, 3).toFixed(4),
+            bo5: +seriesProb(p, 5).toFixed(4),
+          };
+        }
+
+        sendJson(res, { ok: true, ...out, gameProfile, series });
       } catch (e) {
         log('WARN', 'MATCH-LAB', `match-analyze err: ${e.message}`);
         sendJson(res, { ok: false, error: 'match_analyze_failed' }, 500);
