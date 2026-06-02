@@ -248,7 +248,7 @@ usableGids.sort((a, b) => String(a.date) < String(b.date) ? -1 : String(a.date) 
 const testGids = usableGids.slice(Math.floor(usableGids.length * 0.7));
 const abResults = SOURCES.map(s => {
   const smp = testGids.map(x => ({ p: replayMaps[s].get(x.gid), y: x.y })).filter(x => x.p != null);
-  return { s, brier: M.brier(smp), n: smp.length };
+  return { s, brier: smp.length ? M.brier(smp) : Infinity, n: smp.length };
 }).sort((a, b) => a.brier - b.brier);
 const winner = abResults[0].s;
 const winnerMap = replayMaps[winner];
