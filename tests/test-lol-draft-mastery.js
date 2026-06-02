@@ -32,6 +32,7 @@ module.exports = function (t) {
     const red  = [{ c: 'azir', role: 'mid', player: null }];
     const out = computeMasteryFeatures(blue, red, mastery, wrTbl, meta);
     t.assert(out.masteryWrDiff > 0, `blue mastery WR edge >0, got ${out.masteryWrDiff}`);
+    t.assert(out.masteryPerfDiff > 0, `blue perf edge >0, got ${out.masteryPerfDiff}`);
     t.assert(out.rows.length === 1 && out.rows[0].side === 'blue', 'one blue mastery row');
   });
 
