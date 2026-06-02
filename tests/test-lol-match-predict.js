@@ -106,6 +106,25 @@ module.exports = async function(t) {
     assert.ok(out.prob >= 0 && out.prob <= 1, 'blended prob in range');
   });
 
+  t.test('seriesNeutralP present in [0,1] for known teams', () => {
+    const out = predictMatch(db, { team1: 'T1', team2: 'Gen.G', side: 'blue', draft: null });
+    assert.ok(typeof out.seriesNeutralP === 'number', 'seriesNeutralP is number');
+    assert.ok(out.seriesNeutralP >= 0 && out.seriesNeutralP <= 1, `in [0,1], got ${out.seriesNeutralP}`);
+  });
+
+  t.test('seriesNeutralP is side-agnostic (same for blue and red orientation)', () => {
+    const a = predictMatch(db, { team1: 'T1', team2: 'Gen.G', side: 'blue', draft: null });
+    const b = predictMatch(db, { team1: 'T1', team2: 'Gen.G', side: 'red', draft: null });
+    assert.ok(Math.abs(a.seriesNeutralP - b.seriesNeutralP) < 1e-9,
+      `neutral prob should match across orientation: ${a.seriesNeutralP} vs ${b.seriesNeutralP}`);
+  });
+
+  t.test('seriesNeutralP null when no teams (no Elo)', () => {
+    const out = predictMatch(db, { team1: null, team2: null, side: 'blue',
+      draft: { blue: [{ champion: 'Jinx', role: 'bot' }], red: [{ champion: 'Zeri', role: 'bot' }] } });
+    assert.strictEqual(out.seriesNeutralP, null, 'no Elo => seriesNeutralP null');
+  });
+
   console.log('\nSample predictMatch result (T1 blue vs Gen.G, no draft):');
   const sample = predictMatch(db, { team1: 'T1', team2: 'Gen.G', side: 'blue', draft: null });
   console.log(JSON.stringify(sample, null, 2));
