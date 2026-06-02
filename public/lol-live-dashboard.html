@@ -1624,7 +1624,7 @@ async function pullLiveDraft(eventId, btn) {
       const bt = document.getElementById('dl_blueTeam'); if (bt && d.teams.blue) bt.value = d.teams.blue;
       const rt = document.getElementById('dl_redTeam'); if (rt && d.teams.red) rt.value = d.teams.red;
     }
-    const fill = (side, picks) => { for (const p of (picks || [])) { const inp = document.getElementById('dl_' + side + '_' + p.role); if (inp) inp.value = p.champion; } };
+    const fill = (side, picks) => { for (const p of (picks || [])) { const inp = document.getElementById('dl_' + side + '_' + p.role); if (inp) inp.value = p.champion; const pinp = document.getElementById('dlp_' + side + '_' + p.role); if (pinp && p.player) pinp.value = p.player; } };
     fill('blue', d.blue); fill('red', d.red);
     toggleDraftLab(true);
     reset();
@@ -2022,10 +2022,17 @@ document.getElementById('m_odd').addEventListener('input', recalcManual);
         'data-role': role,
         id: `dl_${side}_${role}`,
       });
+      const playerInp = el('input', {
+        type: 'text',
+        placeholder: 'jogador (opcional)',
+        autocomplete: 'off',
+        id: `dlp_${side}_${role}`,
+      });
       container.appendChild(
         el('div', { class: 'dl-pick' },
           el('span', { class: 'dl-role' }, role),
-          inp
+          inp,
+          playerInp
         )
       );
     }
@@ -2039,7 +2046,9 @@ function dlGetPicks(side) {
   const ROLES = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
   return ROLES.map(role => {
     const inp = document.getElementById(`dl_${side}_${role}`);
-    return { champion: (inp ? inp.value.trim() : ''), role };
+    const champion = inp ? inp.value.trim() : '';
+    const player = (document.getElementById(`dlp_${side}_${role}`)?.value || '').trim();
+    return player ? { champion, role, player } : { champion, role };
   }).filter(p => p.champion !== '');
 }
 
@@ -2121,6 +2130,23 @@ function dlRenderResult(data) {
           el('span', { class: 'dl-bd-blue' }, mu.blue || '—'),
           el('span', { class: 'dl-bd-red'  }, mu.red  || '—'),
           el('span', { class: `dl-bd-delta ${cls}` }, deltaStr + nStr)
+        )
+      );
+    }
+  }
+
+  // player×champion mastery breakdown
+  const mastery = bd.mastery || [];
+  if (mastery.length) {
+    root.appendChild(el('div', { class: 'dl-breakdown-title' }, 'Maestria (jogador × campeão)'));
+    for (const m of mastery) {
+      const cls = m.kdaDelta > 0 ? 'pos' : m.kdaDelta < 0 ? 'neg' : 'neu';
+      root.appendChild(
+        el('div', { class: 'dl-breakdown-row' },
+          el('span', { class: 'dl-bd-role' }, m.side === 'blue' ? '🔵' : '🔴'),
+          el('span', { class: 'dl-bd-blue' }, `${m.player} — ${m.champ}`),
+          el('span', { class: 'dl-bd-red' }, `${m.wrPct}% (n=${m.n})`),
+          el('span', { class: `dl-bd-delta ${cls}` }, (m.kdaDelta >= 0 ? '+' : '') + m.kdaDelta + ' KDA')
         )
       );
     }
