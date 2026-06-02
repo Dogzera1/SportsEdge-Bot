@@ -4,7 +4,8 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { buildWrTable, buildMatchupMatrix, buildSynergyMatrix, fitLogistic, sigmoid } = require('../lib/lol-draft-train');
+const { buildWrTable, buildMatchupMatrix, buildSynergyMatrix, fitLogistic, sigmoid,
+  buildMasteryTable, computeMasteryFeatures } = require('../lib/lol-draft-train');
 const { normalizeChampion } = require('../lib/lol-champions');
 
 const args = process.argv.slice(2);
@@ -16,12 +17,13 @@ const dbPath = (args.includes('--db') ? args[args.indexOf('--db') + 1] : (proces
 const SHRINK_K = 100, PRIOR = 0.5;
 
 const db = new Database(dbPath, { readonly: true });
-const rows = db.prepare(`SELECT gameid, side, position, champion, result, patch, date
+const rows = db.prepare(`SELECT gameid, side, position, champion, result, patch, date,
+  playername, kills, deaths, assists, golddiffat15
   FROM oracleselixir_players WHERE champion IS NOT NULL AND position IS NOT NULL`).all();
 console.log(`[train] loaded ${rows.length} player-rows from oracleselixir_players`);
 if (rows.length < 1000) { console.error('[train] ABORT: <1000 rows — run /admin sync-oracleselixir first'); process.exit(1); }
 
-function gameFeatures(players, wr, matchups, synergy) {
+function gameFeatures(players, wr, matchups, synergy, mastery, useMastery) {
   const blue = players.filter(p => String(p.side).toLowerCase() === 'blue');
   const red = players.filter(p => String(p.side).toLowerCase() === 'red');
   if (!blue.length || !red.length) return null;
@@ -39,7 +41,14 @@ function gameFeatures(players, wr, matchups, synergy) {
   }
   const synSide = (side) => { const cs = side.map(p => normalizeChampion(p.champion)).filter(Boolean); let s = 0; for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) { const cell = synergy[[cs[i], cs[j]].sort().join('|')]; if (cell) s += ((cell.wins + SHRINK_K * PRIOR) / (cell.n + SHRINK_K) - 0.5); } return s; };
   const synergyDiff = synSide(blue) - synSide(red);
-  return { x: [wrDiff, laneSum, synergyDiff, 0], y: blue[0].result ? 1 : 0 };
+  let mWr = 0, mPerf = 0;
+  if (useMastery) {
+    const toSlot = (arr) => arr.map(p => ({ c: normalizeChampion(p.champion), role: String(p.position).toLowerCase(), player: p.playername }));
+    const mf = computeMasteryFeatures(toSlot(blue), toSlot(red), mastery, wr, { priorWr: PRIOR, shrinkK: SHRINK_K });
+    mWr = mf.masteryWrDiff; mPerf = mf.masteryPerfDiff;
+  }
+  const x = useMastery ? [wrDiff, laneSum, synergyDiff, mWr, mPerf] : [wrDiff, laneSum, synergyDiff];
+  return { x, y: blue[0].result ? 1 : 0 };
 }
 
 function groupGames(rs) { const g = new Map(); for (const r of rs) { if (!g.has(r.gameid)) g.set(r.gameid, []); g.get(r.gameid).push(r); } return g; }
@@ -48,35 +57,40 @@ const patches = [...new Set(rows.map(r => r.patch).filter(Boolean))].sort();
 const cut = patches[Math.floor(patches.length * 0.8)] || patches[patches.length - 1];
 const trainRows = rows.filter(r => r.patch < cut), testRows = rows.filter(r => r.patch >= cut);
 
-function trainOn(rs) {
+function trainOn(rs, useMastery) {
   const wr = buildWrTable(rs), matchups = buildMatchupMatrix(rs), synergy = buildSynergyMatrix(rs);
-  const samples = [...groupGames(rs).values()].map(p => gameFeatures(p, wr, matchups, synergy)).filter(Boolean);
+  const mastery = useMastery ? buildMasteryTable(rs) : {};
+  const samples = [...groupGames(rs).values()].map(p => gameFeatures(p, wr, matchups, synergy, mastery, useMastery)).filter(Boolean);
   const weights = fitLogistic(samples, { epochs: 500, lr: 0.2, l2: 0.02 });
-  return { wr, matchups, synergy, weights };
+  return { wr, matchups, synergy, mastery, weights };
 }
-function evalOn(model, rs) {
-  let brier = 0, ll = 0, base = 0, k = 0;
+function evalOn(model, rs, useMastery) {
+  let brier = 0, base = 0, k = 0;
   for (const players of groupGames(rs).values()) {
-    const f = gameFeatures(players, model.wr, model.matchups, model.synergy); if (!f) continue;
+    const f = gameFeatures(players, model.wr, model.matchups, model.synergy, model.mastery, useMastery); if (!f) continue;
     const w = model.weights; const p = sigmoid(w[0] + f.x.reduce((a, xi, i) => a + xi * w[i + 1], 0));
-    brier += (p - f.y) ** 2; ll += -(f.y * Math.log(p + 1e-9) + (1 - f.y) * Math.log(1 - p + 1e-9));
-    base += (0.5 - f.y) ** 2; k++;
+    brier += (p - f.y) ** 2; base += (0.5 - f.y) ** 2; k++;
   }
-  return { n: k, brier: brier / k, logloss: ll / k, brierBaseline: base / k };
+  return { n: k, brier: brier / k, brierBaseline: base / k };
 }
 
-const wf = trainOn(trainRows);
-const ev = evalOn(wf, testRows);
-console.log(`[train] walk-forward (train<${cut}, test>=${cut}): n=${ev.n} Brier=${ev.brier.toFixed(4)} (baseline 0.5-pred=${ev.brierBaseline.toFixed(4)}) logloss=${ev.logloss.toFixed(4)}`);
-if (ev.brier >= ev.brierBaseline) console.warn('[train] WARNING: model does NOT beat the 0.5 baseline OOS — review before relying on it.');
+// Walk-forward A/B: does mastery beat the no-mastery model out-of-sample?
+const mA = trainOn(trainRows, true), evA = evalOn(mA, testRows, true);
+const mB = trainOn(trainRows, false), evB = evalOn(mB, testRows, false);
+const masteryHelps = evA.brier < evB.brier;
+console.log(`[train] walk-forward A/B (test>=${cut}): withMastery Brier=${evA.brier.toFixed(4)} | without=${evB.brier.toFixed(4)} | baseline0.5=${evB.brierBaseline.toFixed(4)} | masteryHelps=${masteryHelps}`);
 
-const full = trainOn(rows);
+// Full model on all rows (5 features). Forced-0 gate: zero the two mastery weights if it didn't help OOS.
+const full = trainOn(rows, true);
+if (!masteryHelps) { full.weights[4] = 0; full.weights[5] = 0; }
 const champs = [...new Set(rows.map(r => normalizeChampion(r.champion)).filter(Boolean))].sort();
-const meta = { priorWr: PRIOR, shrinkK: SHRINK_K, weights: full.weights, trainedAt: new Date().toISOString(), rows: rows.length, patches: patches.length, walkForward: ev, champCount: champs.length };
+const meta = { priorWr: PRIOR, shrinkK: SHRINK_K, weights: full.weights, trainedAt: new Date().toISOString(),
+  rows: rows.length, patches: patches.length, masteryHelps, walkForward: { withMastery: evA, without: evB }, champCount: champs.length };
 const out = (f, o) => fs.writeFileSync(path.join(__dirname, '..', 'lib', f), JSON.stringify(o));
 out('lol-draft-wr.json', full.wr);
 out('lol-draft-matchups.json', full.matchups);
 out('lol-draft-synergy.json', full.synergy);
+out('lol-draft-mastery.json', full.mastery);
 out('lol-draft-meta.json', meta);
-console.log(`[train] wrote artifacts: ${Object.keys(full.wr).length} wr keys, ${champs.length} champions. weights=${JSON.stringify(full.weights.map(w => +w.toFixed(3)))}`);
+console.log(`[train] wrote artifacts: ${Object.keys(full.wr).length} wr keys, ${Object.keys(full.mastery).length} mastery keys, weights=${JSON.stringify(full.weights.map(w => +w.toFixed(3)))}`);
 db.close();
