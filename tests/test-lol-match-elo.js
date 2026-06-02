@@ -30,4 +30,33 @@ module.exports = function (t) {
     assert.strictEqual(n, 2, `both matches rated, got ${n}`);
     db.close();
   });
+
+  t.test('aggregateOeGames returns per-game rows, date-sorted', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE oracleselixir_players (gameid TEXT, side TEXT, teamname TEXT, date TEXT, league TEXT, result INTEGER);`);
+    const ins = db.prepare(`INSERT INTO oracleselixir_players VALUES (?,?,?,?,?,?)`);
+    ins.run('g1', 'blue', 'A', '2026-02-02', 'LCK', 1);
+    ins.run('g1', 'red', 'B', '2026-02-02', 'LCK', 0);
+    ins.run('g2', 'blue', 'C', '2026-01-01', 'LPL', 0);
+    ins.run('g2', 'red', 'D', '2026-01-01', 'LPL', 1);
+    const { aggregateOeGames } = require('../lib/lol-match-elo');
+    const games = aggregateOeGames(db, {});
+    assert.strictEqual(games.length, 2, 'two games');
+    assert.strictEqual(games[0].gameid, 'g2', 'date-sorted: g2 (Jan) first');
+    assert.deepStrictEqual(
+      { blueTeam: games[1].blueTeam, redTeam: games[1].redTeam, blueWon: games[1].blueWon },
+      { blueTeam: 'A', redTeam: 'B', blueWon: 1 }, 'g1 fields');
+    db.close();
+  });
+
+  t.test('buildMatchElo games source produces ratings; bad source throws', () => {
+    const Database2 = require('better-sqlite3');
+    const path = require('path');
+    const realDb = new Database2(path.join(__dirname, '..', 'sportsedge.db'), { readonly: true });
+    const { buildMatchElo } = require('../lib/lol-match-elo');
+    const elo = buildMatchElo(realDb, { config: { halfLifeDays: 0 }, source: 'games' });
+    assert.ok(elo.size() > 50, `expected many rated teams, got ${elo.size()}`);
+    assert.throws(() => buildMatchElo(realDb, { config: {}, source: 'bogus' }), /unknown source/);
+    realDb.close();
+  });
 };
