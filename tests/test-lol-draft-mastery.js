@@ -50,4 +50,19 @@ module.exports = function (t) {
       [{ c: 'azir', role: 'mid', player: 'noob' }], [{ c: 'ryze', role: 'mid' }], mastery, { 'azir|mid': { wins: 50, n: 100 } }, { priorWr: 0.5, shrinkK: 100 });
     t.assert(out.masteryWrDiff === 0, 'n<MIN_N contributes nothing');
   });
+
+  t.test('fillPlayersFromRoster sets player by normalized role, skips filled', () => {
+    const { fillPlayersFromRoster } = require('../lib/oracleselixir-player-features');
+    const side = [{ champion: 'Azir', role: 'MID' }, { champion: 'Jinx', role: 'ADC', player: 'Keep' }];
+    const expectedRoster = { expected: { mid: 'Faker', bot: 'Gumayusi' } };
+    const out = fillPlayersFromRoster(side, expectedRoster);
+    t.assert(out[0].player === 'Faker', 'MID slot resolves to mid→Faker');
+    t.assert(out[1].player === 'Keep', 'already-filled slot untouched');
+  });
+
+  t.test('fillPlayersFromRoster tolerates null roster', () => {
+    const { fillPlayersFromRoster } = require('../lib/oracleselixir-player-features');
+    const side = [{ champion: 'Azir', role: 'MID' }];
+    t.assert(fillPlayersFromRoster(side, null)[0].player === undefined, 'no roster → unchanged');
+  });
 };

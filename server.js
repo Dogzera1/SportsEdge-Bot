@@ -5339,6 +5339,13 @@ const server = http.createServer(async (req, res) => {
         const { predictMatch } = require('./lib/lol-match-predict');
         const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
           ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
+        if (draft) {
+          try {
+            const { getExpectedRoster, fillPlayersFromRoster } = require('./lib/oracleselixir-player-features');
+            if (json?.team1) fillPlayersFromRoster(json?.side === 'red' ? draft.red : draft.blue, getExpectedRoster(db, json.team1));
+            if (json?.team2) fillPlayersFromRoster(json?.side === 'red' ? draft.blue : draft.red, getExpectedRoster(db, json.team2));
+          } catch (_) { /* inference is best-effort; display-only */ }
+        }
         const out = predictMatch(db, {
           team1: json?.team1 || null,
           team2: json?.team2 || null,
@@ -5414,7 +5421,7 @@ const server = http.createServer(async (req, res) => {
         const w = (wR && wR.status === 200) ? safeParse(wR.body, {}) : null;
         if (!w || !w.gameMetadata) { sendJson(res, { ok: false, error: 'no_window', game: g.id, state: g.state }, 404); return; }
         const ROLE2SLOT = { top: 'TOP', jungle: 'JGL', mid: 'MID', bottom: 'ADC', support: 'SUP' };
-        const pick = (md) => (md || []).map(x => ({ champion: x.championId, role: ROLE2SLOT[x.role] || String(x.role || '').toUpperCase() }));
+        const pick = (md) => (md || []).map(x => ({ champion: x.championId, role: ROLE2SLOT[x.role] || String(x.role || '').toUpperCase(), player: x.summonerName || (x.esportsPlayer && x.esportsPlayer.summonerName) || null }));
         const blue = pick(w.gameMetadata.blueTeamMetadata.participantMetadata);
         const red = pick(w.gameMetadata.redTeamMetadata.participantMetadata);
         const teamsArr = (ev?.match?.teams) || [];
@@ -5515,6 +5522,13 @@ const server = http.createServer(async (req, res) => {
         const json = safeParse(body, null);
         const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
           ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
+        if (draft) {
+          try {
+            const { getExpectedRoster, fillPlayersFromRoster } = require('./lib/oracleselixir-player-features');
+            if (json?.team1) fillPlayersFromRoster(json?.side === 'red' ? draft.red : draft.blue, getExpectedRoster(db, json.team1));
+            if (json?.team2) fillPlayersFromRoster(json?.side === 'red' ? draft.blue : draft.red, getExpectedRoster(db, json.team2));
+          } catch (_) { /* inference is best-effort; display-only */ }
+        }
         if (!json?.team1 && !json?.team2 && !draft) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
 
         // Daily cap per (IP, day). Reserve BEFORE the paid call so failures count (anti-abuse).
