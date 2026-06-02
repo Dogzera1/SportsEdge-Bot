@@ -1,7 +1,0 @@
-    basket n_mt=  46 clv_w=  0.47
-        cs n_mt=  82 clv_w=  0.90
-     dota2 n_mt=  35 clv_w=  0.85
-  football n_mt=  21 clv_w=  0.23
-       lol n_mt= 306 clv_w=  0.06
-    tennis n_mt=1715 clv_w=  2.09
-  valorant n_mt=   7 clv_w=  0.32

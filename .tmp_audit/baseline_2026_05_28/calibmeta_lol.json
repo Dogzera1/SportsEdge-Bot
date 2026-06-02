@@ -1,1 +1,0 @@
-﻿{"ok":true,"sport":"lol","calib_path":"/app/lib/lol-mt-calib.json","meta":{"sport":"lol","fittedAt":"2026-05-28T19:41:21.170Z","nSamples":165,"markets":{"total":{"nBins":8,"nTotal":165,"tiers":{"tier2":{"nBins":3,"nTotal":33},"other":{"nBins":5,"nTotal":49},"tier1":{"nBins":5,"nTotal":83,"sides":{"under":{"nBins":4,"nTotal":75}}}}}}}}
