@@ -24,6 +24,7 @@ const { computeDraftWinProb } = require('../lib/lol-draft-model');
 const { fitLogistic, sigmoid } = require('../lib/lol-draft-train');
 const { _applyIsotonicBlocks } = require('../lib/brier-holdout-eval');
 const M = require('../lib/lol-match-metrics');
+const { aggregateOeGames } = require('../lib/lol-match-elo');
 
 const db = new Database(path.join(__dirname, '..', 'sportsedge.db'), { readonly: true });
 
@@ -192,68 +193,85 @@ const ELO_CONFIG = { halfLifeDays: 0, kBase: 32, kMin: 10, kScale: 40, confidenc
 const clamp01 = (p) => Math.max(1e-6, Math.min(1 - 1e-6, p));
 const logit = (p) => { const c = clamp01(p); return Math.log(c / (1 - c)); };
 
-// ---- Chronological event interleave (NO LEAKAGE) ----
-// Events: match_results series ('rate') + OE games ('predict'). Sort by date ASC;
-// on ties, 'predict' BEFORE 'rate' so a game never sees its own series' result in
-// the Elo. Elo is updated ONLY from series ('rate'); OE games are sub-events of
-// those series — rating them again would double-count.
-const events = [];
-for (const g of games) {
-  events.push({ kind: 'rate', date: g.resolved_at, g });
-}
-for (const [gid, og] of oeByGame) {
-  // Need both full sides and a known outcome to be a usable sample.
-  if (og.blueWon == null || !og.blueTeam || !og.redTeam) continue;
-  events.push({ kind: 'predict', date: og.date, gid, og });
-}
-// predict (0) sorts before rate (1) on equal dates.
-const kindRank = { predict: 0, rate: 1 };
-events.sort((a, b) => {
-  const da = String(a.date), db_ = String(b.date);
-  if (da < db_) return -1;
-  if (da > db_) return 1;
-  return kindRank[a.kind] - kindRank[b.kind];
-});
-
-const gameElo = createEloSystem(ELO_CONFIG);
-const gSamples = []; // { x:[logit(elo),form,draft], y:blueWon, date }
-let nDraftJoined = 0, nFormJoined = 0;
-
-for (const ev of events) {
-  if (ev.kind === 'rate') {
-    const g = ev.g;
-    const tier = classifyLeague(g.league);
-    const y1 = (String(g.winner).toLowerCase() === String(g.team1).toLowerCase()) ? 1 : 0;
-    const winner = y1 ? g.team1 : g.team2;
-    const loser = y1 ? g.team2 : g.team1;
-    const sc = String(g.final_score || '').match(/(\d+)\s*[-:]\s*(\d+)/);
-    const margin = sc ? Math.max(1, Math.abs(parseInt(sc[1]) - parseInt(sc[2]))) : 1;
-    gameElo.rate(winner, loser, margin, g.resolved_at, tier);
-    continue;
+// ---- A/B Elo source replay: returns Map<gameid, pEloBlue (as-of)> ----
+// source='series': series-level Elo only (matches from match_results).
+// source='games': OE game-level Elo only (each OE game rates after prediction).
+// source='hybrid': series matches strictly before OE window seed Elo; then OE
+//   games interleave predict-then-rate.
+// No leakage: for each OE game, predict fires BEFORE rate on equal dates.
+function eloReplayByGid(source) {
+  const elo = createEloSystem(ELO_CONFIG);
+  const oeGames = aggregateOeGames(db, {});
+  const cutoff = oeGames.length ? oeGames[0].date : null;
+  const ev = [];
+  if (source === 'series' || source === 'hybrid') {
+    for (const g of games) {
+      if (source === 'hybrid' && cutoff && String(g.resolved_at) >= String(cutoff)) continue;
+      ev.push({ k: 'rate', date: g.resolved_at, g });
+    }
   }
+  for (const g of oeGames) ev.push({ k: 'predict', date: g.date, g });
+  ev.sort((a, b) => { const x = String(a.date), y = String(b.date); if (x < y) return -1; if (x > y) return 1; return a.k === 'predict' ? -1 : 1; });
+  const out = new Map();
+  for (const e of ev) {
+    if (e.k === 'rate') {
+      const g = e.g; const tier = classifyLeague(g.league);
+      const y1 = (String(g.winner).toLowerCase() === String(g.team1).toLowerCase()) ? 1 : 0;
+      const w = y1 ? g.team1 : g.team2, l = y1 ? g.team2 : g.team1;
+      const sc = String(g.final_score || '').match(/(\d+)\s*[-:]\s*(\d+)/);
+      const margin = sc ? Math.max(1, Math.abs(parseInt(sc[1]) - parseInt(sc[2]))) : 1;
+      elo.rate(w, l, margin, g.resolved_at, tier);
+    } else {
+      const g = e.g; const tier = classifyLeague(g.league);
+      const pred = elo.getP(g.blueTeam, g.redTeam, tier);
+      out.set(g.gameid, (pred.foundA && pred.foundB && pred.confidence > 0) ? pred.pA : null);
+      if (source === 'games' || source === 'hybrid') {
+        const w = g.blueWon ? g.blueTeam : g.redTeam, l = g.blueWon ? g.redTeam : g.blueTeam;
+        elo.rate(w, l, 1, g.date, tier);
+      }
+    }
+  }
+  return out;
+}
 
-  // predict: as-of Elo P(blue wins), oriented to blue.
-  const og = ev.og;
-  const tier = classifyLeague(og.league);
-  const pred = gameElo.getP(og.blueTeam, og.redTeam, tier);
-  if (!(pred.foundA && pred.foundB && pred.confidence > 0)) continue;
-  const pEloBlue = pred.pA; // pA = P(playerA=blue wins)
+// --- A/B the three Elo sources by elo-only OOS Brier (70/30 by date) ---
+const SOURCES = ['series', 'games', 'hybrid'];
+const replayMaps = {};
+for (const s of SOURCES) replayMaps[s] = eloReplayByGid(s);
 
-  // Form as-of game date (blueTeam is t1 → form.pA = P(blue better form)).
+const usableGids = [];
+for (const [gid, og] of oeByGame) {
+  if (og.blueWon == null || !og.blueTeam || !og.redTeam) continue;
+  usableGids.push({ gid, y: og.blueWon, date: og.date });
+}
+usableGids.sort((a, b) => String(a.date) < String(b.date) ? -1 : String(a.date) > String(b.date) ? 1 : 0);
+const testGids = usableGids.slice(Math.floor(usableGids.length * 0.7));
+const abResults = SOURCES.map(s => {
+  const smp = testGids.map(x => ({ p: replayMaps[s].get(x.gid), y: x.y })).filter(x => x.p != null);
+  return { s, brier: M.brier(smp), n: smp.length };
+}).sort((a, b) => a.brier - b.brier);
+const winner = abResults[0].s;
+const winnerMap = replayMaps[winner];
+console.log('\n=== Elo source A/B (elo-only, test=last30%) ===');
+for (const r of abResults) console.log(`  ${r.s.padEnd(7)} Brier=${r.brier.toFixed(4)}  cov=${r.n}/${testGids.length}`);
+console.log(`  -> winner: ${winner}`);
+
+// --- Build gSamples: Elo from the winning source, form/draft as-of ---
+const gSamples = [];
+let nDraftJoined = 0, nFormJoined = 0;
+for (const [gid, og] of oeByGame) {
+  if (og.blueWon == null || !og.blueTeam || !og.redTeam) continue;
+  const pEloBlue = winnerMap.get(gid);
+  if (pEloBlue == null) continue;
   const form = _formSubModel(db, og.blueTeam, og.redTeam, null, og.date);
   const pFormBlue = form.confidence > 0 ? form.pA : null;
   if (pFormBlue != null) nFormJoined++;
-
-  // Draft (pre-game info). d.prob = P(blue wins).
   const d = computeDraftWinProb({ blue: og.blue, red: og.red });
   const pDraftBlue = d.prob;
   if (d.confidence > 0.05) nDraftJoined++;
-
   gSamples.push({
     x: [logit(pEloBlue), pFormBlue != null ? logit(pFormBlue) : 0, pDraftBlue != null ? logit(pDraftBlue) : 0],
-    y: og.blueWon,
-    date: og.date,
-    pEloBlue,
+    y: og.blueWon, date: og.date, pEloBlue,
   });
 }
 
@@ -385,7 +403,7 @@ fs.writeFileSync(path.join(__dirname, '..', 'lib', 'lol-match-meta.json'), JSON.
   droppedReason: 'form hurts OOS (elo+form Brier > elo-only); kept in display breakdown as info only',
   trainedAt: new Date().toISOString(), n: gSamples.length,
   walkForward: { trainN: train.length, testN: test.length },
-  eloConfig: ELO_CONFIG,
+  eloSource: winner, eloConfig: ELO_CONFIG,
   level: 'game', predicts: 'P(blue wins)',
   oos: {
     baselineBrier: +baselineBrier.toFixed(6),
