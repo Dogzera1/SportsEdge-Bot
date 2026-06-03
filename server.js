@@ -5616,9 +5616,10 @@ const server = http.createServer(async (req, res) => {
         _vmap.set(dayKey, used + 1);
 
         const prompt = 'This is a League of Legends draft screenshot. Return ONLY compact JSON, no prose: '
-          + '{"teams":{"blue":"<team name or null>","red":"<team name or null>"},"blue":[{"champion":"<name>","role":"top|jng|mid|bot|sup"}],"red":[...]} '
+          + '{"teams":{"blue":"<team name or null>","red":"<team name or null>"},"blue":[{"champion":"<name>","role":"top|jng|mid|bot|sup","player":"<player name or null>"}],"red":[...]} '
           + 'with exactly 5 entries per team in role order top,jng,mid,bot,sup. '
           + 'For "teams", read the team names only if clearly shown (e.g. a tournament/broadcast overlay); otherwise use null. '
+          + 'For "player", read the player/summoner name shown next to each champion (broadcast overlay or champ-select nameplate) if clearly legible; otherwise use null. '
           + 'Use official English champion names. If a role is unclear, still order by lane position. If you cannot read a champion, use null.';
         const payload = {
           model: 'claude-haiku-4-5', max_tokens: 1024,
@@ -5636,7 +5637,7 @@ const server = http.createServer(async (req, res) => {
         const parsed = safeParse((text.match(/\{[\s\S]*\}/) || [null])[0], null);
         if (!parsed) { sendJson(res, { ok: false, error: 'parse_failed', raw: text.slice(0, 300) }, 502); return; }
         const { normalizeChampion } = require('./lib/lol-champions');
-        const tag = (arr) => (arr || []).map(entry => ({ champion: entry.champion, role: entry.role, key: normalizeChampion(entry.champion) }));
+        const tag = (arr) => (arr || []).map(entry => ({ champion: entry.champion, role: entry.role, player: entry.player || null, key: normalizeChampion(entry.champion) }));
         const teams = (parsed.teams && typeof parsed.teams === 'object')
           ? { blue: parsed.teams.blue || null, red: parsed.teams.red || null } : null;
         sendJson(res, { ok: true, teams, blue: tag(parsed.blue), red: tag(parsed.red), needsConfirmation: true });

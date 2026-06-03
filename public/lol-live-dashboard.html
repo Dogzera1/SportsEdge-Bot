@@ -2455,6 +2455,8 @@ async function dlSubmitPrintFile(file) {
       for (const role of ROLES) {
         const inp = document.getElementById(`dl_${side}_${role}`);
         if (inp) { inp.value = ''; inp.classList.remove('prefilled'); }
+        const pinp = document.getElementById(`dlp_${side}_${role}`);
+        if (pinp) { pinp.value = ''; pinp.classList.remove('prefilled'); }
       }
       // Vision returns Oracle role codes (top/jng/mid/bot/sup); the input slots use UI labels
       // (TOP/JGL/MID/ADC/SUP). Translate so jng→JGL and bot→ADC land in the right field.
@@ -2463,6 +2465,8 @@ async function dlSubmitPrintFile(file) {
         const slot = SLOT[(pick.role || '').toLowerCase().trim()] || (pick.role || '').toUpperCase();
         const inp = document.getElementById(`dl_${side}_${slot}`);
         if (inp && pick.champion) { inp.value = pick.champion; inp.classList.add('prefilled'); }
+        const pinp = document.getElementById(`dlp_${side}_${slot}`);
+        if (pinp && pick.player) { pinp.value = pick.player; pinp.classList.add('prefilled'); }
       }
     }
     if (data.teams) {
