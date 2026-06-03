@@ -5620,8 +5620,8 @@ const server = http.createServer(async (req, res) => {
           + '{"teams":{"blue":"<team name or null>","red":"<team name or null>"},"blue":[{"champion":"<name>","role":"top|jng|mid|bot|sup","player":"<player name or null>"}],"red":[...]} '
           + 'with exactly 5 entries per team in role order top,jng,mid,bot,sup. Blue team is on the left, red team on the right. '
           + 'For "teams", read the team names from a broadcast/tournament overlay or the top header of a scoreboard (one per side). '
-          + 'For "player", read the player handle shown for each champion — in a scoreboard it is the text directly under the champion name. '
-          + 'Use official English champion names. If a role is unclear, order by lane/row position. '
+          + 'Identify each champion from its portrait icon AND its name text; never assume a champion from its lane/role. Use official English champion names. '
+          + 'For "player": in a scoreboard each row contains TWO separate texts — the champion name, and the human player handle (a person nickname, usually with a short team tag, e.g. "SLY Kryze", "GL Carlsen"). Put that handle in "player". The handle is NOT the champion name — never copy the champion name into "player". If no separate human handle is visible, use null. '
           + 'CRITICAL: read all text exactly as shown — never guess, translate, or invent a team, player, or champion name. '
           + 'If any single value is not clearly legible, use null for that value instead of guessing.';
         const payload = {
