@@ -5615,14 +5615,17 @@ const server = http.createServer(async (req, res) => {
         // keys — negligible for this low-traffic, user-triggered endpoint.
         _vmap.set(dayKey, used + 1);
 
-        const prompt = 'This is a League of Legends draft screenshot. Return ONLY compact JSON, no prose: '
+        const prompt = 'This image is a League of Legends champ-select (draft) OR a live in-game scoreboard. '
+          + 'Return ONLY compact JSON, no prose: '
           + '{"teams":{"blue":"<team name or null>","red":"<team name or null>"},"blue":[{"champion":"<name>","role":"top|jng|mid|bot|sup","player":"<player name or null>"}],"red":[...]} '
-          + 'with exactly 5 entries per team in role order top,jng,mid,bot,sup. '
-          + 'For "teams", read the team names only if clearly shown (e.g. a tournament/broadcast overlay); otherwise use null. '
-          + 'For "player", read the player/summoner name shown next to each champion (broadcast overlay or champ-select nameplate) if clearly legible; otherwise use null. '
-          + 'Use official English champion names. If a role is unclear, still order by lane position. If you cannot read a champion, use null.';
+          + 'with exactly 5 entries per team in role order top,jng,mid,bot,sup. Blue team is on the left, red team on the right. '
+          + 'For "teams", read the team names from a broadcast/tournament overlay or the top header of a scoreboard (one per side). '
+          + 'For "player", read the player handle shown for each champion — in a scoreboard it is the text directly under the champion name. '
+          + 'Use official English champion names. If a role is unclear, order by lane/row position. '
+          + 'CRITICAL: read all text exactly as shown — never guess, translate, or invent a team, player, or champion name. '
+          + 'If any single value is not clearly legible, use null for that value instead of guessing.';
         const payload = {
-          model: 'claude-haiku-4-5', max_tokens: 1024,
+          model: 'claude-sonnet-4-5', max_tokens: 1024,
           messages: [{ role: 'user', content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
             { type: 'text', text: prompt },
