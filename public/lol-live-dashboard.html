@@ -2492,13 +2492,19 @@ function dlDownscaleToDataUrl(file) {
       img.onerror = () => resolve(raw);
       img.onload = () => {
         const MAX = 1568;
-        const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+        const longest = Math.max(img.width, img.height) || 1;
+        // Downscale big screenshots to MAX; UPSCALE small ones (capped at 2.5x) so the vision
+        // model can read small scoreboard text like player handles — a 739px Lightshot crop is
+        // otherwise too small and the names get misread. Never exceed MAX on the long edge.
+        const scale = Math.min(MAX / longest, 2.5);
         const w = Math.max(1, Math.round(img.width * scale));
         const h = Math.max(1, Math.round(img.height * scale));
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        try { resolve(canvas.toDataURL('image/jpeg', 0.85)); }
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        try { resolve(canvas.toDataURL('image/jpeg', 0.92)); }
         catch (_) { resolve(raw); }
       };
       img.src = raw;
