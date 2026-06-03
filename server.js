@@ -5432,8 +5432,9 @@ const server = http.createServer(async (req, res) => {
         const wR = await httpGet('https://feed.lolesports.com/livestats/v1/window/' + g.id, LOL_HEADERS).catch(() => null);
         const w = (wR && wR.status === 200) ? safeParse(wR.body, {}) : null;
         if (!w || !w.gameMetadata) { sendJson(res, { ok: false, error: 'no_window', game: g.id, state: g.state }, 404); return; }
+        const { stripPlayerTeamTag } = require('./lib/lol-champions');
         const ROLE2SLOT = { top: 'TOP', jungle: 'JGL', mid: 'MID', bottom: 'ADC', support: 'SUP' };
-        const pick = (md) => (md || []).map(x => ({ champion: x.championId, role: ROLE2SLOT[x.role] || String(x.role || '').toUpperCase(), player: x.summonerName || (x.esportsPlayer && x.esportsPlayer.summonerName) || null }));
+        const pick = (md) => (md || []).map(x => ({ champion: x.championId, role: ROLE2SLOT[x.role] || String(x.role || '').toUpperCase(), player: stripPlayerTeamTag(x.summonerName || (x.esportsPlayer && x.esportsPlayer.summonerName)) }));
         const blue = pick(w.gameMetadata.blueTeamMetadata.participantMetadata);
         const red = pick(w.gameMetadata.redTeamMetadata.participantMetadata);
         const teamsArr = (ev?.match?.teams) || [];
@@ -5639,8 +5640,8 @@ const server = http.createServer(async (req, res) => {
         const text = (rj?.content || []).map(c => c.text || '').join('');
         const parsed = safeParse((text.match(/\{[\s\S]*\}/) || [null])[0], null);
         if (!parsed) { sendJson(res, { ok: false, error: 'parse_failed', raw: text.slice(0, 300) }, 502); return; }
-        const { normalizeChampion } = require('./lib/lol-champions');
-        const tag = (arr) => (arr || []).map(entry => ({ champion: entry.champion, role: entry.role, player: entry.player || null, key: normalizeChampion(entry.champion) }));
+        const { normalizeChampion, stripPlayerTeamTag } = require('./lib/lol-champions');
+        const tag = (arr) => (arr || []).map(entry => ({ champion: entry.champion, role: entry.role, player: stripPlayerTeamTag(entry.player), key: normalizeChampion(entry.champion) }));
         const teams = (parsed.teams && typeof parsed.teams === 'object')
           ? { blue: parsed.teams.blue || null, red: parsed.teams.red || null } : null;
         sendJson(res, { ok: true, teams, blue: tag(parsed.blue), red: tag(parsed.red), needsConfirmation: true });
