@@ -5525,6 +5525,61 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Dota Lab — parse a draft/scoreboard screenshot into heroes via Claude vision.
+  // Dormant until ANTHROPIC_API_KEY is set. Result is for USER CONFIRMATION before analyze.
+  // Display-only: feeds only the Dota Lab inputs, never stake/EV. Shares the vision daily cap
+  // (_draftVisionDayMap + ANTHROPIC_VISION_DAILY_CAP) with /api/lol-draft-parse-print — same paid API.
+  if (p === '/api/dota-draft-parse-print' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled', tip: 'set ANTHROPIC_API_KEY' }, 503); return; }
+        const json = safeParse(body, null);
+        const dataUrl = String(json?.imageBase64 || '');
+        const m = dataUrl.match(/^data:(image\/(png|jpeg|webp));base64,(.+)$/);
+        if (!m) { sendJson(res, { ok: false, error: 'imageBase64 must be a data URL (png/jpeg/webp)' }, 400); return; }
+        const mediaType = m[1], b64 = m[3];
+        if (b64.length > 7000000) { sendJson(res, { ok: false, error: 'image_too_large', max_b64: 7000000 }, 413); return; }
+
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const cap = parseInt(process.env.ANTHROPIC_VISION_DAILY_CAP || '50', 10);
+        const _vmap = (global._draftVisionDayMap = global._draftVisionDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const used = _vmap.get(dayKey) || 0;
+        if (used >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        // Reserve the slot BEFORE the paid call so failures still count toward the cap.
+        _vmap.set(dayKey, used + 1);
+
+        const { buildDotaPrintPrompt, normalizeHeroName } = require('./lib/dota-draft-parse');
+        const payload = {
+          model: 'claude-sonnet-4-5', max_tokens: 1024,
+          messages: [{ role: 'user', content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+            { type: 'text', text: buildDotaPrintPrompt() },
+          ] }],
+        };
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages', payload,
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const parsed = safeParse((text.match(/\{[\s\S]*\}/) || [null])[0], null);
+        if (!parsed) { sendJson(res, { ok: false, error: 'parse_failed', raw: text.slice(0, 300) }, 502); return; }
+        const { stripPlayerTeamTag } = require('./lib/lol-champions');
+        const tag = (arr) => (arr || []).map(e => ({ hero: e.hero, player: stripPlayerTeamTag(e.player), key: normalizeHeroName(db, e.hero) }));
+        const teams = (parsed.teams && typeof parsed.teams === 'object')
+          ? { blue: parsed.teams.blue || null, red: parsed.teams.red || null } : null;
+        sendJson(res, { ok: true, teams, blue: tag(parsed.blue), red: tag(parsed.red), needsConfirmation: true });
+      } catch (e) {
+        log('WARN', 'DOTA-LAB', `parse-print err: ${e.message}`);
+        sendJson(res, { ok: false, error: 'parse_print_failed' }, 500);
+      }
+    }, 2000000); // 2MB body cap (client downscales first); mirrors the LoL endpoint.
+    return;
+  }
+
   // Match Lab — AI match reading (display-only). Sonnet explains the game-profile; never feeds stake.
   if (p === '/api/lol-match-explain' && req.method === 'POST') {
     _readPostBody(req, res, async (body) => {
