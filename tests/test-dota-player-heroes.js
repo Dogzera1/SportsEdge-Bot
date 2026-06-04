@@ -43,4 +43,10 @@ module.exports = async function (t) {
   t.test('fresh cache does not refetch', () => t.assert(calls === 1 && r2.length === 1));
   const rz = await getPlayerHeroStats(db, 0, { fetcher });
   t.test('zero account_id -> empty, no fetch', () => t.assert(rz.length === 0 && calls === 1));
+
+  // guard: a malformed OpenDota row without hero_id must not store a NULL-hero_id row
+  const db2 = freshDb();
+  _invalidateProCache();
+  const r3 = await getPlayerHeroStats(db2, 555, { ttlDays: 7, fetcher: async () => [{ hero_id: 2, games: 10, win: 7 }, { games: 9, win: 4 }] });
+  t.test('row without hero_id is skipped', () => t.assert(r3.length === 1 && r3[0].hero_id === 2));
 };
