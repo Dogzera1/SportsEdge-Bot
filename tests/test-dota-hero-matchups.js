@@ -1,6 +1,6 @@
 // tests/test-dota-hero-matchups.js — counter edge from dota_hero_matchups (name->id via dota_hero_stats).
 const Database = require('better-sqlite3');
-const { getMatchupEdge, _invalidateMatchupCache } = require('../lib/dota-hero-matchups');
+const { getMatchupEdge, resolveHeroId, _invalidateMatchupCache } = require('../lib/dota-hero-matchups');
 const { _invalidateHeroCache } = require('../lib/dota-draft-parse');
 
 function freshDb() {
@@ -45,4 +45,8 @@ module.exports = function (t) {
     const r = getMatchupEdge(db, [1], [5], { minGames: 20 });
     t.assert(Math.abs(r.blueAdvantagePp - 10.0) < 0.05);
   });
+  t.test('resolveHeroId resolves an exact name', () => t.assert(resolveHeroId(db, 'Anti-Mage') === 1));
+  t.test('resolveHeroId loose-matches', () => t.assert(resolveHeroId(db, 'antimage') === 1));
+  t.test('resolveHeroId passes through numeric id', () => t.assert(resolveHeroId(db, 8) === 8));
+  t.test('resolveHeroId unknown -> null', () => t.assert(resolveHeroId(db, 'Nope') === null));
 };
