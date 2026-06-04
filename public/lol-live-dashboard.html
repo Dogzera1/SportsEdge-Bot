@@ -1274,6 +1274,9 @@ button { cursor: pointer; }
   display: none;
 }
 .dl-print-msg.visible { display: block; }
+.dota-slot { display: flex; gap: 6px; margin-bottom: 6px; }
+.dota-slot .dota-hero   { flex: 1 1 62%; min-width: 0; }
+.dota-slot .dota-player { flex: 1 1 38%; min-width: 0; }
 .dl-error {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1370,7 +1373,7 @@ button { cursor: pointer; }
 <div id="dotaLab">
   <div class="dl-header">
     <span class="dl-title">Dota Lab</span>
-    <span class="dl-subtitle">times + heróis — win% calibrado com Elo e draft</span>
+    <span class="dl-subtitle">times + heróis (ou cole um print) — win% calibrado com Elo e draft</span>
     <button class="btn" onclick="toggleDotaLab(false)" style="margin-left:auto;">✕ fechar</button>
   </div>
   <datalist id="dotaTeamList"></datalist>
@@ -1388,6 +1391,13 @@ button { cursor: pointer; }
     </div>
     <div class="dl-actions">
       <button class="btn primary" id="dotaAnalyzeBtn">Analisar partida</button>
+      <label class="btn" style="cursor:pointer; text-align:center;">
+        📷 enviar print
+        <input type="file" id="dotaPrintInput" accept="image/*" style="display:none" onchange="dotaParsePrint(this)">
+      </label>
+      <span class="dl-paste-hint">ou Ctrl+V pra colar</span>
+      <div class="dl-print-msg" id="dotaPrintMsg"></div>
+      <div class="dl-error" id="dotaError"></div>
     </div>
   </div>
   <div id="dotaResult" style="margin-top: var(--pad-4);"></div>
@@ -2528,15 +2538,19 @@ function toggleDraftLab(force) {
   if (btn) btn.classList.toggle('primary', open);
 }
 
-// Ctrl+V a draft screenshot straight into the lab (only while it's open) — same path as the picker.
+// Ctrl+V a screenshot straight into whichever lab is open — same path as that lab's file picker.
 document.addEventListener('paste', (e) => {
-  const lab = document.getElementById('draftLab');
-  if (!lab || !lab.classList.contains('open')) return;
+  const dota = document.getElementById('dotaLab');
+  const draft = document.getElementById('draftLab');
+  const handler = (dota && dota.classList.contains('open')) ? dotaSubmitPrintFile
+                : (draft && draft.classList.contains('open')) ? dlSubmitPrintFile
+                : null;
+  if (!handler) return;
   const items = (e.clipboardData && e.clipboardData.items) || [];
   for (const it of items) {
     if (it.type && it.type.indexOf('image/') === 0) {
       const blob = it.getAsFile();
-      if (blob) { e.preventDefault(); dlSubmitPrintFile(blob); return; }
+      if (blob) { e.preventDefault(); handler(blob); return; }
     }
   }
 });
@@ -2568,7 +2582,12 @@ function toggleDotaLab(force) {
 (function initDotaLab() {
   for (const side of ['Blue', 'Red']) {
     const c = document.getElementById('dota' + side + 'Heroes');
-    for (let i = 0; i < 5; i++) c.appendChild(el('input', { type: 'text', list: 'dotaHeroList', placeholder: side === 'Blue' ? 'Herói azul' : 'Herói vermelho', autocomplete: 'off', class: 'dota-hero', 'data-side': side.toLowerCase() }));
+    const lc = side.toLowerCase();
+    for (let i = 0; i < 5; i++) {
+      const hero = el('input', { type: 'text', list: 'dotaHeroList', placeholder: side === 'Blue' ? 'Herói azul' : 'Herói vermelho', autocomplete: 'off', class: 'dota-hero', 'data-side': lc });
+      const player = el('input', { type: 'text', placeholder: 'jogador', autocomplete: 'off', class: 'dota-player', 'data-side': lc });
+      c.appendChild(el('div', { class: 'dota-slot' }, hero, player));
+    }
   }
   fetch('/api/dota-teams').then(r => r.json()).then(d => { if (d.ok) document.getElementById('dotaTeamList').innerHTML = d.teams.map(t => `<option value="${t.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
   fetch('/api/dota-heroes').then(r => r.json()).then(d => { if (d.ok) document.getElementById('dotaHeroList').innerHTML = d.heroes.map(h => `<option value="${h.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
@@ -2617,6 +2636,68 @@ async function dotaExplain(btn, outEl, c) {
     outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
   } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
   finally { btn.disabled = false; btn.textContent = old; }
+}
+
+function dotaSetPrintMsg(msg) {
+  const e = document.getElementById('dotaPrintMsg');
+  if (msg) { e.textContent = msg; e.classList.add('visible'); }
+  else     { e.textContent = ''; e.classList.remove('visible'); }
+}
+function dotaSetError(msg) {
+  const e = document.getElementById('dotaError');
+  if (msg) { e.textContent = msg; e.classList.add('visible'); }
+  else     { e.textContent = ''; e.classList.remove('visible'); }
+}
+
+// Shared by the Dota file picker and Ctrl+V paste — downscales the image (reuses dlDownscaleToDataUrl,
+// which also UPSCALES small scoreboard crops), runs the Dota vision parse, prefills inputs.
+async function dotaSubmitPrintFile(file) {
+  if (!file) return;
+  dotaSetError(null);
+  dotaSetPrintMsg('Processando print…');
+  try {
+    const imageBase64 = await dlDownscaleToDataUrl(file);
+    const r = await fetch('/api/dota-draft-parse-print', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64 }),
+    });
+    if (r.status === 503) { dotaSetPrintMsg(null); dotaSetError('Parse por print indisponível (ANTHROPIC_API_KEY não setada).'); return; }
+    const data = await r.json();
+    if (!data.ok) {
+      dotaSetPrintMsg(null);
+      dotaSetError((data.error === 'body_too_large' || data.error === 'image_too_large')
+        ? 'Print grande demais mesmo após reduzir — recorte só a área do draft e tente de novo.'
+        : (data.error || 'Erro ao interpretar print.'));
+      return;
+    }
+    const fill = (containerId, picks) => {
+      const slots = [...document.getElementById(containerId).querySelectorAll('.dota-slot')];
+      slots.forEach((slot, i) => {
+        const heroInp = slot.querySelector('.dota-hero');
+        const playerInp = slot.querySelector('.dota-player');
+        const pick = picks[i];
+        const heroVal = pick ? (pick.key || pick.hero || '') : '';
+        if (heroInp) { heroInp.value = heroVal; heroInp.classList.toggle('prefilled', !!heroVal); }
+        const playerVal = (pick && pick.player) ? pick.player : '';
+        if (playerInp) { playerInp.value = playerVal; playerInp.classList.toggle('prefilled', !!playerVal); }
+      });
+    };
+    fill('dotaBlueHeroes', data.blue || []);
+    fill('dotaRedHeroes', data.red || []);
+    if (data.teams) {
+      const bt = document.getElementById('dota_blueTeam'); if (bt && data.teams.blue) bt.value = data.teams.blue;
+      const rt = document.getElementById('dota_redTeam');  if (rt && data.teams.red)  rt.value = data.teams.red;
+    }
+    dotaSetPrintMsg('Draft preenchido — revise e clique Analisar partida.');
+  } catch (e) {
+    dotaSetPrintMsg(null);
+    dotaSetError('Falha ao processar print: ' + e.message);
+  }
+}
+
+function dotaParsePrint(input) {
+  dotaSubmitPrintFile(input.files[0]);
+  input.value = ''; // reset so the same file can be re-uploaded
 }
 
 // initial
