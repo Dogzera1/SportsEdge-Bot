@@ -1391,6 +1391,7 @@ button { cursor: pointer; }
     </div>
     <div class="dl-actions">
       <button class="btn primary" id="dotaAnalyzeBtn">Analisar partida</button>
+      <button class="btn" id="dotaAnalyzeDraftBtn">Analisar draft</button>
       <label class="btn" style="cursor:pointer; text-align:center;">
         📷 enviar print
         <input type="file" id="dotaPrintInput" accept="image/*" style="display:none" onchange="dotaParsePrint(this)">
@@ -2592,6 +2593,7 @@ function toggleDotaLab(force) {
   fetch('/api/dota-teams').then(r => r.json()).then(d => { if (d.ok) document.getElementById('dotaTeamList').innerHTML = d.teams.map(t => `<option value="${t.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
   fetch('/api/dota-heroes').then(r => r.json()).then(d => { if (d.ok) document.getElementById('dotaHeroList').innerHTML = d.heroes.map(h => `<option value="${h.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
   document.getElementById('dotaAnalyzeBtn').addEventListener('click', dotaAnalyze);
+  document.getElementById('dotaAnalyzeDraftBtn').addEventListener('click', dotaAnalyzeDraft);
 })();
 
 function dotaCollect() {
@@ -2632,6 +2634,84 @@ async function dotaExplain(btn, outEl, c) {
     const d = await r.json();
     if (!d.ok) { outEl.textContent = d.error === 'daily_cap_reached' ? 'Limite diário atingido.' : d.error === 'vision_disabled' ? 'IA indisponível.' : 'Falha.'; return; }
     if (d.analysis) { [['VISÃO', d.analysis.overview], ['DRAFT', d.analysis.draftRead], ['HERÓIS-CHAVE', d.analysis.keyHeroes], ['VEREDITO', d.analysis.verdict]].forEach(([k, v]) => { if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v))); }); }
+    else if (d.raw) outEl.appendChild(el('div', { class: 'dl-ai-raw' }, d.raw));
+    outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
+  } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+// "Analisar draft": collects heroes + players aligned per slot.
+function dotaCollectDraft() {
+  const side = (id) => {
+    const slots = [...document.getElementById(id).querySelectorAll('.dota-slot')];
+    const heroes = [], players = [];
+    for (const s of slots) {
+      const h = (s.querySelector('.dota-hero')?.value || '').trim();
+      const p = (s.querySelector('.dota-player')?.value || '').trim();
+      if (h) { heroes.push(h); players.push(p); }
+    }
+    return { heroes, players };
+  };
+  const b = side('dotaBlueHeroes'), r = side('dotaRedHeroes');
+  return {
+    team1: (document.getElementById('dota_blueTeam').value || '').trim() || null,
+    team2: (document.getElementById('dota_redTeam').value || '').trim() || null,
+    blue: b.heroes, red: r.heroes, players: { blue: b.players, red: r.players },
+  };
+}
+
+async function dotaAnalyzeDraft() {
+  const c = dotaCollectDraft();
+  if (!c.blue.length && !c.red.length) { document.getElementById('dotaResult').textContent = 'Informe os heróis dos dois lados.'; return; }
+  const root = document.getElementById('dotaResult'); root.innerHTML = 'analisando draft…';
+  try {
+    const r = await fetch('/api/dota-draft-analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c) });
+    const d = await r.json();
+    if (!d.ok) { root.textContent = 'Falha na análise.'; return; }
+    dotaRenderDraft(root, d, c);
+  } catch (e) { root.textContent = 'Falha: ' + e.message; }
+}
+
+function dotaRenderDraft(root, d, c) {
+  root.innerHTML = '';
+  if (d.draftStrength) root.appendChild(el('div', { class: 'dl-gp-row' }, `Força de draft (WR meta): azul ${(d.draftStrength.blueWR * 100).toFixed(1)}% vs vermelho ${(d.draftStrength.redWR * 100).toFixed(1)}%`));
+  const me = d.matchupEdge || { pairs: [], sampled: 0, blueAdvantagePp: 0 };
+  root.appendChild(el('div', { class: 'dl-gp-row' }, `Vantagem de matchup (azul): ${me.blueAdvantagePp >= 0 ? '+' : ''}${me.blueAdvantagePp}pp · ${me.sampled} confrontos com dado`));
+  for (const p of (me.pairs || []).slice(0, 5)) root.appendChild(el('div', { class: 'dl-gp-note' }, `${p.blueName} vs ${p.redName}: ${p.advPp >= 0 ? '+' : ''}${p.advPp}pp (n=${p.games})`));
+  const fmtP = (arr, label) => {
+    const rows = (arr || []).filter(p => p.resolved);
+    if (!rows.length) return;
+    root.appendChild(el('div', { class: 'dl-gp-row' }, `WR jogador×herói — ${label}:`));
+    for (const p of rows) {
+      const on = p.onHero ? `${(p.onHero.wr * 100).toFixed(0)}% (n=${p.onHero.games})` : 'sem histórico no herói';
+      const top = (p.top || []).map(h => `${h.hero} ${(h.wr * 100).toFixed(0)}%`).join(', ');
+      root.appendChild(el('div', { class: 'dl-gp-note' }, `${p.player} — ${p.hero}: ${on}${top ? '  ·  top: ' + top : ''}`));
+    }
+  };
+  fmtP(d.playerHeroes && d.playerHeroes.blue, c.team1 || 'Azul');
+  fmtP(d.playerHeroes && d.playerHeroes.red, c.team2 || 'Vermelho');
+  const fmtC = (comp, label) => {
+    if (!comp) return;
+    const roles = Object.entries(comp.roleCounts || {}).map(([k, v]) => `${k} ${v}`).join(', ');
+    const attrs = Object.entries(comp.attrCounts || {}).map(([k, v]) => `${k} ${v}`).join('/');
+    root.appendChild(el('div', { class: 'dl-gp-note' }, `Composição ${label}: ${roles || '—'}${attrs ? '  ·  ' + attrs : ''}`));
+  };
+  fmtC(d.composition && d.composition.blue, c.team1 || 'Azul');
+  fmtC(d.composition && d.composition.red, c.team2 || 'Vermelho');
+  const aiOut = el('div', { class: 'dl-ai-out' });
+  const aiBtn = el('button', { class: 'dl-ai-btn' }, '🤖 Análise da IA');
+  aiBtn.addEventListener('click', () => dotaExplainDraft(aiBtn, aiOut, c));
+  root.appendChild(el('div', { class: 'dl-gp-ai' }, aiBtn, aiOut));
+  root.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura de draft — não é probabilidade de vitória nem sinal de aposta'));
+}
+
+async function dotaExplainDraft(btn, outEl, c) {
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'analisando…'; outEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/dota-draft-explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c) });
+    const d = await r.json();
+    if (!d.ok) { outEl.textContent = d.error === 'daily_cap_reached' ? 'Limite diário atingido.' : d.error === 'vision_disabled' ? 'IA indisponível.' : 'Falha.'; return; }
+    if (d.analysis) { [['VISÃO', d.analysis.overview], ['MATCHUPS', d.analysis.matchups], ['JOGADORES-CHAVE', d.analysis.keyPlayers], ['VEREDITO', d.analysis.verdict]].forEach(([k, v]) => { if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v))); }); }
     else if (d.raw) outEl.appendChild(el('div', { class: 'dl-ai-raw' }, d.raw));
     outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
   } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
