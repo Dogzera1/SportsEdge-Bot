@@ -3491,6 +3491,47 @@ const migrations = [
       } catch (e) { console.log(`[mig 129] indices: ${e.message}`); }
     },
   },
+  {
+    id: '130_dota_draft_data_pipeline',
+    up(db) {
+      // Dota Lab draft analysis (display-only): hero matchups (counters, OpenDota),
+      // pro-player map (nick->account_id), and player×hero WR cache (on-demand).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dota_hero_matchups (
+          hero_id INTEGER NOT NULL,
+          vs_hero_id INTEGER NOT NULL,
+          games INTEGER,
+          wins INTEGER,
+          wr REAL,
+          updated_at TEXT,
+          PRIMARY KEY (hero_id, vs_hero_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dota_matchup_hero ON dota_hero_matchups(hero_id);
+
+        CREATE TABLE IF NOT EXISTS dota_pro_players (
+          account_id INTEGER PRIMARY KEY,
+          name TEXT,
+          name_norm TEXT,
+          team_name TEXT,
+          updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dota_pro_name_norm ON dota_pro_players(name_norm);
+
+        CREATE TABLE IF NOT EXISTS dota_player_hero_stats (
+          account_id INTEGER NOT NULL,
+          hero_id INTEGER NOT NULL,
+          games INTEGER,
+          wins INTEGER,
+          wr REAL,
+          last_played INTEGER,
+          fetched_at TEXT,
+          PRIMARY KEY (account_id, hero_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dota_player_hero_acct ON dota_player_hero_stats(account_id);
+      `);
+      console.log('[mig 130] dota draft data tables created (hero_matchups, pro_players, player_hero_stats)');
+    },
+  },
 ];
 
 function applyMigrations(db) {
