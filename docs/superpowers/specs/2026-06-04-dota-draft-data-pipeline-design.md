@@ -54,8 +54,8 @@ Seguem o padrão de `scripts/sync-opendota-heroes.js` (https.get JSON, upsert em
 ### 3. Libs de leitura (puras, testáveis — o produto da Fase 1)
 
 **`lib/dota-player-heroes.js`**
-- `normalizeProNick(s)` → string canônica para casar nicks: `trim`, remove tag de time curta + símbolos não-alfanuméricos das bordas, `toLowerCase`. (Ex.: `"Insania "`→`insania`, `"Ace ♠"`→`ace`, `"Tundra.Nine"`→`nine`.) Nicks que não casarem com nenhum pro retornam `null` em `resolveProPlayer` (graceful: jogador fica sem dados, não quebra). Pura.
-- `resolveProPlayer(db, nick)` → `{account_id, name, team_name} | null` via `dota_pro_players` por `name_norm` (cache in-memory ~30min). Pura sobre o DB.
+- `normalizeProNick(s)` → chave de match densa: `toLowerCase` + remove tudo que não é `[a-z0-9]`. (Ex.: `"Insania "`→`insania`, `"Ace ♠"`→`ace`, `"Tundra.Nine"`→`tundranine`.) Pura. É o que vai em `dota_pro_players.name_norm`.
+- `resolveProPlayer(db, nick)` → `{account_id, name, team_name} | null`: casa a chave densa inteira contra `name_norm` e, como fallback, cada token do nick separado por `.`/espaço com ≥3 chars (assim `"Tundra.Nine"` casa com o pro `Nine`, `"OG ATF"` com `ATF`). Cache in-memory ~30min. Sem match → `null` (graceful: jogador fica sem dados, não quebra).
 - `getPlayerHeroStats(db, accountId, { ttlDays = 7, fetcher } = {})` → lê `dota_player_hero_stats`; se ausente ou `fetched_at` mais velho que `ttlDays`, chama `fetcher(accountId)` (default = OpenDota `/players/{id}/heroes`), faz upsert e retorna `[{hero_id, games, wins, wr, last_played}]` ordenado. `fetcher` injetável → testável sem rede.
 
 **`lib/dota-hero-matchups.js`**
