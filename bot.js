@@ -28159,6 +28159,36 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(runDotaHeroSync, 7 * 24 * 60 * 60 * 1000); // weekly
   setTimeout(runDotaHeroSync, 110 * 60 * 1000); // 110min pós-boot
 
+  // Dota pro-players map (OpenDota /proPlayers) — daily. Mapa nick->account_id pro Dota Lab.
+  const runDotaProPlayersSync = () => {
+    try {
+      const { spawn } = require('child_process');
+      const proc = spawn('node', ['scripts/sync-opendota-pro-players.js'], { cwd: __dirname, env: process.env, detached: false });
+      proc.on('close', (code) => {
+        log(code === 0 ? 'INFO' : 'WARN', 'HIST-DOTA-PROS', `Auto-sync pro players exit=${code}`);
+        try { require('./lib/dota-player-heroes')._invalidateProCache(); } catch (_) {}
+      });
+      log('INFO', 'HIST-DOTA-PROS', 'Auto-sync pro players started (background)');
+    } catch (e) { log('WARN', 'HIST-DOTA-PROS', `err: ${e.message}`); }
+  };
+  setInterval(runDotaProPlayersSync, 24 * 60 * 60 * 1000); // daily
+  setTimeout(runDotaProPlayersSync, 112 * 60 * 1000); // 112min pós-boot
+
+  // Dota hero matchups (OpenDota /heroes/{id}/matchups) — weekly. Counters pro Dota Lab.
+  const runDotaMatchupsSync = () => {
+    try {
+      const { spawn } = require('child_process');
+      const proc = spawn('node', ['scripts/sync-opendota-hero-matchups.js'], { cwd: __dirname, env: process.env, detached: false });
+      proc.on('close', (code) => {
+        log(code === 0 ? 'INFO' : 'WARN', 'HIST-DOTA-MATCHUPS', `Auto-sync hero matchups exit=${code}`);
+        try { require('./lib/dota-hero-matchups')._invalidateMatchupCache(); } catch (_) {}
+      });
+      log('INFO', 'HIST-DOTA-MATCHUPS', 'Auto-sync hero matchups started (background)');
+    } catch (e) { log('WARN', 'HIST-DOTA-MATCHUPS', `err: ${e.message}`); }
+  };
+  setInterval(runDotaMatchupsSync, 7 * 24 * 60 * 60 * 1000); // weekly
+  setTimeout(runDotaMatchupsSync, 120 * 60 * 1000); // 120min pós-boot
+
   // Pipeline stuck detection: 1x/hora, alerta se sport tem rejeições sem tips
   setInterval(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 60 * 60 * 1000);
   setTimeout(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 15 * 60 * 1000); // 15min pós-boot
