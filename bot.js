@@ -6271,23 +6271,36 @@ function _getTierKellyMultiplier(sport, league) {
 // dir: 'NEG' (linha negativa, favorito) | 'POS' (linha positiva, underdog)
 // side: 'HOME' | 'AWAY'
 // Aplicado SOBRE baseFraction*tierMult (preserva todos os overrides existentes).
-function _resolveHgDirSideMult(spEnv, market, side, lineDir) {
+// 2026-06-03 (audit 7d, dim Bo3/Bo5): regex canônica de formato tennis. P4: espelha as
+// IIFEs inline de bot.js:19553/19796 + server.js:24535/tips-by-format — 4 cópias, candidato
+// a consolidar em lib/tennis-format.js numa sessão de cleanup (não mexo nas IIFEs aqui).
+function _classifyTennisFormat(league) {
+  const lg = String(league || '');
+  const isSlam = /grand slam|\[g\]|wimbledon|us open|french open|roland garros|australian open/i.test(lg);
+  const isAtp = /\batp\b/i.test(lg);
+  const isQuali = /qualifier|qualifying|quali\b/i.test(lg);
+  return (isSlam && isAtp && !isQuali) ? 'BO5' : 'BO3';
+}
+function _resolveHgDirSideMult(spEnv, market, side, lineDir, league = null) {
   if (!market || String(market).toUpperCase() !== 'HANDICAP_GAMES') return 1.0;
   const d = String(lineDir || '').toUpperCase();
   const s = String(side || '').toUpperCase();
   if (d !== 'NEG' && d !== 'POS') return 1.0;
-  if (s === 'HOME' || s === 'AWAY') {
-    const specific = process.env[`KELLY_${spEnv}_HG_${d}_${s}`];
-    if (specific != null && specific !== '') {
-      const v = parseFloat(specific);
-      if (Number.isFinite(v) && v > 0 && v <= 2) return v;
-    }
-  }
-  const dirOnly = process.env[`KELLY_${spEnv}_HG_${d}`];
-  if (dirOnly != null && dirOnly !== '') {
-    const v = parseFloat(dirOnly);
-    if (Number.isFinite(v) && v > 0 && v <= 2) return v;
-  }
+  const _envMult = (name) => {
+    const raw = process.env[name];
+    if (raw == null || raw === '') return null;
+    const v = parseFloat(raw);
+    return (Number.isFinite(v) && v > 0 && v <= 2) ? v : null;
+  };
+  // 2026-06-03 (audit 7d Bo3/Bo5): níveis por formato no topo da cascata (mais específico ganha).
+  // Corta NEG×Bo5 sem matar NEG×Bo3 — real 30d: NEG×Bo5 −15% leak vs NEG×Bo3 +18% edge.
+  // No-op por default: sem env _BO5/_BO3 setado, cai nos níveis dir/side existentes (idêntico ao anterior).
+  const fmt = (spEnv === 'TENNIS' && league) ? _classifyTennisFormat(league) : null;
+  let v = null;
+  if (fmt && (s === 'HOME' || s === 'AWAY') && (v = _envMult(`KELLY_${spEnv}_HG_${d}_${s}_${fmt}`)) != null) return v;
+  if (fmt && (v = _envMult(`KELLY_${spEnv}_HG_${d}_${fmt}`)) != null) return v;
+  if ((s === 'HOME' || s === 'AWAY') && (v = _envMult(`KELLY_${spEnv}_HG_${d}_${s}`)) != null) return v;
+  if ((v = _envMult(`KELLY_${spEnv}_HG_${d}`)) != null) return v;
   return 1.0;
 }
 
@@ -6357,7 +6370,7 @@ function getKellyFraction(sport, conf, market = null, league = null, side = null
   // tier1 receives 1.1-1.3x boost; tier3 0.3-0.7x reduction. Opt-out via
   // KELLY_TIER_MULT_DISABLED=true (default ON).
   const tierMultDisabled = /^(1|true|yes)$/i.test(String(process.env.KELLY_TIER_MULT_DISABLED || ''));
-  const hgDirSideMult = _resolveHgDirSideMult(spEnv, market, side, lineDir);
+  const hgDirSideMult = _resolveHgDirSideMult(spEnv, market, side, lineDir, league);
   if (tierMultDisabled || !league) return baseFraction * hgDirSideMult;
   const tierMult = _getTierKellyMultiplier(sp, league);
   return baseFraction * tierMult * hgDirSideMult;
