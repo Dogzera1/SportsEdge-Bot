@@ -17244,6 +17244,117 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-06-03 (granularidade P1 — fecha dim Bo3/Bo5): GET /admin/tips-by-format?sport=tennis&days=30&key=<KEY>
+  // Breakdown ROI real por formato (bo3/bo5) + cross (format × confidence/tier/dir/market).
+  // Cobre a dimensão que tips-by-confidence não tem (caso NEG_away×Bo5). Formato derivado pela
+  // regex canônica do calib v3 (server.js:24535, espelha bot.js:19449) — P5 cross-check, NÃO divergir.
+  // Tennis-only confiável: tabela `tips` não tem best_of (só a tabela MT). Outros sports → formato n/a.
+  if (p === '/admin/tips-by-format' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const minN = Math.max(1, parseInt(parsed.query.minN || '1', 10) || 1);
+    try {
+      const rows = db.prepare(`
+        SELECT sport, confidence, market_type,
+          COALESCE(event_name, '') AS event_name,
+          odds, ev, stake_reais, profit_reais, result, tip_participant
+        FROM tips
+        WHERE result IN ('win','loss','void','push')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          ${sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : ''}
+      `).all(`-${days} days`);
+
+      function _norm(c) {
+        const s = String(c || '').toUpperCase().replace('MÉDIA', 'MEDIA');
+        return ['ALTA','MEDIA','BAIXA'].includes(s) ? s : 'UNKNOWN';
+      }
+      function _stats(list) {
+        const n = list.length;
+        const w = list.filter(r => r.result === 'win').length;
+        const l = list.filter(r => r.result === 'loss').length;
+        const v = list.filter(r => r.result === 'void').length;
+        const ps = list.filter(r => r.result === 'push').length;
+        const stake = list.reduce((a,r) => a + (Number(r.stake_reais)||0), 0);
+        const profit = list.reduce((a,r) => a + (Number(r.profit_reais)||0), 0);
+        const avgOdd = n > 0 ? list.reduce((a,r) => a + (Number(r.odds)||0), 0)/n : 0;
+        const avgEv = n > 0 ? list.reduce((a,r) => a + (Number(r.ev)||0), 0)/n : 0;
+        return {
+          n, wins: w, losses: l, voids: v, pushes: ps,
+          total_stake_reais: +stake.toFixed(2),
+          total_profit_reais: +profit.toFixed(2),
+          roi_pct: stake > 0 ? +((profit/stake)*100).toFixed(2) : 0,
+          win_rate_pct: (w+l) > 0 ? +((w/(w+l))*100).toFixed(1) : 0,
+          avg_odd: +avgOdd.toFixed(2),
+          avg_ev_pct: +avgEv.toFixed(1),
+        };
+      }
+      // Helpers tennis tier/format — DUPLICADOS de tips-by-confidence + calib v3 (P4: 3+ cópias,
+      // candidato a lib/tennis-tier.js; mantido local p/ consistência com o resto do arquivo).
+      function _isTier1Tennis(ev) {
+        const s = String(ev || '').toLowerCase();
+        return /grand slam|wimbledon|us open|french open|roland garros|australian open|atp finals|wta finals|masters 1000|atp 1000|wta 1000|indian wells|miami open|monte.?carlo|madrid open|italian open|rome open|cincinnati|shanghai/.test(s);
+      }
+      function _isChallenger(ev) { return /challenger|itf|college/i.test(String(ev || '')); }
+      function _classifyFormat(r) {
+        if (r.sport !== 'tennis') return 'na';
+        const lg = String(r.event_name || '');
+        const isSlam = /grand slam|\[g\]|wimbledon|us open|french open|roland garros|australian open/i.test(lg);
+        const isAtp = /\batp\b/i.test(lg);
+        const isQuali = /qualifier|qualifying|quali\b/i.test(lg);
+        return (isSlam && isAtp && !isQuali) ? 'bo5' : 'bo3';
+      }
+      function _dir(r) {
+        const mt = String(r.market_type || '').toUpperCase();
+        const tp = String(r.tip_participant || '');
+        if (mt.includes('HANDICAP')) { if (/\+\s*\d/.test(tp)) return 'POS'; if (/-\s*\d/.test(tp)) return 'NEG'; return null; }
+        if (mt.includes('TOTAL')) { if (/under/i.test(tp)) return 'under'; if (/over/i.test(tp)) return 'over'; return null; }
+        return null;
+      }
+      function _tier(r) {
+        if (_isChallenger(r.event_name)) return 'tier3_challenger_itf';
+        return _isTier1Tennis(r.event_name) ? 'tier1_slam_masters' : 'tier2_atp_wta_main';
+      }
+
+      for (const r of rows) { r._fmt = _classifyFormat(r); r._dir = _dir(r); }
+      const tennisRows = rows.filter(r => r._fmt === 'bo3' || r._fmt === 'bo5');
+
+      const result = {
+        ok: true, days, sport: sportFilter || 'all',
+        total: rows.length, tennis_classified: tennisRows.length,
+        format_derivation: 'tennis: bo5 = Slam ∧ ATP ∧ ¬quali (regex calib v3); outros sports: best_of ausente na tabela tips → n/a',
+        by_format: {}, by_format_confidence: {}, by_format_tier_tennis: {},
+        by_format_dir: {}, by_format_market: {},
+      };
+      for (const f of ['bo3','bo5']) {
+        const fr = tennisRows.filter(r => r._fmt === f);
+        if (fr.length >= minN) result.by_format[f] = _stats(fr);
+        for (const c of ['ALTA','MEDIA','BAIXA']) {
+          const list = fr.filter(r => _norm(r.confidence) === c);
+          if (list.length >= minN) result.by_format_confidence[`${f}|${c}`] = _stats(list);
+        }
+        for (const t of ['tier1_slam_masters','tier2_atp_wta_main','tier3_challenger_itf']) {
+          const list = fr.filter(r => _tier(r) === t);
+          if (list.length >= minN) result.by_format_tier_tennis[`${f}|${t}`] = _stats(list);
+        }
+        for (const d of ['NEG','POS','under','over']) {
+          const list = fr.filter(r => r._dir === d);
+          if (list.length >= minN) result.by_format_dir[`${f}|${d}`] = _stats(list);
+        }
+        for (const m of [...new Set(fr.map(r => r.market_type || 'ML'))]) {
+          const list = fr.filter(r => (r.market_type || 'ML') === m);
+          if (list.length >= minN) result.by_format_market[`${f}|${m}`] = _stats(list);
+        }
+      }
+
+      sendJson(res, result);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-21 (data audit): GET /admin/tips-unit-audit?days=7&key=<KEY>
   // Lista tips REAIS (is_shadow=0) onde stake_reais ≠ stake_units (text col stake).
   // Suporte ao processo de revertir 1u=R$10 → 1u=R$1 retroativamente.
