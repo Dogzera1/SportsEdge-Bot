@@ -5580,6 +5580,64 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Dota Lab — "Analisar draft": counters + WR jogador×herói + força meta + composição. Display-only.
+  if (p === '/api/dota-draft-analyze' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const blue = Array.isArray(json?.blue) ? json.blue.slice(0, 5) : [];
+        const red = Array.isArray(json?.red) ? json.red.slice(0, 5) : [];
+        if (!blue.length && !red.length) { sendJson(res, { ok: false, error: 'blue/red required' }, 400); return; }
+        const players = (json && typeof json.players === 'object' && json.players) ? json.players : {};
+        const { computeDotaDraftAnalysis } = require('./lib/dota-draft-analysis');
+        const out = await computeDotaDraftAnalysis(db, { blue, red, players });
+        sendJson(res, { ok: true, ...out });
+      } catch (e) { log('WARN', 'DOTA-LAB', `draft-analyze err: ${e.message}`); sendJson(res, { ok: false, error: 'dota_draft_analyze_failed' }, 500); }
+    });
+    return;
+  }
+
+  // Dota Lab — "Analisar draft" AI reading (Sonnet, anchored on the objective numbers). Display-only.
+  if (p === '/api/dota-draft-explain' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled' }, 503); return; }
+        const json = safeParse(body, null);
+        const blue = Array.isArray(json?.blue) ? json.blue.slice(0, 5) : [];
+        const red = Array.isArray(json?.red) ? json.red.slice(0, 5) : [];
+        if (!blue.length && !red.length) { sendJson(res, { ok: false, error: 'empty_draft' }, 400); return; }
+        const players = (json && typeof json.players === 'object' && json.players) ? json.players : {};
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
+        const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const usedN = _amap.get(dayKey) || 0;
+        if (usedN >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        _amap.set(dayKey, usedN + 1);
+        const { computeDotaDraftAnalysis } = require('./lib/dota-draft-analysis');
+        const { buildDotaDraftPrompt, parseDotaDraftExplain } = require('./lib/dota-draft-explain');
+        const data = await computeDotaDraftAnalysis(db, { blue, red, players });
+        const teams = { blue: json?.team1 || null, red: json?.team2 || null };
+        const prompt = buildDotaDraftPrompt({ teams, draft: { blue, red }, matchupEdge: data.matchupEdge, playerHeroes: data.playerHeroes, composition: data.composition });
+        const model = process.env.AI_ANALYSIS_MODEL || 'claude-sonnet-4-5';
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages',
+          { model, max_tokens: 700, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] },
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const analysis = parseDotaDraftExplain(text);
+        if (analysis) sendJson(res, { ok: true, analysis });
+        else if (text && text.trim()) sendJson(res, { ok: true, analysis: null, raw: text.slice(0, 1200) });
+        else sendJson(res, { ok: false, error: 'ai_failed' }, 500);
+      } catch (e) { log('WARN', 'DOTA-LAB', `draft-explain err: ${e.message}`); sendJson(res, { ok: false, error: 'ai_failed' }, 500); }
+    });
+    return;
+  }
+
   // Match Lab — AI match reading (display-only). Sonnet explains the game-profile; never feeds stake.
   if (p === '/api/lol-match-explain' && req.method === 'POST') {
     _readPostBody(req, res, async (body) => {
