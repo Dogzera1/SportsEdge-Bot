@@ -30142,11 +30142,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const http = require('http');
       const port = process.env.PORT || 3000;
       const fetchJson = (path) => new Promise((res, rej) => {
-        http.get('http://localhost:' + port + path, (r) => {
+        const req = http.get('http://localhost:' + port + path, (r) => {
           let body = '';
           r.on('data', c => body += c);
           r.on('end', () => { try { res(JSON.parse(body)); } catch (e) { rej(e); } });
-        }).on('error', rej);
+        });
+        req.on('error', rej);
+        req.setTimeout(15000, () => req.destroy(new Error('fetchJson loopback timeout')));
       });
 
       let alerts = 0;
