@@ -5445,7 +5445,7 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
-  // ── CS Match Lab (display-only, Elo cs2 — NÃO toca stake/EV/tips) ──────
+  // ── CS Match Lab (display-only, Elo cs2 — sem money-path) ──────
   // CS Match Lab — team autocomplete (display-only)
   if (p === '/api/cs-teams' && req.method === 'GET') {
     try {
