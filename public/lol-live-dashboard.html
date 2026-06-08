@@ -1401,9 +1401,11 @@ button { cursor: pointer; }
     </div>
     <div class="dl-actions">
       <button class="btn primary" id="csAnalyzeBtn">Analisar</button>
+      <button class="btn" id="csLiveBtn" onclick="csLoadLive()">🔴 Jogos ao vivo</button>
       <div class="dl-error" id="csError"></div>
     </div>
   </div>
+  <div id="csLiveList" style="margin-top: var(--pad-3); display:none;"></div>
   <div id="csResult" style="margin-top: var(--pad-4);"></div>
 </div>
 
@@ -2759,6 +2761,40 @@ async function csExplain(btn, outEl, c) {
     outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
   } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
   finally { btn.disabled = false; btn.textContent = old; }
+}
+
+async function csLoadLive() {
+  const btn = document.getElementById('csLiveBtn');
+  const listEl = document.getElementById('csLiveList');
+  if (!btn || !listEl) return;
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'carregando…';
+  listEl.style.display = 'block'; listEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/cs-live-matches');
+    const d = await r.json();
+    const matches = d.matches || [];
+    if (!matches.length) {
+      listEl.innerHTML = '<div class="dl-gp-warn">nenhum jogo no momento</div>';
+      return;
+    }
+    const wrap = el('div', { style: 'display:flex; flex-direction:column; gap:4px;' });
+    for (const m of matches) {
+      const t1 = (m.teams[0] || ''); const t2 = (m.teams[1] || '');
+      const label = `${t1} vs ${t2}${m.event ? ' — ' + m.event : ''}${m.live ? ' 🔴 LIVE' : ''}`;
+      const row = el('button', { class: 'btn', style: 'text-align:left; font-size:12px;' }, label);
+      row.onclick = () => {
+        document.getElementById('csTeam1').value = t1;
+        document.getElementById('csTeam2').value = t2;
+        listEl.style.display = 'none';
+      };
+      wrap.appendChild(row);
+    }
+    listEl.appendChild(wrap);
+  } catch (e) {
+    listEl.innerHTML = '<div class="dl-gp-warn">nenhum jogo no momento</div>';
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
 }
 
 // "Analisar draft": collects heroes + players aligned per slot.

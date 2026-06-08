@@ -5511,6 +5511,28 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  // CS Match Lab — live/upcoming matches from HLTV proxy (display-only, optional)
+  if (p === '/api/cs-live-matches' && req.method === 'GET') {
+    (async () => {
+      try {
+        const base = (process.env.HLTV_PROXY_BASE || '').trim().replace(/\/+$/, '');
+        if (!base) { sendJson(res, { ok: true, matches: [] }); return; }
+        const { cachedHttpGet } = require('./lib/utils');
+        const raw = await cachedHttpGet(`${base}/api/matches`, {
+          ttlMs: 60 * 1000, provider: 'hltv', cacheKey: 'hltv:api/matches',
+          headers: { 'ngrok-skip-browser-warning': 'true' },
+          timeoutMs: 8000
+        });
+        if (!raw || raw.status !== 200) { sendJson(res, { ok: true, matches: [] }); return; }
+        const parsed = safeParse(raw.body, {});
+        const matches = (parsed.matches || []).slice(0, 60).map(m => ({
+          matchId: m.matchId, teams: (m.teams || []).slice(0, 2), event: m.event || null, live: !!m.live
+        }));
+        sendJson(res, { ok: true, matches });
+      } catch (e) { sendJson(res, { ok: true, matches: [] }); }
+    })();
+    return;
+  }
   // Dota Lab — team autocomplete (display-only)
   if (p === '/api/dota-teams' && req.method === 'GET') {
     try {
