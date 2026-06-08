@@ -1,0 +1,26 @@
+{
+  "game": "cs2",
+  "level": "match",
+  "predicts": "P(team1 wins)",
+  "eloConfig": {
+    "kBase": 32,
+    "kMin": 10,
+    "kScale": 40,
+    "halfLifeDays": 0,
+    "confidenceScale": 20,
+    "confidenceFloor": 5
+  },
+  "trainedAt": "2026-06-08T13:18:13.871Z",
+  "n": 22186,
+  "walkForward": {
+    "trainN": 15530,
+    "testN": 6656
+  },
+  "baseRate": 0.550225,
+  "oos": {
+    "baselineBrier": 0.248025,
+    "eloRawBrier": 0.220095,
+    "eloRawEce": 0.049132,
+    "beatsBaseline": true
+  }
+}
