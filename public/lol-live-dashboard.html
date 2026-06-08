@@ -1065,6 +1065,15 @@ button { cursor: pointer; }
 }
 #dotaLab.open { display: block; }
 .dota-hero { width: 100%; margin-bottom: 4px; }
+#csLab {
+  position: fixed; top: 56px; left: 0; right: 0; bottom: 0;
+  z-index: 40;
+  overflow-y: auto;
+  background: var(--bg-deep);
+  padding: var(--pad-5) var(--pad-6);
+  display: none;
+}
+#csLab.open { display: block; }
 .dl-paste-hint {
   font-family: var(--font-mono); font-size: 10px;
   color: var(--ink-mute); letter-spacing: 0.04em; text-align: center;
@@ -1325,6 +1334,7 @@ button { cursor: pointer; }
     <button class="btn primary" id="autoBtn">Auto 5s</button>
     <button class="btn" id="draftLabBtn" onclick="toggleDraftLab()">⚗ Draft Lab</button>
     <button class="btn" id="dotaLabBtn" onclick="toggleDotaLab()">⚗ Dota Lab</button>
+    <button class="btn" id="csLabBtn" onclick="toggleCsLab()">⚗ CS Lab</button>
   </div>
 </header>
 
@@ -1370,6 +1380,33 @@ button { cursor: pointer; }
 </div>
 
 <!-- ── Dota Lab ───────────────────────────────────────────────── -->
+<!-- ── CS Lab ─────────────────────────────────────────────────── -->
+<div id="csLab">
+  <div class="dl-header">
+    <span class="dl-title">CS Match Lab</span>
+    <span class="dl-subtitle">times — win% calibrado com Elo cs2 · <span style="opacity:.6">display-only</span></span>
+    <button class="btn" onclick="toggleCsLab(false)" style="margin-left:auto;">✕ fechar</button>
+  </div>
+  <datalist id="csTeamList"></datalist>
+  <div class="dl-body">
+    <div class="dl-team">
+      <div class="dl-team-label blue">Time 1</div>
+      <input class="dl-team-input" id="csTeam1" list="csTeamList" placeholder="Time 1" autocomplete="off">
+      <input class="dl-team-input" id="csOdd1" type="number" min="1.01" step="0.01" placeholder="Odd time 1 (opcional)" style="margin-top:6px;" autocomplete="off">
+    </div>
+    <div class="dl-team">
+      <div class="dl-team-label red">Time 2</div>
+      <input class="dl-team-input" id="csTeam2" list="csTeamList" placeholder="Time 2" autocomplete="off">
+      <input class="dl-team-input" id="csOdd2" type="number" min="1.01" step="0.01" placeholder="Odd time 2 (opcional)" style="margin-top:6px;" autocomplete="off">
+    </div>
+    <div class="dl-actions">
+      <button class="btn primary" id="csAnalyzeBtn">Analisar</button>
+      <div class="dl-error" id="csError"></div>
+    </div>
+  </div>
+  <div id="csResult" style="margin-top: var(--pad-4);"></div>
+</div>
+
 <div id="dotaLab">
   <div class="dl-header">
     <span class="dl-title">Dota Lab</span>
@@ -2556,7 +2593,7 @@ document.addEventListener('paste', (e) => {
   }
 });
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { toggleDraftLab(false); toggleDotaLab(false); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { toggleDraftLab(false); toggleDotaLab(false); toggleCsLab(false); } });
 
 // Populate team autocomplete from /api/lol-teams
 fetch('/api/lol-teams').then(r => r.json()).then(d => {
@@ -2635,6 +2672,90 @@ async function dotaExplain(btn, outEl, c) {
     if (!d.ok) { outEl.textContent = d.error === 'daily_cap_reached' ? 'Limite diário atingido.' : d.error === 'vision_disabled' ? 'IA indisponível.' : 'Falha.'; return; }
     if (d.analysis) { [['VISÃO', d.analysis.overview], ['DRAFT', d.analysis.draftRead], ['HERÓIS-CHAVE', d.analysis.keyHeroes], ['VEREDITO', d.analysis.verdict]].forEach(([k, v]) => { if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v))); }); }
     else if (d.raw) outEl.appendChild(el('div', { class: 'dl-ai-raw' }, d.raw));
+    outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
+  } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+// ── CS Lab ───────────────────────────────────────────────────────────
+function toggleCsLab(force) {
+  const lab = document.getElementById('csLab');
+  if (!lab) return;
+  const open = typeof force === 'boolean' ? force : !lab.classList.contains('open');
+  lab.classList.toggle('open', open);
+  if (open) { toggleDraftLab(false); toggleDotaLab(false); }
+}
+
+(function initCsLab() {
+  fetch('/api/cs-teams').then(r => r.json()).then(d => {
+    if (d.ok) document.getElementById('csTeamList').innerHTML = d.teams.map(t => `<option value="${t.replace(/"/g, '&quot;')}">`).join('');
+  }).catch(() => {});
+  document.getElementById('csAnalyzeBtn').addEventListener('click', csAnalyze);
+})();
+
+function csCollect() {
+  const team1 = (document.getElementById('csTeam1').value || '').trim() || null;
+  const team2 = (document.getElementById('csTeam2').value || '').trim() || null;
+  const o1 = parseFloat(document.getElementById('csOdd1').value);
+  const o2 = parseFloat(document.getElementById('csOdd2').value);
+  // bookOdds = odd for team1; use team1 odd if provided, else derive from team2
+  const bookOdds = o1 > 1 ? o1 : (o2 > 1 ? +(1 / (1 - 1 / o2)).toFixed(3) : undefined);
+  return { team1, team2, ...(bookOdds != null ? { bookOdds } : {}) };
+}
+
+async function csAnalyze() {
+  const errEl = document.getElementById('csError');
+  const root = document.getElementById('csResult');
+  errEl.textContent = '';
+  const c = csCollect();
+  if (!c.team1 && !c.team2) { errEl.textContent = 'Informe ao menos um time.'; return; }
+  root.innerHTML = 'analisando…';
+  try {
+    const r = await fetch('/api/cs-match-analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c) });
+    const d = await r.json();
+    if (!d.ok) { root.textContent = 'Falha na análise.'; return; }
+    csRender(root, d, c);
+  } catch (e) { root.textContent = 'Falha: ' + e.message; }
+}
+
+function csRender(root, d, c) {
+  root.innerHTML = '';
+  const t1 = c.team1 || 'Time 1';
+  const t2 = c.team2 || 'Time 2';
+  const pct = (d.probTeam1 * 100).toFixed(1);
+  root.appendChild(el('div', { class: 'dl-gp-row' }, `P(${t1} vence): ${pct}%  ·  ${d.label}`));
+  const elo = d.components && d.components.elo;
+  if (elo) {
+    root.appendChild(el('div', { class: 'dl-gp-note' }, `Elo: ${t1} ${elo.ratingTeam1} (${elo.gamesTeam1}g) vs ${t2} ${elo.ratingTeam2} (${elo.gamesTeam2}g)  ·  confiança: ${elo.confidence}`));
+  } else {
+    root.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ time(s) com pouco/nenhum histórico cs2 — sinal fraco'));
+  }
+  let fairLine = `Odd justa: ${t1} ${d.fairOdds.team1} · ${t2} ${d.fairOdds.team2}`;
+  if (d.edge != null) fairLine += `  ·  edge: ${(d.edge * 100).toFixed(1)}%`;
+  root.appendChild(el('div', { class: 'dl-gp-row' }, fairLine));
+  const aiOut = el('div', { class: 'dl-ai-out' });
+  const aiBtn = el('button', { class: 'dl-ai-btn' }, '🤖 IA explica');
+  aiBtn.addEventListener('click', () => csExplain(aiBtn, aiOut, c));
+  root.appendChild(el('div', { class: 'dl-gp-ai' }, aiBtn, aiOut));
+  root.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ display-only — não é sinal de aposta'));
+}
+
+async function csExplain(btn, outEl, c) {
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'analisando…'; outEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/cs-match-explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c) });
+    const d = await r.json();
+    if (!d.ok) {
+      outEl.textContent = d.error === 'vision_disabled' ? 'IA indisponível.' : d.error === 'daily_cap_reached' ? 'Limite diário atingido.' : 'Falha.';
+      return;
+    }
+    if (d.analysis) {
+      [['Visão geral', d.analysis.overview], ['Leitura do confronto', d.analysis.matchupRead], ['Veredito', d.analysis.verdict]].forEach(([k, v]) => {
+        if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v)));
+      });
+    } else if (d.raw) {
+      outEl.appendChild(el('div', { class: 'dl-ai-raw' }, d.raw));
+    }
     outEl.appendChild(el('div', { class: 'dl-gp-warn' }, '⚠ leitura da IA — não é sinal de aposta'));
   } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
   finally { btn.disabled = false; btn.textContent = old; }
