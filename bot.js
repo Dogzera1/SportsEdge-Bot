@@ -2470,7 +2470,7 @@ async function fetchSportPerformanceMultiplier(sport) {
 }
 
 // CLV → Kelly feedback. Cache multiplier per (sport, league) por 10min; bot consulta
-// antes de calcular stake final. Default OFF (CLV_AUTO_KELLY=true pra ativar).
+// antes de calcular stake final. Default ON (CLV_AUTO_KELLY=false pra desativar — ver fetchClvMultiplier).
 const _clvKellyCache = new Map(); // key = `${sport}|${league||''}` → { ts, mult, reason, n, avgClv }
 const CLV_KELLY_TTL = 10 * 60 * 1000;
 // TTL eviction periódico pra evitar memory leak (ligas/sports podem rotacionar).
