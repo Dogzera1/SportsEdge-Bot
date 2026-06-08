@@ -18,6 +18,7 @@ import re
 import time
 from collections import OrderedDict
 from typing import Optional
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cf_requests
@@ -34,6 +35,13 @@ CACHE_MAX = int(os.environ.get("CACHE_MAX_ENTRIES", "500"))
 TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "20"))
 SCOREBOT_SNAPSHOT_MAX = int(os.environ.get("SCOREBOT_SNAPSHOT_MAX_SECONDS", "20"))
 RETRY_BACKOFF_BASE = float(os.environ.get("RETRY_BACKOFF_BASE", "0.6"))  # segundos entre fingerprints
+
+# Proxy residencial (Webshare) — usado SÓ nos paths que a CF protege mais (default /stats),
+# pra furar 403 de reputação de IP datacenter. Vazio = desabilitado (comportamento original).
+RESIDENTIAL_PROXY = os.environ.get("HLTV_RESIDENTIAL_PROXY", "").strip()
+RESIDENTIAL_PATHS = [p.strip() for p in os.environ.get("HLTV_RESIDENTIAL_PATHS", "/stats").split(",") if p.strip()]
+# Última observação do caminho residencial (exposto no /healthz pra validação/quota)
+_residential_last: dict = {"status": None, "quota_exceeded": False, "ts": 0.0}
 
 _cache: "OrderedDict[str, tuple[float, int, str, str]]" = OrderedDict()
 
@@ -87,9 +95,23 @@ def _ordered_chain() -> list[str]:
         return [_last_good_impersonate] + [x for x in IMPERSONATE_CHAIN if x != _last_good_impersonate]
     return list(IMPERSONATE_CHAIN)
 
+def _proxies_for(url: str) -> Optional[dict]:
+    """Proxies p/ curl_cffi quando o path casa RESIDENTIAL_PATHS e o proxy está setado; senão None."""
+    if not RESIDENTIAL_PROXY:
+        return None
+    try:
+        path = urlparse(url).path or ""
+    except Exception:
+        return None
+    if any(path.startswith(pref) for pref in RESIDENTIAL_PATHS):
+        return {"http": RESIDENTIAL_PROXY, "https": RESIDENTIAL_PROXY}
+    return None
+
+
 def _fetch_url(url: str, extra_headers: dict | None = None) -> tuple[int, str, str]:
     """Fetch genérico via curl_cffi com sessões persistentes + rotate fingerprints."""
     global _last_good_impersonate
+    proxies = _proxies_for(url)
     last_status = 0
     last_body = ""
     last_ctype = "text/html"
@@ -101,12 +123,18 @@ def _fetch_url(url: str, extra_headers: dict | None = None) -> tuple[int, str, s
             hdrs = dict(HEADERS)
             if extra_headers:
                 hdrs.update(extra_headers)
-            r = sess.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=hdrs)
+            r = sess.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=hdrs, proxies=proxies)
         except Exception:
             continue
         last_status = r.status_code
         last_body = r.text
         last_ctype = r.headers.get("content-type", "text/html; charset=utf-8")
+        if proxies is not None:
+            _residential_last.update({
+                "status": r.status_code,
+                "quota_exceeded": (r.status_code == 402) or bool(r.headers.get("x-webshare-reason")),
+                "ts": time.time(),
+            })
         if r.status_code == 200 and last_body and "Just a moment" not in last_body:
             _last_good_impersonate = impersonate
             return last_status, last_body, last_ctype
@@ -120,8 +148,14 @@ def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
 
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz():
+    if RESIDENTIAL_PROXY:
+        rl = _residential_last
+        res = (f" residential=on paths={','.join(RESIDENTIAL_PATHS)} "
+               f"last_status={rl['status']} quota_exceeded={rl['quota_exceeded']}")
+    else:
+        res = " residential=off"
     return (f"ok cache={len(_cache)} sessions={len(_sessions)} "
-            f"last_good={_last_good_impersonate or '-'} ttl={CACHE_TTL}s")
+            f"last_good={_last_good_impersonate or '-'} ttl={CACHE_TTL}s{res}")
 
 
 # ──────────────────────────────────────────────────────
