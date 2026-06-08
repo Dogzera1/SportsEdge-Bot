@@ -5404,11 +5404,17 @@ const server = http.createServer(async (req, res) => {
   // Match Lab — team-name autocomplete (datalist source). Display-only.
   if (p === '/api/lol-teams' && req.method === 'GET') {
     try {
+      const now = Date.now();
+      if (global._lolTeamsCache && now - global._lolTeamsCache.ts < 600000) {
+        sendJson(res, { ok: true, teams: global._lolTeamsCache.teams }); return;
+      }
       const set = new Set();
       for (const r of db.prepare(`SELECT DISTINCT team1 t FROM match_results WHERE game='lol' AND team1 IS NOT NULL AND team1!=''
                                    UNION SELECT DISTINCT team2 t FROM match_results WHERE game='lol' AND team2 IS NOT NULL AND team2!=''`).all()) set.add(r.t);
       try { for (const r of db.prepare(`SELECT DISTINCT teamname t FROM oracleselixir_players WHERE teamname IS NOT NULL AND teamname!=''`).all()) set.add(r.t); } catch (_) {}
-      sendJson(res, { ok: true, teams: [...set].sort((a, b) => a.localeCompare(b)) });
+      const teams = [...set].sort((a, b) => a.localeCompare(b));
+      global._lolTeamsCache = { ts: now, teams };
+      sendJson(res, { ok: true, teams });
     } catch (e) {
       sendJson(res, { ok: false, error: 'teams_failed' }, 500);
     }
@@ -5481,7 +5487,7 @@ const server = http.createServer(async (req, res) => {
         if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled' }, 503); return; }
         const json = safeParse(body, null);
         if (!json?.team1 || !json?.team2) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const ip = getClientIp(req);
         const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
         const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
@@ -5580,7 +5586,7 @@ const server = http.createServer(async (req, res) => {
         const draft = (Array.isArray(json?.blue) && Array.isArray(json?.red) && json.blue.length && json.red.length)
           ? { blue: json.blue.slice(0, 5), red: json.red.slice(0, 5) } : null;
         if (!json?.team1 && !json?.team2 && !draft) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const ip = getClientIp(req);
         const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
         const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
@@ -5630,7 +5636,7 @@ const server = http.createServer(async (req, res) => {
         const mediaType = m[1], b64 = m[3];
         if (b64.length > 7000000) { sendJson(res, { ok: false, error: 'image_too_large', max_b64: 7000000 }, 413); return; }
 
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const ip = getClientIp(req);
         const cap = parseInt(process.env.ANTHROPIC_VISION_DAILY_CAP || '50', 10);
         const _vmap = (global._draftVisionDayMap = global._draftVisionDayMap || new Map());
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
@@ -5698,7 +5704,7 @@ const server = http.createServer(async (req, res) => {
         const red = Array.isArray(json?.red) ? json.red.slice(0, 5) : [];
         if (!blue.length && !red.length) { sendJson(res, { ok: false, error: 'empty_draft' }, 400); return; }
         const players = (json && typeof json.players === 'object' && json.players) ? json.players : {};
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const ip = getClientIp(req);
         const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
         const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
@@ -5746,7 +5752,7 @@ const server = http.createServer(async (req, res) => {
         if (!json?.team1 && !json?.team2 && !draft) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
 
         // Daily cap per (IP, day). Reserve BEFORE the paid call so failures count (anti-abuse).
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const ip = getClientIp(req);
         const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
         const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
@@ -5806,7 +5812,7 @@ const server = http.createServer(async (req, res) => {
         const mediaType = m[1], b64 = m[3];
         if (b64.length > 7000000) { sendJson(res, { ok: false, error: 'image_too_large', max_b64: 7000000 }, 413); return; }
 
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const ip = getClientIp(req);
         const cap = parseInt(process.env.ANTHROPIC_VISION_DAILY_CAP || '50', 10);
         const _vmap = (global._draftVisionDayMap = global._draftVisionDayMap || new Map());
         const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
