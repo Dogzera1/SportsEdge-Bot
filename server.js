@@ -4344,8 +4344,10 @@ function _adminCsrfValid(req) {
 // - void-tips-batch + unsettle-market-tips + restore-voided-market-tips: mutate tips.result
 // - mt-block-league + mt-unblock-league + mt-disable + mt-restore: blocklist mutations
 // - mt-promote: muta runtime env + settings table
+// 2026-06-08 (full audit): + unsettle-tip-by-id/tips-unit-rescale (tocam bankroll/stake REAL),
+//   mt-resettle-*/mt-unvoid-recent/void-orphan-market-tips/basket-elo-reset (mutam resultados).
 // Esses agora bloqueiam ?key= query, exigindo header x-admin-key.
-const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote|\/admin\/reanalyze-void|\/admin\/match-result-sources-cleanup|\/admin\/upsert-match-result)/;
+const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote|\/admin\/reanalyze-void|\/admin\/match-result-sources-cleanup|\/admin\/upsert-match-result|\/admin\/unsettle-tip-by-id|\/admin\/tips-unit-rescale|\/admin\/mt-resettle-tennis-handicap|\/admin\/mt-resettle-suspects|\/admin\/mt-unvoid-recent|\/admin\/void-orphan-market-tips|\/admin\/basket-elo-reset)/;
 function _isDestructive(req) {
   try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }
@@ -16205,6 +16207,12 @@ setInterval(load, 60000);
       const wave4 = {
         GATE_OPTIMIZER_REAL_ONLY: _compliant('GATE_OPTIMIZER_REAL_ONLY'),
       };
+      // ML guards (análogos aos MT, default true) — full audit 2026-06-08 fechou a lacuna:
+      // antes não eram monitorados → opt-out manual passaria como ✅ falso.
+      const mlGuards = {
+        ML_AUTO_PROMOTE_REAL_ONLY: _compliant('ML_AUTO_PROMOTE_REAL_ONLY'),
+        ML_BUCKET_BLOCK_REAL_ONLY: _compliant('ML_BUCKET_BLOCK_REAL_ONLY'),
+      };
       // Detectores P2-compliant (DM only, no auto-action).
       const detectors = {
         SHADOW_VS_REAL_DRIFT_AUTO: _autoOn('SHADOW_VS_REAL_DRIFT_AUTO'),
@@ -16222,7 +16230,7 @@ setInterval(load, 60000);
 
       // Compliance issues
       const issues = [];
-      for (const [k, v] of Object.entries({ ...wave1, ...wave2, ...wave4 })) {
+      for (const [k, v] of Object.entries({ ...wave1, ...wave2, ...wave4, ...mlGuards })) {
         if (!v) issues.push({ env: k, severity: 'P0', issue: 'opt-out ativo — guard usa shadow data (viola P2)' });
       }
       if (!detectors.SHADOW_VS_REAL_DRIFT_AUTO) {
@@ -16281,6 +16289,7 @@ setInterval(load, 60000);
         wave1_real_only_guards: wave1,
         wave2_real_only_guards: wave2,
         wave4_real_only_guards: wave4,
+        ml_real_only_guards: mlGuards,
         detectors_p2_compliant: detectors,
         readiness_learner: readinessLearner,
         frozen_holdout: { default_days: holdout.default_days, recommended_min: 60 },
