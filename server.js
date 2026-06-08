@@ -5445,6 +5445,72 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  // ── CS Match Lab (display-only, Elo cs2 — NÃO toca stake/EV/tips) ──────
+  // CS Match Lab — team autocomplete (display-only)
+  if (p === '/api/cs-teams' && req.method === 'GET') {
+    try {
+      const rows = db.prepare(`SELECT team1 t FROM match_results WHERE game='cs2' AND team1 IS NOT NULL AND team1!=''
+                               UNION SELECT team2 t FROM match_results WHERE game='cs2' AND team2 IS NOT NULL AND team2!=''`).all();
+      sendJson(res, { ok: true, teams: [...new Set(rows.map(r => r.t))].sort((a, b) => a.localeCompare(b)) });
+    } catch (e) { sendJson(res, { ok: false, error: 'teams_failed' }, 500); }
+    return;
+  }
+  // CS Match Lab — match analyze (Elo, display-only)
+  if (p === '/api/cs-match-analyze' && req.method === 'POST') {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const { predictMatch } = require('./lib/cs-match-predict');
+        const out = predictMatch(db, { team1: json?.team1 || null, team2: json?.team2 || null });
+        const p1 = Math.max(1e-6, Math.min(1 - 1e-6, out.prob));
+        const fairOdds = { team1: +(1 / p1).toFixed(2), team2: +(1 / (1 - p1)).toFixed(2) };
+        const bookOdds = (typeof json?.bookOdds === 'number' && json.bookOdds > 1) ? json.bookOdds : null;
+        const edge = bookOdds ? +((out.prob * bookOdds) - 1).toFixed(3) : null;
+        sendJson(res, { ok: true, ...out, fairOdds, edge });
+      } catch (e) { log('WARN', 'CS-LAB', `analyze err: ${e.message}`); sendJson(res, { ok: false, error: 'cs_analyze_failed' }, 500); }
+    });
+    return;
+  }
+  // CS Match Lab — AI explain (Sonnet, capped, display-only)
+  if (p === '/api/cs-match-explain' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled' }, 503); return; }
+        const json = safeParse(body, null);
+        if (!json?.team1 || !json?.team2) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+        const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
+        const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const usedN = _amap.get(dayKey) || 0;
+        if (usedN >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        _amap.set(dayKey, usedN + 1);
+        const { predictMatch } = require('./lib/cs-match-predict');
+        const { buildCsExplainPrompt, parseCsExplain } = require('./lib/cs-match-explain');
+        const out = predictMatch(db, { team1: json.team1, team2: json.team2 });
+        const p1 = Math.max(1e-6, Math.min(1 - 1e-6, out.prob));
+        const fairOdds = { team1: +(1 / p1).toFixed(2), team2: +(1 / (1 - p1)).toFixed(2) };
+        const bookOdds = (typeof json?.bookOdds === 'number' && json.bookOdds > 1) ? json.bookOdds : null;
+        const edge = bookOdds ? +((out.prob * bookOdds) - 1).toFixed(3) : null;
+        const prompt = buildCsExplainPrompt({ pred: out, teams: { team1: json.team1, team2: json.team2 }, fairOdds, edge });
+        const model = process.env.AI_ANALYSIS_MODEL || 'claude-sonnet-4-5';
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages',
+          { model, max_tokens: 700, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] },
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const analysis = parseCsExplain(text);
+        if (analysis) sendJson(res, { ok: true, analysis });
+        else if (text && text.trim()) sendJson(res, { ok: true, analysis: null, raw: text.slice(0, 1200) });
+        else sendJson(res, { ok: false, error: 'ai_failed' }, 500);
+      } catch (e) { log('WARN', 'CS-LAB', `explain err: ${e.message}`); sendJson(res, { ok: false, error: 'ai_failed' }, 500); }
+    });
+    return;
+  }
   // Dota Lab — team autocomplete (display-only)
   if (p === '/api/dota-teams' && req.method === 'GET') {
     try {
