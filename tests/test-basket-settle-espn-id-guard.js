@@ -1,0 +1,111 @@
+// Regressão: pre-settle de série NBA (best-of-7) por name-match ignorando o
+// ESPN match_id per-game. Bug recorrente (2026-05-09, 05-12, 06-09).
+//
+// Caso 2026-06-09: tips ML shadow dos games 4/5 das finais NY×SA settladas
+// LOSS contra o game 3 (resolveu 29min APÓS a emissão das tips → derrotou o
+// guard forward-only). /admin/run-settle + runSettleSweep casavam por nome+
+// janela; o fix exige match_id ESPN exato (basket_espn_/espn_basket_), espelho
+// do guard _isAuthoritativeEspnId de /basket-result.
+const Database = require('better-sqlite3');
+
+// Replica a DECISÃO do settler: dado um tip basket + estado de match_results,
+// retorna o match_results row que o settler usaria (ou null = pending).
+function pickSettleRow(db, tip, { winLo, winHi }) {
+  const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const isAuthBasketEspn = tip.sport === 'basket'
+    && /^(basket_espn_|espn_basket_)/.test(String(tip.match_id || ''));
+  if (isAuthBasketEspn) {
+    const bid = String(tip.match_id);
+    const alt = bid.startsWith('basket_espn_')
+      ? bid.replace(/^basket_espn_/, 'espn_basket_')
+      : bid.replace(/^espn_basket_/, 'basket_espn_');
+    return db.prepare(`
+      SELECT match_id, winner FROM match_results
+      WHERE match_id IN (?, ?) AND game = 'basket'
+        AND winner IS NOT NULL AND winner != '' LIMIT 1
+    `).get(bid, alt) || null;
+  }
+  // Path legacy: name + janela (ignora match_id) — vulnerável em série.
+  const n1 = _norm(tip.participant1), n2 = _norm(tip.participant2);
+  return db.prepare(`
+    SELECT match_id, winner FROM match_results
+    WHERE game = 'basket' AND winner IS NOT NULL AND winner != ''
+      AND resolved_at >= ? AND resolved_at <= ?
+      AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
+        OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
+    ORDER BY resolved_at DESC LIMIT 1
+  `).get(winLo, winHi, n1, n2, n2, n1) || null;
+}
+
+function seedDb() {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE match_results (
+    match_id TEXT, game TEXT, team1 TEXT, team2 TEXT,
+    winner TEXT, final_score TEXT, resolved_at TEXT, league TEXT)`);
+  // Game 3 jogado (SAS venceu); games 4/5 ainda NÃO em match_results.
+  db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+    'espn_basket_401859965', 'basket', 'New York Knicks', 'San Antonio Spurs',
+    'San Antonio Spurs', '111-115', '2026-06-09 00:30', 'nba');
+  return db;
+}
+
+const WIN = { winLo: '2026-06-05 00:00:00', winHi: '2026-06-15 00:00:00' };
+const tipGame4 = {
+  sport: 'basket', match_id: 'basket_espn_401859966',
+  participant1: 'New York Knicks', participant2: 'San Antonio Spurs',
+  tip_participant: 'New York Knicks', sent_at: '2026-06-09 00:01:17',
+};
+
+module.exports = function (t) {
+  // 1) O bug: name-match (sem guard) casa o game 3 para a tip do game 4.
+  t.test('name-match (legacy) casa game ANTERIOR da série (reproduz o bug)', () => {
+    const db = seedDb();
+    const legacyTip = { ...tipGame4, match_id: 'basket_pin_999' }; // pin → path name
+    const row = pickSettleRow(db, legacyTip, WIN);
+    t.assert(row && row.match_id === 'espn_basket_401859965',
+      `esperava casar game 3 via nome, veio ${row && row.match_id}`);
+    db.close();
+  });
+
+  // 2) O fix: ESPN id autoritativo NÃO casa por nome → pending até o game jogar.
+  t.test('ESPN id autoritativo: game futuro sem id exato fica PENDING', () => {
+    const db = seedDb();
+    const row = pickSettleRow(db, tipGame4, WIN);
+    t.assert(row === null, `esperava null (pending), veio ${row && row.match_id}`);
+    db.close();
+  });
+
+  // 3) Quando o game 4 realmente joga, settla pelo jogo CERTO.
+  t.test('ESPN id autoritativo: após o game jogar, settla pelo id exato', () => {
+    const db = seedDb();
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'espn_basket_401859966', 'basket', 'New York Knicks', 'San Antonio Spurs',
+      'New York Knicks', '120-110', '2026-06-11 00:30', 'nba');
+    const row = pickSettleRow(db, tipGame4, WIN);
+    t.assert(row && row.match_id === 'espn_basket_401859966' && row.winner === 'New York Knicks',
+      `esperava casar o game 4 exato, veio ${row && row.match_id}/${row && row.winner}`);
+    db.close();
+  });
+
+  // 4) Guard cobre o prefixo invertido (tips: basket_espn_; match_results: espn_basket_).
+  t.test('guard resolve prefixo invertido basket_espn_ ↔ espn_basket_', () => {
+    const db = seedDb();
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'espn_basket_401859966', 'basket', 'New York Knicks', 'San Antonio Spurs',
+      'New York Knicks', '120-110', '2026-06-11 00:30', 'nba');
+    // tip grava basket_espn_; match_results grava espn_basket_ → deve casar.
+    const row = pickSettleRow(db, tipGame4, WIN);
+    t.assert(row && row.winner === 'New York Knicks', 'prefixo invertido não resolveu');
+    db.close();
+  });
+
+  // 5) Guard é scoped: tip não-basket não é afetada (continua via path legacy).
+  t.test('guard scoped: sport != basket não entra no path exact-id', () => {
+    const db = seedDb();
+    const nonBasket = { ...tipGame4, sport: 'football', match_id: 'basket_espn_401859966' };
+    const isAuth = nonBasket.sport === 'basket'
+      && /^(basket_espn_|espn_basket_)/.test(nonBasket.match_id);
+    t.assert(isAuth === false, 'football não deveria ativar o guard basket');
+    db.close();
+  });
+};

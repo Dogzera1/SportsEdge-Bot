@@ -4918,9 +4918,15 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(canonicalMatchId, game)
         : null;
 
+      // 2026-06-09: Basket ESPN match_id é authoritative per-game — NÃO fuzzy-match
+      // por nome (tip de game futuro casaria com game anterior da MESMA série NBA).
+      // Mirror do guard de /basket-result + /admin/run-settle. Basket hoje não está
+      // na lista default do sweep, mas /settle-sweep?sport=basket alcançaria.
+      const _isAuthBasketEspn = game === 'basket'
+        && /^(basket_espn_|espn_basket_)/.test(String(tip.match_id || ''));
       // Tentativa 2: fuzzy — só pra ML (MAP tips NÃO podem fallback, senão
       // bateriam com series winner em vez de map winner).
-      if (!row?.winner && !isMapMarket && tip.participant1 && tip.participant2) {
+      if (!row?.winner && !isMapMarket && !_isAuthBasketEspn && tip.participant1 && tip.participant2) {
         const t1 = `%${tip.participant1}%`;
         const t2 = `%${tip.participant2}%`;
         row = db.prepare(`
@@ -19506,24 +19512,49 @@ load();
           const minResolved = new Date(minResolvedMs).toISOString().slice(0, 19).replace('T', ' ');
           // Use o maior entre window-before e min-resolved (forward-only effective).
           const effectiveBefore = before > minResolved ? before : minResolved;
-          let matches = db.prepare(`
-            SELECT match_id, winner, final_score, resolved_at, league
-            FROM match_results
-            WHERE game IN (${placeholders})
-              AND winner IS NOT NULL AND winner != ''
-              AND resolved_at >= ? AND resolved_at <= ?
-              AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
-                OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
-            ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
-            LIMIT 1
-          `).all(...games, effectiveBefore, after, n1, n2, n2, n1, t.sent_at);
+          // 2026-06-09: Basket ESPN match_id é authoritative per-game (1 id/jogo).
+          // Mirror do guard _isAuthoritativeEspnId de /basket-result (2026-05-12):
+          // NÃO casar por nome+janela — tip de game futuro de série NBA (best-of-7,
+          // mesmos times ~2d) casaria com o game ANTERIOR. Caso 2026-06-09: tips dos
+          // games 4/5 NY×SA settled loss contra o game 3 (resolveu 29min após a
+          // emissão → derrotou o guard forward-only). Sem id exato em match_results =
+          // jogo não ocorreu = fica pending. basket_pin_/legacy mantêm name fallback
+          // (id próprio não existe em match_results, sincronizada via ESPN).
+          const _isAuthBasketEspn = t.sport === 'basket'
+            && /^(basket_espn_|espn_basket_)/.test(String(t.match_id || ''));
+          let matches;
+          if (_isAuthBasketEspn) {
+            const _bid = String(t.match_id);
+            const _altBid = _bid.startsWith('basket_espn_')
+              ? _bid.replace(/^basket_espn_/, 'espn_basket_')
+              : _bid.replace(/^espn_basket_/, 'basket_espn_');
+            matches = db.prepare(`
+              SELECT match_id, winner, final_score, resolved_at, league
+              FROM match_results
+              WHERE match_id IN (?, ?) AND game = 'basket'
+                AND winner IS NOT NULL AND winner != ''
+              LIMIT 1
+            `).all(_bid, _altBid);
+          } else {
+            matches = db.prepare(`
+              SELECT match_id, winner, final_score, resolved_at, league
+              FROM match_results
+              WHERE game IN (${placeholders})
+                AND winner IS NOT NULL AND winner != ''
+                AND resolved_at >= ? AND resolved_at <= ?
+                AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
+                  OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
+              ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+              LIMIT 1
+            `).all(...games, effectiveBefore, after, n1, n2, n2, n1, t.sent_at);
+          }
           // 2026-05-13: pre-zombie force-settle fallback (espelha settleShadowTips
           // linha 1041+). Tip emitida APÓS match resolveu (scanner cache stale ou
           // live cycle late) cai no guard temporal strict. Caso clássico tennis
           // Challenger: tip 2197 sent_at 16:36, sofa MR resolved 16:10 — apenas
           // 26min de lag mas guard bloqueia. Aceita lag ≤4h + tip age ≥2h + score
           // parseável. Opt-out via PRE_ZOMBIE_RUN_SETTLE_DISABLED=true.
-          if (!matches.length && !/^(1|true|yes)$/i.test(String(process.env.PRE_ZOMBIE_RUN_SETTLE_DISABLED || ''))) {
+          if (!matches.length && !_isAuthBasketEspn && !/^(1|true|yes)$/i.test(String(process.env.PRE_ZOMBIE_RUN_SETTLE_DISABLED || ''))) {
             const _preZombieMinH = parseFloat(process.env.MT_PRE_ZOMBIE_MIN_HOURS || '2');
             const _preZombieMaxLagH = parseFloat(process.env.MT_PRE_ZOMBIE_MAX_LAG_HOURS || '4');
             const tipAgeH = (Date.now() - tipMs) / 3600000;
