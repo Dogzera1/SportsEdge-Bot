@@ -25,16 +25,23 @@ function pickSettleRow(db, tip, { winLo, winHi }) {
         AND winner IS NOT NULL AND winner != '' LIMIT 1
     `).get(bid, alt) || null;
   }
-  // Path legacy: name + janela (ignora match_id) — vulnerável em série.
+  // Tentativa 1: match_id EXATO (hardening exact-id-first; mirror run-settle/sweep).
+  const game = tip.game || (tip.sport === 'basket' ? 'basket' : tip.sport);
+  const exact = db.prepare(`
+    SELECT match_id, winner FROM match_results
+    WHERE match_id = ? AND game = ? AND winner IS NOT NULL AND winner != '' LIMIT 1
+  `).get(String(tip.match_id || ''), game);
+  if (exact) return exact;
+  // Tentativa 2: name + janela (ignora match_id) — fallback, vulnerável em série.
   const n1 = _norm(tip.participant1), n2 = _norm(tip.participant2);
   return db.prepare(`
     SELECT match_id, winner FROM match_results
-    WHERE game = 'basket' AND winner IS NOT NULL AND winner != ''
+    WHERE game = ? AND winner IS NOT NULL AND winner != ''
       AND resolved_at >= ? AND resolved_at <= ?
       AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
         OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
     ORDER BY resolved_at DESC LIMIT 1
-  `).get(winLo, winHi, n1, n2, n2, n1) || null;
+  `).get(game, winLo, winHi, n1, n2, n2, n1) || null;
 }
 
 function seedDb() {
@@ -106,6 +113,30 @@ module.exports = function (t) {
     const isAuth = nonBasket.sport === 'basket'
       && /^(basket_espn_|espn_basket_)/.test(nonBasket.match_id);
     t.assert(isAuth === false, 'football não deveria ativar o guard basket');
+    db.close();
+  });
+
+  // 6) Hardening exact-id-first (lol/dota2/football/tennis): o match_id exato vence
+  //    o name-match quando o jogo da PRÓPRIA tip já está resolvido em match_results,
+  //    mesmo havendo outro jogo dos mesmos times mais "próximo"/recente na janela.
+  t.test('exact-id-first: settla pelo próprio match_id, não por outro jogo dos mesmos times', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE match_results (
+      match_id TEXT, game TEXT, team1 TEXT, team2 TEXT,
+      winner TEXT, final_score TEXT, resolved_at TEXT, league TEXT)`);
+    // Jogo da tip (Gen.G venceu) + OUTRO jogo dos mesmos times mais recente (T1 venceu).
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'lol_OWN', 'lol', 'Gen.G', 'T1', 'Gen.G', '1-0', '2026-06-08 12:00', 'LCK');
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'lol_OTHER', 'lol', 'Gen.G', 'T1', 'T1', '0-1', '2026-06-10 12:00', 'LCK');
+    const tip = {
+      sport: 'lol', game: 'lol', match_id: 'lol_OWN',
+      participant1: 'Gen.G', participant2: 'T1', tip_participant: 'Gen.G',
+      sent_at: '2026-06-08 11:00:00',
+    };
+    const row = pickSettleRow(db, tip, { winLo: '2026-06-05 00:00:00', winHi: '2026-06-15 00:00:00' });
+    t.assert(row && row.match_id === 'lol_OWN' && row.winner === 'Gen.G',
+      `esperava settlar pelo lol_OWN (Gen.G), veio ${row && row.match_id}/${row && row.winner}`);
     db.close();
   });
 };

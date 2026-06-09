@@ -19536,17 +19536,39 @@ load();
               LIMIT 1
             `).all(_bid, _altBid);
           } else {
-            matches = db.prepare(`
-              SELECT match_id, winner, final_score, resolved_at, league
-              FROM match_results
-              WHERE game IN (${placeholders})
-                AND winner IS NOT NULL AND winner != ''
-                AND resolved_at >= ? AND resolved_at <= ?
-                AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
-                  OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
-              ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
-              LIMIT 1
-            `).all(...games, effectiveBefore, after, n1, n2, n2, n1, t.sent_at);
+            // 2026-06-09: Tentativa 1 — match_id EXATO primeiro (espelha runSettleSweep
+            // server.js:4917). Quando o resultado do PRÓPRIO jogo já está em
+            // match_results, settla por ele; name+janela vira só fallback. Evita casar
+            // a tip com OUTRO jogo dos mesmos times numa série/rematch (mesma classe do
+            // bug basket; aqui cobre lol/dota2/football/tennis que populam match_results).
+            // No-op quando o id não bate (cs/valorant scrape-only) → cai no fallback.
+            let _exactRow = null;
+            try {
+              const _canon = require('./lib/match-id-resolver').resolveAlias(db, t.match_id, games[0]);
+              const _ids = (_canon && _canon !== t.match_id) ? [t.match_id, _canon] : [t.match_id];
+              const _ph = _ids.map(() => '?').join(',');
+              _exactRow = db.prepare(`
+                SELECT match_id, winner, final_score, resolved_at, league
+                FROM match_results
+                WHERE match_id IN (${_ph}) AND game IN (${placeholders})
+                  AND winner IS NOT NULL AND winner != '' LIMIT 1
+              `).get(..._ids, ...games);
+            } catch (_) { /* resolver/lookup best-effort → fallback name+janela */ }
+            if (_exactRow) {
+              matches = [_exactRow];
+            } else {
+              matches = db.prepare(`
+                SELECT match_id, winner, final_score, resolved_at, league
+                FROM match_results
+                WHERE game IN (${placeholders})
+                  AND winner IS NOT NULL AND winner != ''
+                  AND resolved_at >= ? AND resolved_at <= ?
+                  AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
+                    OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
+                ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+                LIMIT 1
+              `).all(...games, effectiveBefore, after, n1, n2, n2, n1, t.sent_at);
+            }
           }
           // 2026-05-13: pre-zombie force-settle fallback (espelha settleShadowTips
           // linha 1041+). Tip emitida APÓS match resolveu (scanner cache stale ou
