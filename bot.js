@@ -29958,8 +29958,20 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   //
   // Cooldown 30min por (sport, matchKey) evita re-emit no mesmo movimento.
   const _pinFollowerLastEmit = new Map(); // sport|matchKey → ts
+  // 2026-06-09: guard pré-match (pinfollow + soft-vs-sharp). NÃO emitir tip de valor
+  // pre-match em partida que JÁ começou (valor expirou) ou live/finalizada. Caso #3386:
+  // pinfollow emitiu Santos×Coritiba 14:05, jogo acabou 14:00 → tip "fantasma" (casa
+  // voidaria) que ainda alimentou um mis-settle. match.time = horário de início (ISO).
+  const _matchStartedOrLive = (match) => {
+    const raw = match?.time || match?.beginAt || match?.start_time || match?.commence_time;
+    const ms = raw ? Date.parse(String(raw)) : NaN;
+    if (Number.isFinite(ms) && Date.now() >= ms) return true;
+    return match?.is_live === true
+      || /^(live|finished|final|ended|in[_-]?play|closed)$/i.test(String(match?.status || ''));
+  };
   async function _tryEmitPinnacleFollowTip({ sport, match, velEvt, side, allBooksSide, sideLabel }) {
     if (!/^(1|true|yes)$/i.test(String(process.env.PINNACLE_FOLLOWER_ENABLED || ''))) return;
+    if (_matchStartedOrLive(match)) return;
     if (!velEvt || velEvt.direction !== 'down') return;
     const minDrop = parseFloat(process.env.PINNACLE_FOLLOWER_MIN_DROP_PCT || '3');
     if (Math.abs(velEvt.velocityPct) < minDrop) return;
@@ -30061,6 +30073,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const _softVsSharpLastEmit = new Map(); // sport|matchKey|side → ts (cooldown 30min)
   async function _tryEmitSoftVsSharpTip({ sport, match, superEvt, allBooksSide, sideLabel }) {
     if (!superEvt) return;
+    if (_matchStartedOrLive(match)) return;
     // Resolve a hora de captura da casa escolhida (BR aggregator carimba _capturedAt; fontes live não).
     let capturedAt = null;
     if (Array.isArray(allBooksSide)) {
