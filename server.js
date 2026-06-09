@@ -4929,19 +4929,26 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       if (!row?.winner && !isMapMarket && !_isAuthBasketEspn && tip.participant1 && tip.participant2) {
         const t1 = `%${tip.participant1}%`;
         const t2 = `%${tip.participant2}%`;
+        // 2026-06-09: forward-guard scoped a football — lower bound -30min (não -4d).
+        // Evita casar a tip com partida ANTERIOR dos mesmos times (rematch BR a poucos
+        // dias; caso #3386 Santos×Coritiba 05-17 settled contra o jogo de 05-13).
+        // Espelha run-settle + /football-result. Outros sports mantêm -4d (sem regressão).
+        const _sentRef = tip.sent_at || new Date().toISOString();
+        const _lowerOff = game === 'football' ? '-30 minutes' : '-4 days';
         row = db.prepare(`
           SELECT * FROM match_results
           WHERE game = ?
             AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
               OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
-            AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+            AND resolved_at BETWEEN datetime(?, ?) AND datetime(?, '+6 days')
           ORDER BY resolved_at DESC LIMIT 1
-        `).get(game, t1, t2, t2, t1, tip.sent_at || new Date().toISOString(), tip.sent_at || new Date().toISOString());
+        `).get(game, t1, t2, t2, t1, _sentRef, _lowerOff, _sentRef);
       }
 
       // Tentativa 3 (football): match normalizado + alias. Mesmo fix de
       // /football-result (server.js:6996+) — LIKE falha em "Wolves" vs
-      // "Wolverhampton Wanderers" porque substring não bate. Window ±4d.
+      // "Wolverhampton Wanderers" porque substring não bate.
+      // 2026-06-09: window forward-only [-30min, +6d] (era ±4d) — vide Tentativa 2.
       if (!row?.winner && !isMapMarket && game === 'football' && tip.participant1 && tip.participant2) {
         try {
           const { _norm, _TEAM_ALIASES } = require('./lib/football-poisson-trained');
@@ -4949,7 +4956,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
           const candidates = db.prepare(`
             SELECT * FROM match_results
             WHERE game = 'football'
-              AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+              AND resolved_at BETWEEN datetime(?, '-30 minutes') AND datetime(?, '+6 days')
           `).all(sentRef, sentRef);
           const variants = (n) => {
             const norm = _norm(n);
@@ -9848,7 +9855,10 @@ setInterval(load, 10000);
         ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = 'football' LIMIT 1").get(canonicalMid)
         : null;
 
-      // 2) Fuzzy por nome dos times + janela de ±4 dias em torno de sentAt
+      // 2) Fuzzy por nome + janela FORWARD-ONLY [-30min, +6d] em torno de sentAt.
+      // 2026-06-09: lower bound -4d → -30min (forward-guard, espelha run-settle).
+      // Sem isso, a tip de uma partida casava com partida ANTERIOR dos mesmos times
+      // (caso #3386: Santos×Coritiba 05-17 settled win contra o jogo de 05-13).
       if (!row?.winner) {
         const t1Like = `%${team1}%`;
         const t2Like = `%${team2}%`;
@@ -9858,7 +9868,7 @@ setInterval(load, 10000);
               WHERE game = 'football'
                 AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
                   OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
-                AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+                AND resolved_at BETWEEN datetime(?, '-30 minutes') AND datetime(?, '+6 days')
               ORDER BY resolved_at DESC LIMIT 1`)
           : db.prepare(`
               SELECT * FROM match_results
@@ -9875,14 +9885,15 @@ setInterval(load, 10000);
       // 3) Match normalizado + alias. Caso 2026-05-03: tip "Wolves" vs ESPN
       // "Wolverhampton Wanderers" — LIKE não bate ("wolves" não é substring
       // de "wolverhampton"). Usa _norm + _TEAM_ALIASES (lib/football-poisson-trained)
-      // pra reconciliar nomes curtos/longos. Window +-4d em torno de sentAt.
+      // pra reconciliar nomes curtos/longos.
+      // 2026-06-09: window forward-only [-30min, +6d] (era ±4d) — vide Tentativa 2.
       if (!row?.winner && sentAt) {
         try {
           const { _norm, _TEAM_ALIASES } = require('./lib/football-poisson-trained');
           const candidates = db.prepare(`
             SELECT * FROM match_results
             WHERE game = 'football'
-              AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+              AND resolved_at BETWEEN datetime(?, '-30 minutes') AND datetime(?, '+6 days')
           `).all(sentAt, sentAt);
           const variants = (n) => {
             const norm = _norm(n);

@@ -139,4 +139,58 @@ module.exports = function (t) {
       `esperava settlar pelo lol_OWN (Gen.G), veio ${row && row.match_id}/${row && row.winner}`);
     db.close();
   });
+
+  // 7) Forward-guard football (/football-result + runSettleSweep): tip de uma partida
+  //    NÃO casa com partida ANTERIOR dos mesmos times (caso real #3386 Santos×Coritiba:
+  //    tip de 05-17 settlava win contra o jogo de 05-13). Janela passou de -4d → -30min.
+  t.test('forward-guard football: não settla contra partida anterior dos mesmos times', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE match_results (
+      match_id TEXT, game TEXT, team1 TEXT, team2 TEXT,
+      winner TEXT, final_score TEXT, resolved_at TEXT, league TEXT)`);
+    // Só a partida ANTERIOR (05-13, Santos venceu, mando invertido) está ingerida;
+    // a partida da tip (05-17) ainda não foi sincronizada no momento do settle.
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'sofa_OLD', 'football', 'Coritiba', 'Santos', 'Santos', '0-1', '2026-05-13 22:30:00', 'BR');
+    const sentAt = '2026-05-17 14:05:34';
+    const fwd = (lo) => db.prepare(`
+      SELECT match_id, winner FROM match_results
+      WHERE game = 'football'
+        AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+          OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+        AND resolved_at BETWEEN datetime(?, ?) AND datetime(?, '+6 days')
+      ORDER BY resolved_at DESC LIMIT 1
+    `).get('%Santos%', '%Coritiba%', '%Coritiba%', '%Santos%', sentAt, lo, sentAt) || null;
+    // Janela ANTIGA -4d casava o jogo de 05-13 (o bug → win indevido).
+    const old = fwd('-4 days');
+    t.assert(old && old.match_id === 'sofa_OLD', 'sanity: janela -4d reproduz o bug (casa 05-13)');
+    // Forward-guard -30min EXCLUI o jogo de 05-13 → pending (correto; settla depois no jogo certo).
+    const guarded = fwd('-30 minutes');
+    t.assert(guarded === null, `forward-guard deveria deixar pending, veio ${guarded && guarded.match_id}`);
+    db.close();
+  });
+
+  // 8) Forward-guard football: settla pela partida CERTA quando ela já está ingerida.
+  t.test('forward-guard football: settla pela partida da tip quando ingerida', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE match_results (
+      match_id TEXT, game TEXT, team1 TEXT, team2 TEXT,
+      winner TEXT, final_score TEXT, resolved_at TEXT, league TEXT)`);
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'sofa_OLD', 'football', 'Coritiba', 'Santos', 'Santos', '0-1', '2026-05-13 22:30:00', 'BR');
+    db.prepare(`INSERT INTO match_results VALUES (?,?,?,?,?,?,?,?)`).run(
+      'sofa_OWN', 'football', 'Santos', 'Coritiba', 'Coritiba', '0-1', '2026-05-17 14:00:00', 'BR');
+    const sentAt = '2026-05-17 14:05:34';
+    const guarded = db.prepare(`
+      SELECT match_id, winner FROM match_results
+      WHERE game = 'football'
+        AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+          OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+        AND resolved_at BETWEEN datetime(?, '-30 minutes') AND datetime(?, '+6 days')
+      ORDER BY resolved_at DESC LIMIT 1
+    `).get('%Santos%', '%Coritiba%', '%Coritiba%', '%Santos%', sentAt, sentAt) || null;
+    t.assert(guarded && guarded.match_id === 'sofa_OWN' && guarded.winner === 'Coritiba',
+      `esperava casar a partida da tip (Coritiba), veio ${guarded && guarded.match_id}/${guarded && guarded.winner}`);
+    db.close();
+  });
 };
