@@ -30409,7 +30409,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // Tennis (ATP Madrid Masters via Supabase): cross-validation Pinnacle vs BR books
       try {
         const tnMatches = await fetchJson('/tennis-matches');
-        for (const m of (tnMatches || []).slice(0, 50)) {
+        // 2026-06-10: 50→200. Com feed betnacional-tennis vivo (~190 jogos/dia),
+        // slice(0,50) cobria 24% do board (ordenado live-first + horário) — edge
+        // real ficava invisível até o jogo entrar no top-50, já colado no início
+        // (caso: Mattioli×Alves EV+12,8% no idx 115, nunca varrido). Loop é
+        // in-memory (sem I/O por match) — 200 custa ~nada.
+        for (const m of (tnMatches || []).slice(0, 200)) {
           if (!m.team1 || !m.team2) continue;
           const all = m.odds?._allOdds;
           if (!Array.isArray(all) || all.length < 2) continue;
