@@ -3532,6 +3532,48 @@ const migrations = [
       console.log('[mig 130] dota draft data tables created (hero_matchups, pro_players, player_hero_stats)');
     },
   },
+  {
+    id: '131_mrs_rebuild_after_corruption',
+    up(db) {
+      // 2026-06-10 P0: corrupção page-level em prod DELIMITADA a match_result_sources
+      // (PRAGMA integrity_check fail desde boot 11:44Z; DELETE na tabela e VACUUM
+      // lançam "database disk image is malformed"; TODAS as outras tabelas leem/
+      // escrevem ok). É audit trail de payloads de settle (mig 109) — descartável,
+      // re-popula via settles novos. Rebuild via DROP+CREATE.
+      // Self-guarded: o runner ABORTA O BOOT se migration throwa (migrations/index.js
+      // ~3600). Se o DROP falhar (malformed na freelist-path), loga e devolve sem
+      // throw — status quo preservado, recovery manual via docs/P0-db-recovery-2026-06-10.md.
+      try {
+        db.exec('DROP TABLE IF EXISTS match_result_sources');
+      } catch (e) {
+        console.log(`[mig 131] DROP match_result_sources falhou (${e.message}) — corrupção profunda; seguir docs/P0-db-recovery-2026-06-10.md (rebuild copy)`);
+        return;
+      }
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS match_result_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT NOT NULL,
+            game TEXT NOT NULL,
+            source TEXT NOT NULL,
+            team1 TEXT, team2 TEXT,
+            winner TEXT NOT NULL,
+            final_score TEXT,
+            recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          CREATE INDEX IF NOT EXISTS idx_mrs_match
+            ON match_result_sources(match_id, game);
+          CREATE INDEX IF NOT EXISTS idx_mrs_recent
+            ON match_result_sources(recorded_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_mrs_game_recorded
+            ON match_result_sources(game, recorded_at DESC);
+        `);
+        console.log('[mig 131] match_result_sources rebuilt pós-corrupção (audit trail descartado — re-popula via settles; VACUUM pós-boot via /admin/match-result-sources-cleanup)');
+      } catch (e) {
+        console.log(`[mig 131] recreate falhou: ${e.message} — investigar antes do próximo deploy`);
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {
