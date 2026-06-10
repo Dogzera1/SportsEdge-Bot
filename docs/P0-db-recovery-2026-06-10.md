@@ -1,5 +1,20 @@
 # P0 — DB prod "database disk image is malformed" (2026-06-10)
 
+> ## ✅ RESOLVIDO 13:17Z via Variante B
+> Mig 131 NÃO serviu (runner roda migration em transaction → tx envenenada por
+> SQLITE_CORRUPT morre no COMMIT mesmo com catch interno; integrity_check passou
+> a throwar direto ~13:00). Executado rebuild copy in-container via `railway ssh`
+> (scripts/db-rebuild-copy-2026-06-10.js — 380k rows, base64→/tmp→node) +
+> salvage de **match_results** que TAMBÉM estava corrupta no tail (bisect por
+> rowid, scripts/db-salvage-match-results-2026-06-10.js — 237.632/237.669 rows,
+> ~37 perdidas = as mais recentes) + swap mv + `railway redeploy -y`.
+> Pós: integrity gauge=1, mig 131 aplicou limpa no boot, tips 5.352 (zero perda),
+> mrs gravando de novo. Corrupto preservado: `/data/sportsedge_corrupt_20260610.db`
+> (deletar após ~1 semana de integrity ok; volume tem tb ~300MB de snapshots de
+> abril em /data — housekeeping separado).
+> Lição quoting ssh: `railway ssh "echo <B64> | base64 -d > /tmp/x.js && node /tmp/x.js"`
+> (railway junta argv num sh -c; base64 atravessa as 2 camadas de shell ileso).
+
 ## Estado (12:40Z)
 - `PRAGMA integrity_check` falhando desde o boot 11:44Z (deploy `8647c9e`); persiste em re-checks do cron 15min.
 - **Corrupção DELIMITADA**: `DELETE FROM match_result_sources` lança `database disk image is malformed`; `VACUUM` idem (varre tudo). **Todas** as leituras/writes de tabelas de dinheiro passam (tips, market_tips_shadow, settles fluindo, bankroll ok).
