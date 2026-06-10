@@ -28508,7 +28508,7 @@ load();
         INSERT OR IGNORE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
         VALUES (?, 'cs', ?, ?, ?, ?, ?, ?)
       `);
-      const existing = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='cs'`).get()?.c || 0;
+      const existing = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game IN ('cs','cs2')`).get()?.c || 0;
 
       let inserted = 0;
       if (!dryRun) {
@@ -39588,9 +39588,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     try {
       const { getCsElo, computeEloFromDB } = require('./lib/cs-ml');
       const teamsParam = String(parsed.query.teams || '').trim();
-      const totalRows = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='cs'`).get()?.c || 0;
-      const distinctTeams = db.prepare(`SELECT COUNT(DISTINCT team) c FROM (SELECT team1 AS team FROM match_results WHERE game='cs' UNION ALL SELECT team2 FROM match_results WHERE game='cs')`).get()?.c || 0;
-      const latest = db.prepare(`SELECT MAX(resolved_at) m FROM match_results WHERE game='cs'`).get()?.m || null;
+      // 2026-06-10: IN ('cs','cs2') espelha o reader de lib/cs-ml (sync grava cs2,
+      // seed grava cs) — diagnóstico tem que ver o MESMO universo que o Elo lê.
+      const totalRows = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game IN ('cs','cs2')`).get()?.c || 0;
+      const distinctTeams = db.prepare(`SELECT COUNT(DISTINCT team) c FROM (SELECT team1 AS team FROM match_results WHERE game IN ('cs','cs2') UNION ALL SELECT team2 FROM match_results WHERE game IN ('cs','cs2'))`).get()?.c || 0;
+      const latest = db.prepare(`SELECT MAX(resolved_at) m FROM match_results WHERE game IN ('cs','cs2')`).get()?.m || null;
 
       let pairs = null;
       if (teamsParam) {
