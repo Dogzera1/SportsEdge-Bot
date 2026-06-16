@@ -5554,6 +5554,73 @@ const server = http.createServer(async (req, res) => {
     })();
     return;
   }
+  // ── Tennis Lab — player autocomplete (display-only) ──
+  if (p === '/api/tennis-players' && req.method === 'GET') {
+    try {
+      const rows = db.prepare(`SELECT team1 t FROM match_results WHERE game='tennis' AND team1 IS NOT NULL AND team1!=''
+                               UNION SELECT team2 t FROM match_results WHERE game='tennis' AND team2 IS NOT NULL AND team2!=''`).all();
+      sendJson(res, { ok: true, players: [...new Set(rows.map(r => r.t))].sort((a, b) => a.localeCompare(b)) });
+    } catch (e) { sendJson(res, { ok: false, error: 'players_failed' }, 500); }
+    return;
+  }
+  // Tennis Lab — match analyze (ML headline + Markov markets, display-only, airtight).
+  if (p === '/api/tennis-match-analyze' && req.method === 'POST') {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
+      try {
+        const json = safeParse(body, null);
+        const { analyzeTennisMatch } = require('./lib/tennis-match-lab');
+        const out = analyzeTennisMatch(db, {
+          player1: json?.player1 || null, player2: json?.player2 || null,
+          surface: json?.surface || null, bestOf: json?.bestOf === 5 ? 5 : 3,
+          league: json?.league || '',
+          bookOdds: (json?.bookOdds && typeof json.bookOdds === 'object') ? json.bookOdds : {},
+        });
+        sendJson(res, out);
+      } catch (e) { log('WARN', 'TENNIS-LAB', `analyze err: ${e.message}`); sendJson(res, { ok: false, error: 'tennis_analyze_failed' }, 500); }
+    });
+    return;
+  }
+  // Tennis Lab — AI explain (Sonnet, capped, display-only).
+  if (p === '/api/tennis-match-explain' && req.method === 'POST') {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
+      try {
+        const KEY = process.env.ANTHROPIC_API_KEY;
+        if (!KEY) { sendJson(res, { ok: false, error: 'vision_disabled' }, 503); return; }
+        const json = safeParse(body, null);
+        if (!json?.player1 || !json?.player2) { sendJson(res, { ok: false, error: 'empty_match' }, 400); return; }
+        const ip = getClientIp(req);
+        const cap = parseInt(process.env.AI_ANALYSIS_DAILY_CAP || '30', 10);
+        const _amap = (global._aiAnalysisDayMap = global._aiAnalysisDayMap || new Map());
+        const dayKey = `${ip}|${new Date().toISOString().slice(0, 10)}`;
+        const usedN = _amap.get(dayKey) || 0;
+        if (usedN >= cap) { sendJson(res, { ok: false, error: 'daily_cap_reached', cap }, 429); return; }
+        _amap.set(dayKey, usedN + 1);
+        const { analyzeTennisMatch } = require('./lib/tennis-match-lab');
+        const { buildTennisExplainPrompt, parseTennisExplain } = require('./lib/tennis-match-explain');
+        const bestOf = json?.bestOf === 5 ? 5 : 3;
+        const pred = analyzeTennisMatch(db, {
+          player1: json.player1, player2: json.player2, surface: json?.surface || null,
+          bestOf, league: json?.league || '',
+          bookOdds: (json?.bookOdds && typeof json.bookOdds === 'object') ? json.bookOdds : {},
+        });
+        const prompt = buildTennisExplainPrompt({ pred, players: { player1: json.player1, player2: json.player2 }, surface: pred.headline.surface, bestOf });
+        const model = process.env.AI_ANALYSIS_MODEL || 'claude-sonnet-4-5';
+        const r = await aiPost('anthropic', 'https://api.anthropic.com/v1/messages',
+          { model, max_tokens: 800, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] },
+          { 'x-api-key': KEY, 'anthropic-version': '2023-06-01' }, { timeoutMs: 30000, retry: { maxAttempts: 2 } });
+        try { stmts.incrApiUsage.run('anthropic', new Date().toISOString().slice(0, 7)); } catch (_) {}
+        const rj = r ? safeParse(r.body, {}) : {};
+        const text = (rj?.content || []).map(c => c.text || '').join('');
+        const analysis = parseTennisExplain(text);
+        if (analysis) sendJson(res, { ok: true, analysis });
+        else if (text && text.trim()) sendJson(res, { ok: true, analysis: null, raw: text.slice(0, 1200) });
+        else sendJson(res, { ok: false, error: 'ai_failed' }, 500);
+      } catch (e) { log('WARN', 'TENNIS-LAB', `explain err: ${e.message}`); sendJson(res, { ok: false, error: 'ai_failed' }, 500); }
+    });
+    return;
+  }
   // Dota Lab — team autocomplete (display-only)
   if (p === '/api/dota-teams' && req.method === 'GET') {
     try {
