@@ -1074,6 +1074,26 @@ button { cursor: pointer; }
   display: none;
 }
 #csLab.open { display: block; }
+#tennisLab {
+  position: fixed; top: 56px; left: 0; right: 0; bottom: 0;
+  z-index: 40;
+  overflow-y: auto;
+  background: var(--bg-deep);
+  padding: var(--pad-5) var(--pad-6);
+  display: none;
+}
+#tennisLab.open { display: block; }
+.tn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 620px; }
+.tn-mkt { margin-top: 12px; }
+.tn-mkt h4 { margin: 6px 0; font-size: 13px; opacity: .8; }
+.tn-row { display: flex; gap: 10px; align-items: center; padding: 2px 0; font-size: 13px; flex-wrap: wrap; }
+.tn-odd { display: inline-flex; gap: 6px; align-items: center; }
+.tn-fair { opacity: .8; }
+.tn-book { width: 64px; }
+.tn-edge.pos { color: #4ec9b0; } .tn-edge.neg { color: #e06c75; }
+.tn-flag { color: #e5c07b; font-size: 12px; }
+.tn-warn { color: #e5c07b; font-size: 12px; margin-top: 10px; }
+.tn-raw { font-size: 12px; opacity: .85; white-space: pre-wrap; }
 .dl-paste-hint {
   font-family: var(--font-mono); font-size: 10px;
   color: var(--ink-mute); letter-spacing: 0.04em; text-align: center;
@@ -1335,6 +1355,7 @@ button { cursor: pointer; }
     <button class="btn" id="draftLabBtn" onclick="toggleDraftLab()">⚗ Draft Lab</button>
     <button class="btn" id="dotaLabBtn" onclick="toggleDotaLab()">⚗ Dota Lab</button>
     <button class="btn" id="csLabBtn" onclick="toggleCsLab()">⚗ CS Lab</button>
+    <button class="btn" id="tennisLabBtn" onclick="toggleTennisLab()">🎾 Tennis Lab</button>
   </div>
 </header>
 
@@ -1441,6 +1462,38 @@ button { cursor: pointer; }
     </div>
   </div>
   <div id="dotaResult" style="margin-top: var(--pad-4);"></div>
+</div>
+
+<!-- ── Tennis Lab ──────────────────────────────────────────────── -->
+<div id="tennisLab">
+  <div class="dl-header">
+    <span class="dl-title">Tennis Lab</span>
+    <span class="dl-subtitle">2 jogadores + superfície — P(vence) + mercados (handicap games, totais, sets, tiebreak, aces, DF)</span>
+    <button class="btn" onclick="toggleTennisLab(false)" style="margin-left:auto;">✕ fechar</button>
+  </div>
+  <datalist id="tennisPlayerList"></datalist>
+  <div class="dl-body">
+    <div class="tn-grid">
+      <input class="dl-team-input" id="tn_p1" list="tennisPlayerList" placeholder="Jogador 1" autocomplete="off">
+      <input class="dl-team-input" id="tn_p2" list="tennisPlayerList" placeholder="Jogador 2" autocomplete="off">
+      <select id="tn_surface">
+        <option value="hard">Hard</option>
+        <option value="clay">Clay (saibro)</option>
+        <option value="grass">Grass (grama)</option>
+        <option value="indoor">Indoor</option>
+      </select>
+      <select id="tn_bestof">
+        <option value="3">Melhor de 3 (Bo3)</option>
+        <option value="5">Melhor de 5 (Bo5)</option>
+      </select>
+      <input class="dl-team-input" id="tn_league" placeholder="Torneio (opcional — auto superfície/tier)" autocomplete="off">
+    </div>
+    <div class="dl-actions">
+      <button class="btn primary" id="tennisAnalyzeBtn" onclick="tennisAnalyze()">Analisar partida</button>
+      <div class="dl-error" id="tennisError"></div>
+    </div>
+  </div>
+  <div id="tennisResult" style="margin-top: var(--pad-4);"></div>
 </div>
 
 <!-- ── Draft Lab ───────────────────────────────────────────────── -->
@@ -2609,6 +2662,131 @@ fetch('/api/lol-teams').then(r => r.json()).then(d => {
     dl.appendChild(o);
   }
 }).catch(() => {});
+
+// ── Tennis Lab ───────────────────────────────────────────────────────
+function toggleTennisLab(force) {
+  const lab = document.getElementById('tennisLab');
+  if (!lab) return;
+  const open = typeof force === 'boolean' ? force : !lab.classList.contains('open');
+  lab.classList.toggle('open', open);
+  if (open && !lab._playersLoaded) {
+    lab._playersLoaded = true;
+    fetch('/api/tennis-players').then(r => r.json()).then(d => {
+      if (!d.ok) return;
+      const dl = document.getElementById('tennisPlayerList');
+      dl.innerHTML = '';
+      for (const name of d.players) dl.appendChild(el('option', { value: name }));
+    }).catch(() => { lab._playersLoaded = false; });
+  }
+}
+
+function tennisOddCell(prob) {
+  const wrap = el('span', { class: 'tn-odd' });
+  wrap.appendChild(el('span', { class: 'tn-fair' }, `justa ${(1 / Math.max(1e-6, prob)).toFixed(2)}`));
+  const inp = el('input', { class: 'tn-book', type: 'number', step: '0.01', min: '1.01', placeholder: 'casa' });
+  const edge = el('span', { class: 'tn-edge' });
+  inp.addEventListener('input', () => {
+    const o = parseFloat(inp.value);
+    if (o > 1) { const e = (prob * o - 1) * 100; edge.textContent = `${e >= 0 ? '+' : ''}${e.toFixed(1)}%`; edge.className = 'tn-edge ' + (e >= 0 ? 'pos' : 'neg'); }
+    else { edge.textContent = ''; edge.className = 'tn-edge'; }
+  });
+  wrap.appendChild(inp); wrap.appendChild(edge);
+  return wrap;
+}
+
+async function tennisAnalyze() {
+  const p1 = document.getElementById('tn_p1').value.trim();
+  const p2 = document.getElementById('tn_p2').value.trim();
+  const errEl = document.getElementById('tennisError'); errEl.textContent = '';
+  if (!p1 || !p2) { errEl.textContent = 'Informe os dois jogadores.'; return; }
+  const surface = document.getElementById('tn_surface').value;
+  const bestOf = parseInt(document.getElementById('tn_bestof').value, 10);
+  const league = document.getElementById('tn_league').value.trim();
+  const root = document.getElementById('tennisResult'); root.innerHTML = 'analisando…';
+  try {
+    const r = await fetch('/api/tennis-match-analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ player1: p1, player2: p2, surface, bestOf, league }) });
+    const d = await r.json();
+    if (!d.ok) { root.textContent = 'Falha na análise.'; return; }
+    tennisRender(root, d, { p1, p2 });
+  } catch (e) { root.textContent = 'Falha: ' + e.message; }
+}
+
+function tennisRender(root, d, who) {
+  root.innerHTML = '';
+  const h = d.headline, m = d.markets;
+  const p1 = who.p1, p2 = who.p2;
+  root.appendChild(el('div', { class: 'dl-gp-row' }, `P(${p1} vence): ${(h.probP1 * 100).toFixed(1)}%  ·  ${h.label}  ·  conf ${h.confidence}  ·  ${h.surface} ${h.bestOf === 5 ? 'Bo5' : 'Bo3'}`));
+  root.appendChild(el('div', { class: 'dl-gp-note' }, `Markov de saque: P(${p1}) ${(h.markovProbP1 * 100).toFixed(1)}% (${d.serve.source === 'solved' ? 'estimado do headline' : 'perfis de saque'})`));
+  if (h.divergenceFlag) root.appendChild(el('div', { class: 'tn-flag' }, `⚠ modelo e Markov de saque divergem ${(h.divergence * 100).toFixed(1)}pp — favorece quem saca melhor`));
+
+  if (d.factors && d.factors.length) {
+    const fb = el('div', { class: 'tn-mkt' }, el('h4', {}, 'Fatores do modelo'));
+    for (const f of d.factors) fb.appendChild(el('div', { class: 'tn-row' }, `${f.name}: ${p1} ${f.p1}% vs ${p2} ${f.p2}% (peso ${f.weight})`));
+    root.appendChild(fb);
+  }
+
+  const mlb = el('div', { class: 'tn-mkt' }, el('h4', {}, 'Moneyline'));
+  mlb.appendChild(el('div', { class: 'tn-row' }, `${p1}: ${(m.ml.probP1 * 100).toFixed(1)}%`, tennisOddCell(m.ml.probP1)));
+  mlb.appendChild(el('div', { class: 'tn-row' }, `${p2}: ${(m.ml.probP2 * 100).toFixed(1)}%`, tennisOddCell(m.ml.probP2)));
+  root.appendChild(mlb);
+
+  const hgb = el('div', { class: 'tn-mkt' }, el('h4', {}, `Handicap de games (${p1})`));
+  for (const r of m.handicapGames) hgb.appendChild(el('div', { class: 'tn-row' }, `${r.line > 0 ? '+' : ''}${r.line}: ${(r.prob * 100).toFixed(1)}%`, tennisOddCell(r.prob)));
+  root.appendChild(hgb);
+
+  const tgb = el('div', { class: 'tn-mkt' }, el('h4', {}, 'Total de games'));
+  for (const r of m.totalGames) {
+    tgb.appendChild(el('div', { class: 'tn-row' }, `Over ${r.line}: ${(r.pOver * 100).toFixed(1)}%`, tennisOddCell(r.pOver)));
+    tgb.appendChild(el('div', { class: 'tn-row' }, `Under ${r.line}: ${(r.pUnder * 100).toFixed(1)}%`, tennisOddCell(r.pUnder)));
+  }
+  root.appendChild(tgb);
+
+  const sbb = el('div', { class: 'tn-mkt' }, el('h4', {}, 'Placar de sets (não calibrado)'));
+  for (const r of m.setBetting) sbb.appendChild(el('div', { class: 'tn-row' }, `${r.score}: ${(r.prob * 100).toFixed(1)}%  ·  justa ${r.fairOdd}`));
+  root.appendChild(sbb);
+
+  const tbb = el('div', { class: 'tn-mkt' }, el('h4', {}, 'Tiebreak / sets diretos (não calibrado)'));
+  tbb.appendChild(el('div', { class: 'tn-row' }, `Haver tiebreak na partida: ${(m.tiebreak.pMatchHasTiebreak * 100).toFixed(0)}%  ·  justa sim ${m.tiebreak.fairOddYes} / não ${m.tiebreak.fairOddNo}`));
+  tbb.appendChild(el('div', { class: 'tn-row' }, `Vitória em sets diretos: ${(m.straightSets.prob * 100).toFixed(0)}%  ·  justa ${m.straightSets.fairOdd}`));
+  root.appendChild(tbb);
+
+  if (m.aces) {
+    const ab = el('div', { class: 'tn-mkt' }, el('h4', {}, `Aces (total ~${m.aces.totalAvg}, não calibrado)`));
+    for (const r of m.aces.lines) ab.appendChild(el('div', { class: 'tn-row' }, `Over ${r.line}: ${(r.pOver * 100).toFixed(0)}%  ·  justa ${r.fairOddOver}`));
+    root.appendChild(ab);
+  }
+  if (m.doubleFaults) {
+    const db2 = el('div', { class: 'tn-mkt' }, el('h4', {}, `Double faults (total ~${m.doubleFaults.totalAvg}, não calibrado)`));
+    for (const r of m.doubleFaults.lines) db2.appendChild(el('div', { class: 'tn-row' }, `Over ${r.line}: ${(r.pOver * 100).toFixed(0)}%  ·  justa ${r.fairOddOver}`));
+    root.appendChild(db2);
+  }
+
+  if (d.quality && d.quality.notes && d.quality.notes.length) {
+    root.appendChild(el('div', { class: 'dl-gp-note' }, 'Qualidade: ' + d.quality.notes.join(' · ')));
+  }
+
+  const aiOut = el('div', { class: 'dl-ai-out' });
+  const aiBtn = el('button', { class: 'dl-ai-btn' }, '🤖 Análise da IA');
+  aiBtn.addEventListener('click', () => tennisExplain(aiBtn, aiOut, { p1, p2, surface: h.surface, bestOf: h.bestOf, league: document.getElementById('tn_league').value.trim() }));
+  root.appendChild(el('div', { class: 'dl-gp-ai' }, aiBtn, aiOut));
+  root.appendChild(el('div', { class: 'tn-warn' }, '⚠ display-only — não é sinal de aposta. ML/handicap/totais calibrados; sets/tiebreak/aces/DF são estimativa crua.'));
+}
+
+async function tennisExplain(btn, outEl, ctx) {
+  btn.disabled = true; const old = btn.textContent; btn.textContent = 'analisando…'; outEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/tennis-match-explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ player1: ctx.p1, player2: ctx.p2, surface: ctx.surface, bestOf: ctx.bestOf, league: ctx.league }) });
+    const d = await r.json();
+    if (!d.ok) { outEl.textContent = d.error === 'daily_cap_reached' ? 'Limite diário atingido.' : d.error === 'vision_disabled' ? 'IA indisponível.' : 'Falha.'; return; }
+    if (d.analysis) {
+      [['VISÃO', d.analysis.overview], ['CONFRONTO', d.analysis.matchupRead], ['MERCADOS', d.analysis.marketsRead], ['VEREDITO', d.analysis.verdict]].forEach(([k, v]) => {
+        if (v) outEl.appendChild(el('div', { class: 'dl-ai-row' }, el('span', { class: 'dl-ai-k' }, k), el('span', {}, v)));
+      });
+    } else if (d.raw) outEl.appendChild(el('div', { class: 'tn-raw' }, d.raw));
+    outEl.appendChild(el('div', { class: 'tn-warn' }, '⚠ leitura da IA (conhecimento geral) — não é sinal de aposta'));
+  } catch (e) { outEl.textContent = 'Falha: ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
 
 // ── Dota Lab ─────────────────────────────────────────────────────────
 function toggleDotaLab(force) {
