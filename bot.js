@@ -7486,6 +7486,19 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
 
     const stakeStr = typeof stakeAdjusted === 'number' ? `${stakeAdjusted}u` : String(stakeAdjusted || '1u');
     const conf = tip.ev >= 15 ? 'ALTA' : tip.ev >= 8 ? 'MÉDIA' : 'BAIXA';
+    // 2026-06-16: desliga emissão REAL de tennis HG confidence=MÉDIA (EV∈[8,15)).
+    // Leak real persistente na grama (−26% ROI n=12/14d) com stake já no piso 0.5u
+    // (nenhuma MÉDIA pega o gold-boost EV≥15) → cap de stake é inócuo, só curtar
+    // emissão reduz exposição. Shadow segue logado (research preservado, P2). ALTA
+    // (EV≥15, +13,6% motor) intacto. Reavaliar pós-grama: TENNIS_HG_MEDIA_ENABLED=true.
+    if (sport === 'tennis'
+        && String(marketKey || '').toLowerCase() === 'handicapgames'
+        && conf === 'MÉDIA'
+        && /^(0|false|no)$/i.test(String(process.env.TENNIS_HG_MEDIA_ENABLED ?? 'false'))) {
+      log('INFO', 'TENNIS-HG-MEDIA-OFF',
+        `${match.team1} vs ${match.team2} [${match.league}] EV ${tip.ev}% → MÉDIA HG real desligado (shadow logged). TENNIS_HG_MEDIA_ENABLED=true restaura.`);
+      return null;
+    }
     const rec = await serverPost('/record-tip', {
       matchId: syntheticMatchId,
       eventName: match.league || sport,
