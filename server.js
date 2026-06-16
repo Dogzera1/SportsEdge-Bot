@@ -5563,6 +5563,32 @@ const server = http.createServer(async (req, res) => {
     } catch (e) { sendJson(res, { ok: false, error: 'players_failed' }, 500); }
     return;
   }
+  // Tennis Lab — upcoming matches (ESPN) for one-click prefill (display-only).
+  if (p === '/api/tennis-upcoming' && req.method === 'GET') {
+    (async () => {
+      try {
+        const { getScoreboard } = require('./lib/tennis-data');
+        const out = [];
+        for (const tour of ['atp', 'wta']) {
+          let sb = null;
+          try { sb = await getScoreboard(tour); } catch (_) { sb = null; } // best-effort: um tour falhar não derruba o outro
+          const events = (sb && Array.isArray(sb.events)) ? sb.events : [];
+          for (const ev of events) {
+            const comp = ev?.competitions?.[0];
+            const cs = comp?.competitors || [];
+            if (cs.length < 2) continue;
+            const name = (c) => c?.athlete?.displayName || c?.athlete?.shortName || null;
+            const p1 = name(cs[0]); const p2 = name(cs[1]);
+            if (!p1 || !p2) continue;
+            const tournament = ev?.name || comp?.notes?.[0]?.headline || '';
+            out.push({ player1: p1, player2: p2, tournament, tour, startTime: ev?.date || null });
+          }
+        }
+        sendJson(res, { ok: true, matches: out.slice(0, 40) });
+      } catch (e) { log('WARN', 'TENNIS-LAB', `upcoming err: ${e.message}`); sendJson(res, { ok: false, error: 'upcoming_failed', matches: [] }, 200); }
+    })();
+    return;
+  }
   // Tennis Lab — match analyze (ML headline + Markov markets, display-only, airtight).
   if (p === '/api/tennis-match-analyze' && req.method === 'POST') {
     _readPostBody(req, res, (body) => {

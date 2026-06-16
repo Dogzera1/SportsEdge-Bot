@@ -1492,6 +1492,7 @@ button { cursor: pointer; }
       <button class="btn primary" id="tennisAnalyzeBtn" onclick="tennisAnalyze()">Analisar partida</button>
       <div class="dl-error" id="tennisError"></div>
     </div>
+    <div class="tn-mkt"><h4>Jogos próximos (clique pra preencher)</h4><div id="tennisUpcoming" class="tn-row">carregando…</div></div>
   </div>
   <div id="tennisResult" style="margin-top: var(--pad-4);"></div>
 </div>
@@ -2677,6 +2678,21 @@ function toggleTennisLab(force) {
       dl.innerHTML = '';
       for (const name of d.players) dl.appendChild(el('option', { value: name }));
     }).catch(() => { lab._playersLoaded = false; });
+    fetch('/api/tennis-upcoming').then(r => r.json()).then(d => {
+      const box = document.getElementById('tennisUpcoming'); box.innerHTML = '';
+      if (!d.ok || !d.matches.length) { box.textContent = '(sem jogos próximos)'; return; }
+      for (const mt of d.matches) {
+        const b = el('button', { class: 'btn' }, `${mt.player1} vs ${mt.player2}${mt.tournament ? ' · ' + mt.tournament : ''}`);
+        b.addEventListener('click', () => {
+          document.getElementById('tn_p1').value = mt.player1;
+          document.getElementById('tn_p2').value = mt.player2;
+          if (/roland|french|monte|madrid|rome|clay|saibro/i.test(mt.tournament)) document.getElementById('tn_surface').value = 'clay';
+          else if (/wimbledon|grass|queen|halle/i.test(mt.tournament)) document.getElementById('tn_surface').value = 'grass';
+          document.getElementById('tn_league').value = mt.tournament || '';
+        });
+        box.appendChild(b);
+      }
+    }).catch(() => { const box = document.getElementById('tennisUpcoming'); if (box) box.textContent = '(falha ao carregar)'; });
   }
 }
 
