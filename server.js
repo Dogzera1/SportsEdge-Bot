@@ -2622,6 +2622,48 @@ const FOOTBALL_ALIASES = {
   'botafogo': ['botafogofr'],
   'gremio': ['gremiofbpa'],
   'gremiofbpa': ['gremio'],
+  // ── Seleções — win/loss match (pick PT-BR do aggregator vs winner EN da ESPN).
+  // 2026-06-16: row-finding usa _TEAM_ALIASES (lib/football-poisson-trained, _norm
+  // que strip de/da/do); ESTE path (nameMatches) usa norm() de lib/utils que NÃO
+  // strip do → daí costadomarfim/africadosul/coreiadosul COM 'do'. Sem isto a tip
+  // achava o jogo mas settlava loss mesmo o time escolhido tendo vencido (Ex:
+  // França venceu 3-1 mas tip França marcava loss). Só seleções com norm PT ≠ EN.
+  'brasil': ['brazil'], 'brazil': ['brasil'],
+  'franca': ['france'], 'france': ['franca'],
+  'alemanha': ['germany'], 'germany': ['alemanha'],
+  'espanha': ['spain'], 'spain': ['espanha'],
+  'inglaterra': ['england'], 'england': ['inglaterra'],
+  'escocia': ['scotland'], 'scotland': ['escocia'],
+  'paisesbaixos': ['netherlands'], 'holanda': ['netherlands'], 'netherlands': ['holanda', 'paisesbaixos'],
+  'belgica': ['belgium'], 'belgium': ['belgica'],
+  'suica': ['switzerland'], 'switzerland': ['suica'],
+  'croacia': ['croatia'], 'croatia': ['croacia'],
+  'suecia': ['sweden'], 'sweden': ['suecia'],
+  'noruega': ['norway'], 'norway': ['noruega'],
+  'turquia': ['turkiye', 'turkey'], 'turkiye': ['turquia'], 'turkey': ['turquia'],
+  'uzbequistao': ['uzbekistan'], 'uzbekistan': ['uzbequistao'],
+  'tchequia': ['czechia'], 'republicatcheca': ['czechia'], 'czechia': ['tchequia', 'republicatcheca'],
+  'bosnia': ['bosniaherzegovina'], 'bosniaeherzegovina': ['bosniaherzegovina'], 'bosniaherzegovina': ['bosnia', 'bosniaeherzegovina'],
+  'marrocos': ['morocco'], 'morocco': ['marrocos'],
+  'argelia': ['algeria'], 'algeria': ['argelia'],
+  'egito': ['egypt'], 'egypt': ['egito'],
+  'costadomarfim': ['ivorycoast'], 'ivorycoast': ['costadomarfim'],
+  'caboverde': ['capeverde'], 'capeverde': ['caboverde'],
+  'africadosul': ['southafrica'], 'southafrica': ['africadosul'],
+  'gana': ['ghana'], 'ghana': ['gana'],
+  'rdcongo': ['congodr'], 'republicademocraticadocongo': ['congodr'], 'congodr': ['rdcongo'],
+  'uruguai': ['uruguay'], 'uruguay': ['uruguai'],
+  'paraguai': ['paraguay'], 'paraguay': ['paraguai'],
+  'equador': ['ecuador'], 'ecuador': ['equador'],
+  'estadosunidos': ['unitedstates'], 'eua': ['unitedstates'], 'unitedstates': ['estadosunidos'],
+  'ira': ['iran'], 'iran': ['ira'],
+  'iraque': ['iraq'], 'iraq': ['iraque'],
+  'arabiasaudita': ['saudiarabia'], 'saudiarabia': ['arabiasaudita'],
+  'jordania': ['jordan'], 'jordan': ['jordania'],
+  'catar': ['qatar'], 'qatar': ['catar'],
+  'coreiadosul': ['southkorea'], 'southkorea': ['coreiadosul'],
+  'japao': ['japan'], 'japan': ['japao'],
+  'novazelandia': ['newzealand'], 'newzealand': ['novazelandia'],
 };
 
 function findOdds(sport, t1, t2) {
